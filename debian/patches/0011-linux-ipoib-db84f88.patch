@@ -1,0 +1,192 @@
+Description: Use P_Key change event instead of P_Key polling mechanism
+ From Linux db84f88:
+ .
+ The current code use a dedicated polling logic to determine when the P_Key
+ assigned to the ipoib device is present in HCA port table and act accordingly.
+ .
+ Move to use the code which acts upon getting PKEY_CHANGE event to handle this
+ task and remove the P_Key polling logic/thread as they add extra complexity
+ which isn't needed.
+ .
+ ifs-kernel-updates (3.16.0.491-1ifs) UNRELEASED; urgency=medium
+ .
+     * Convert to quilt. Corrected version.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Copyright: 2017 System Fabric Works, Inc. All Rights Reserved.
+Origin: https://github.com/torvalds/linux/commit/db84f88037592f069f5c1fc7f6b00ae6f5eb2e84#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-06-06>
+
+---
+
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
+@@ -86,7 +86,6 @@ enum {
+ 	IPOIB_FLAG_INITIALIZED	  = 1,
+ 	IPOIB_FLAG_ADMIN_UP	  = 2,
+ 	IPOIB_PKEY_ASSIGNED	  = 3,
+-	IPOIB_PKEY_STOP		  = 4,
+ 	IPOIB_FLAG_SUBINTERFACE	  = 5,
+ 	IPOIB_MCAST_RUN		  = 6,
+ 	IPOIB_STOP_REAPER	  = 7,
+@@ -313,7 +312,6 @@ struct ipoib_dev_priv {
+ 	struct list_head multicast_list;
+ 	struct rb_root multicast_tree;
+ 
+-	struct delayed_work pkey_poll_task;
+ 	struct delayed_work mcast_task;
+ 	struct work_struct carrier_on_task;
+ 	struct work_struct flush_light;
+@@ -479,6 +477,7 @@ int ipoib_ib_dev_open(struct net_device
+ int ipoib_ib_dev_up(struct net_device *dev);
+ int ipoib_ib_dev_down(struct net_device *dev, int flush);
+ int ipoib_ib_dev_stop(struct net_device *dev, int flush);
++void ipoib_pkey_dev_check_presence(struct net_device *dev);
+ 
+ int ipoib_dev_init(struct net_device *dev, struct ib_device *ca, int port);
+ void ipoib_dev_cleanup(struct net_device *dev);
+@@ -534,8 +533,7 @@ int  ipoib_set_mode(struct net_device *d
+ 
+ void ipoib_setup(struct net_device *dev);
+ 
+-void ipoib_pkey_poll(struct work_struct *work);
+-int ipoib_pkey_dev_delay_open(struct net_device *dev);
++void ipoib_pkey_open(struct ipoib_dev_priv *priv);
+ void ipoib_drain_cq(struct net_device *dev);
+ 
+ void ipoib_set_ethtool_ops(struct net_device *dev);
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
+@@ -709,7 +709,7 @@ dev_stop:
+ 	return -1;
+ }
+ 
+-static void ipoib_pkey_dev_check_presence(struct net_device *dev)
++void ipoib_pkey_dev_check_presence(struct net_device *dev)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	u16 pkey_index = 0;
+@@ -745,14 +745,6 @@ int ipoib_ib_dev_down(struct net_device
+ 	clear_bit(IPOIB_FLAG_OPER_UP, &priv->flags);
+ 	netif_carrier_off(dev);
+ 
+-	/* Shutdown the P_Key thread if still active */
+-	if (!test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags)) {
+-		mutex_lock(&pkey_mutex);
+-		set_bit(IPOIB_PKEY_STOP, &priv->flags);
+-		cancel_delayed_work_sync(&priv->pkey_poll_task);
+-		mutex_unlock(&pkey_mutex);
+-	}
+-
+ 	ipoib_mcast_stop_thread(dev, flush);
+ 	ipoib_mcast_dev_flush(dev);
+ 
+@@ -988,9 +980,12 @@ static void __ipoib_ib_dev_flush(struct
+ 
+ 	if (!test_bit(IPOIB_FLAG_INITIALIZED, &priv->flags)) {
+ 		/* for non-child devices must check/update the pkey value here */
+-		if (level == IPOIB_FLUSH_HEAVY &&
+-		    !test_bit(IPOIB_FLAG_SUBINTERFACE, &priv->flags))
+-			update_parent_pkey(priv);
++		if (level == IPOIB_FLUSH_HEAVY) {
++			if (test_bit(IPOIB_FLAG_SUBINTERFACE, &priv->flags))
++				ipoib_pkey_open(priv);
++			else
++				update_parent_pkey(priv);
++		}
+ 		ipoib_dbg(priv, "Not flushing - IPOIB_FLAG_INITIALIZED not set.\n");
+ 		return;
+ 	}
+@@ -1009,8 +1004,7 @@ static void __ipoib_ib_dev_flush(struct
+ 				clear_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
+ 				ipoib_ib_dev_down(dev, 0);
+ 				ipoib_ib_dev_stop(dev, 0);
+-				if (ipoib_pkey_dev_delay_open(dev))
+-					return;
++				return;
+ 			}
+ 			/* restart QP only if P_Key index is changed */
+ 			if (test_and_set_bit(IPOIB_PKEY_ASSIGNED, &priv->flags) &&
+@@ -1103,54 +1097,15 @@ void ipoib_ib_dev_cleanup(struct net_dev
+ 	ipoib_transport_dev_cleanup(dev);
+ }
+ 
+-/*
+- * Delayed P_Key Assigment Interim Support
+- *
+- * The following is initial implementation of delayed P_Key assigment
+- * mechanism. It is using the same approach implemented for the multicast
+- * group join. The single goal of this implementation is to quickly address
+- * Bug #2507. This implementation will probably be removed when the P_Key
+- * change async notification is available.
+- */
+-
+-void ipoib_pkey_poll(struct work_struct *work)
++void ipoib_pkey_open(struct ipoib_dev_priv *priv)
+ {
+-	struct ipoib_dev_priv *priv =
+-		container_of(work, struct ipoib_dev_priv, pkey_poll_task.work);
+-	struct net_device *dev = priv->dev;
+ 
+-	ipoib_pkey_dev_check_presence(dev);
++	if (test_bit(IPOIB_FLAG_INITIALIZED, &priv->flags))
++		return;
++
++	ipoib_pkey_dev_check_presence(priv->dev);
+ 
+ 	if (test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags))
+-		ipoib_open(dev);
+-	else {
+-		mutex_lock(&pkey_mutex);
+-		if (!test_bit(IPOIB_PKEY_STOP, &priv->flags))
+-			queue_delayed_work(ipoib_workqueue,
+-					   &priv->pkey_poll_task,
+-					   HZ);
+-		mutex_unlock(&pkey_mutex);
+-	}
++		ipoib_open(priv->dev);
+ }
+ 
+-int ipoib_pkey_dev_delay_open(struct net_device *dev)
+-{
+-	struct ipoib_dev_priv *priv = netdev_priv(dev);
+-
+-	/* Look for the interface pkey value in the IB Port P_Key table and */
+-	/* set the interface pkey assigment flag                            */
+-	ipoib_pkey_dev_check_presence(dev);
+-
+-	/* P_Key value not assigned yet - start polling */
+-	if (!test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags)) {
+-		mutex_lock(&pkey_mutex);
+-		clear_bit(IPOIB_PKEY_STOP, &priv->flags);
+-		queue_delayed_work(ipoib_workqueue,
+-				   &priv->pkey_poll_task,
+-				   HZ);
+-		mutex_unlock(&pkey_mutex);
+-		return 1;
+-	}
+-
+-	return 0;
+-}
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
+@@ -108,7 +108,10 @@ int ipoib_open(struct net_device *dev)
+ 
+ 	set_bit(IPOIB_FLAG_ADMIN_UP, &priv->flags);
+ 
+-	if (ipoib_pkey_dev_delay_open(dev))
++
++	ipoib_pkey_dev_check_presence(dev);
++
++	if (!test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags))
+ 		return 0;
+ 
+ 	if (ipoib_ib_dev_open(dev))
+@@ -1381,7 +1384,6 @@ void ipoib_setup(struct net_device *dev)
+ 	INIT_LIST_HEAD(&priv->dead_ahs);
+ 	INIT_LIST_HEAD(&priv->multicast_list);
+ 
+-	INIT_DELAYED_WORK(&priv->pkey_poll_task, ipoib_pkey_poll);
+ 	INIT_DELAYED_WORK(&priv->mcast_task,   ipoib_mcast_join_task);
+ 	INIT_WORK(&priv->carrier_on_task, ipoib_mcast_carrier_on_task);
+ 	INIT_WORK(&priv->flush_light,   ipoib_ib_dev_flush_light);

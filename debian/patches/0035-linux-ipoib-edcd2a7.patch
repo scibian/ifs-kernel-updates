@@ -1,0 +1,29 @@
+Description: ifs-kernel-updates: ib_ipoib: Set MTU to max allowed by mode when mode changes
+ From linux edcd2a7:
+ .
+ When switching between modes (datagram / connected) change the MTU
+ accordingly.
+ datagram mode up to 4K, connected mode up to (64K - 0x10).
+ .
+ ifs-kernel-updates (3.16.0.491-1ifs) UNRELEASED; urgency=medium
+ .
+     * Convert to quilt. Corrected version.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Copyright: 2017 System Fabric Works, Inc. All Rights Reserved.
+Origin: https://github.com/torvalds/linux/commit/edcd2a7474ba3b47e54c3c9a300287342de74766#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-06-06>
+
+---
+
+
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
+@@ -232,6 +232,7 @@ int ipoib_set_mode(struct net_device *de
+ 		ipoib_warn(priv, "enabling connected mode "
+ 			   "will cause multicast packet drops\n");
+ 		netdev_update_features(dev);
++		dev_set_mtu(dev, ipoib_cm_max_mtu(dev));
+ 		rtnl_unlock();
+ 		priv->tx_wr.send_flags &= ~IB_SEND_IP_CSUM;
+ 

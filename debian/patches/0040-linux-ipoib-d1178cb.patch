@@ -1,0 +1,54 @@
+Description: Suppress warning for send only join failures
+ From linux d1178cb:
+ .
+ We expect send only joins to fail, it just means there are no listeners
+ for the group. The correct thing to do is silently drop the packet
+ at source.
+ .
+ Eg avahi will full join 224.0.0.251 which causes a send only IGMP packet
+ to 224.0.0.22, and then a warning level kmessage like this:
+ .
+ ib0: sendonly multicast join failed for ff12:401b:ffff:0000:0000:0000:0000:0016, status -22
+ .
+ If there is no IP router listening to IGMP..
+ .
+ ifs-kernel-updates (3.16.0.491-1ifs) UNRELEASED; urgency=medium
+ .
+     * Convert to quilt. Corrected version.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Copyright: 2017 System Fabric Works, Inc. All Rights Reserved.
+Origin: https://github.com/torvalds/linux/commit/d1178cbcdcf91900ccf10a177350d7945703c151#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-06-06>
+
+---
+
+
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
+@@ -393,8 +393,13 @@ static int ipoib_mcast_join_complete(int
+ 			goto out_locked;
+ 		}
+ 	} else {
+-		if (mcast->logcount++ < 20) {
+-			if (status == -ETIMEDOUT || status == -EAGAIN) {
++		bool silent_fail =
++		    test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags) &&
++		    status == -EINVAL;
++
++		if (mcast->logcount < 20) {
++			if (status == -ETIMEDOUT || status == -EAGAIN ||
++			    silent_fail) {
+ 				ipoib_dbg_mcast(priv, "%smulticast join failed for %pI6, status %d\n",
+ 						test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags) ? "sendonly " : "",
+ 						mcast->mcmember.mgid.raw, status);
+@@ -403,6 +408,9 @@ static int ipoib_mcast_join_complete(int
+ 						test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags) ? "sendonly " : "",
+ 					   mcast->mcmember.mgid.raw, status);
+ 			}
++
++			if (!silent_fail)
++				mcast->logcount++;
+ 		}
+ 
+ 		if (test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags) &&

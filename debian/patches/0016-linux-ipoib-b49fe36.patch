@@ -1,0 +1,52 @@
+Description: validate struct ipoib_cb size
+ From linux b49fe36:
+ .
+ To catch future errors sooner.
+ .
+ ifs-kernel-updates (3.16.0.491-1ifs) UNRELEASED; urgency=medium
+ .
+     * Convert to quilt. Corrected version.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Copyright: 2017 System Fabric Works, Inc. All Rights Reserved.
+Origin: https://github.com/torvalds/linux/commit/b49fe36208b45f76dfbcfcd3afd952a33fa9f5ce#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-06-06>
+
+---
+
+
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
+@@ -132,6 +132,12 @@ struct ipoib_cb {
+ 	u8			hwaddr[INFINIBAND_ALEN];
+ };
+ 
++static inline struct ipoib_cb *ipoib_skb_cb(const struct sk_buff *skb)
++{
++	BUILD_BUG_ON(sizeof(skb->cb) < sizeof(struct ipoib_cb));
++	return (struct ipoib_cb *)skb->cb;
++}
++
+ /* Used for all multicast joins (broadcast, IPv4 mcast and IPv6 mcast) */
+ struct ipoib_mcast {
+ 	struct ib_sa_mcmember_rec mcmember;
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
+@@ -716,7 +716,7 @@ static int ipoib_start_xmit(struct sk_bu
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	struct ipoib_neigh *neigh;
+-	struct ipoib_cb *cb = (struct ipoib_cb *) skb->cb;
++	struct ipoib_cb *cb = ipoib_skb_cb(skb);
+ 	struct ipoib_header *header;
+ 	unsigned long flags;
+ 
+@@ -813,7 +813,7 @@ static int ipoib_hard_header(struct sk_b
+ 			     const void *daddr, const void *saddr, unsigned len)
+ {
+ 	struct ipoib_header *header;
+-	struct ipoib_cb *cb = (struct ipoib_cb *) skb->cb;
++	struct ipoib_cb *cb = ipoib_skb_cb(skb);
+ 
+ 	header = (struct ipoib_header *) skb_push(skb, sizeof *header);
+ 

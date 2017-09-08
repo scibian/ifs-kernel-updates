@@ -1,0 +1,56 @@
+Description: Check bounds of index passed to get_sguid
+ gcc complained about lack of bounds checking when called get_sguid.
+ This patch adds the bounds checking.
+ .
+ ifs-kernel-updates (3.16.0-616-1ifs) UNRELEASED; urgency=medium
+ .
+     * Import ifs-kernel-updates 3.10.0_327 from IFS 10.4.2.0.7 upstream.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Copyright: 2017 System Fabric Works, Inc. All Rights Reserved.
+Forwarded: no
+Last-Update: <2017-07-11>
+
+---
+The information above should follow the Patch Tagging Guidelines, please
+checkout http://dep.debian.net/deps/dep3/ to learn about the format. Here
+are templates for supplementary fields that you might want to add:
+
+Origin: <vendor|upstream|other>, <url of original patch>
+Bug: <url in upstream bugtracker>
+Bug-Debian: https://bugs.debian.org/<bugnumber>
+Bug-Ubuntu: https://launchpad.net/bugs/<bugnumber>
+Forwarded: <no|not-needed|url proving that it has been forwarded>
+Reviewed-By: <name and email of someone who approved the patch>
+Last-Update: <YYYY-MM-DD>
+
+--- a/hfi1/ruc.c
++++ b/hfi1/ruc.c
+@@ -237,6 +237,8 @@
+ 		} else {
+ 			if (!(qp->alt_ah_attr.ah_flags & IB_AH_GRH))
+ 				return 1;
++			if (qp->alt_ah_attr.grh.sgid_index >= HFI1_GUIDS_PER_PORT)
++				return 1;
+ 			guid = get_sguid(ibp, qp->alt_ah_attr.grh.sgid_index);
+ 			if (!gid_ok(&packet->grh->dgid, ibp->rvp.gid_prefix,
+ 				    guid))
+@@ -267,6 +269,8 @@
+ 		} else {
+ 			if (!(qp->remote_ah_attr.ah_flags & IB_AH_GRH))
+ 				return 1;
++			if (qp->remote_ah_attr.grh.sgid_index >= HFI1_GUIDS_PER_PORT)
++				return 1;
+ 			guid = get_sguid(ibp,
+ 					 qp->remote_ah_attr.grh.sgid_index);
+ 			if (!gid_ok(&packet->grh->dgid, ibp->rvp.gid_prefix,
+--- a/hfi1/verbs.c
++++ b/hfi1/verbs.c
+@@ -1660,7 +1660,7 @@
+ {
+ 	struct hfi1_ibport *ibp = container_of(rvp, struct hfi1_ibport, rvp);
+ 
+-	if (guid_index >= HFI1_GUIDS_PER_PORT)
++	if (guid_index < 0 || guid_index >= HFI1_GUIDS_PER_PORT)
+ 		return -EINVAL;
+ 
+ 	*guid = get_sguid(ibp, guid_index);

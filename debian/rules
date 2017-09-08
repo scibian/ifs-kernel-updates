@@ -1,0 +1,47 @@
+#!/usr/bin/make -f
+#
+# Copyright (c)2017 System Fabric Works, Inc. All Rights Reserved,
+#
+
+#export DH_VERBOSE=1
+
+export CFLAGS=
+
+# used by debian/gen-compat-config
+export CONFIG_OPTS=CONFIG_COMPAT=y \
+	CONFIG_INFINIBAND_HFI1=m \
+	CONFIG_HFI1_VERBS_31BIT_PSN=y \
+	CONFIG_INFINIBAND_RDMAVT=m \
+	CONFIG_INFINIBAND_SRPT=m \
+	CONFIG_INFINIBAND_IPOIB=m \
+	CONFIG_INFINIBAND_IPOIB_CM=y
+
+MJOBS=$(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
+ifeq ($(strip $(MJOBS)),)
+MJOBS=1
+endif
+
+KDIR ?= /lib/modules/$(shell uname -r)/build/
+export KDIR
+
+%:
+	dh $@ --parallel
+
+override_dh_auto_configure:
+	./debian/gen-compat-config-deb > ifs-kernel-updates-conf.h
+
+override_dh_auto_clean:
+	rm -f ifs-kernel-updates-conf.h
+	rm -f debian/unifdef
+	dh_auto_clean $@
+
+override_dh_auto_build:
+	cd debian && gcc unifdef.c -o unifdef
+	$(MAKE) -j$(MJOBS) $(CONFIG_OPTS) M=$$PWD V=1
+
+override_dh_auto_install:
+	dh_auto_install $@
+	install -m 0755 -d debian/tmp/usr/include/rdma/hfi/
+	./debian/headers_install debian/tmp/usr/include/rdma/hfi/ $(CURDIR) include/update/hfi1_user.h
+
+

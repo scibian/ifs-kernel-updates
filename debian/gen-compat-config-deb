@@ -1,0 +1,47 @@
+#!/bin/bash
+# Copyright 2013        Mellanox Technologies. All rights reserved.
+# Copyright 2012        Luis R. Rodriguez <mcgrof@frijolero.org>
+# Copyright 2012        Hauke Mehrtens <hauke@hauke-m.de>
+# Copyright 2017        System Fabric Works, Inc. All Rights Reserved
+
+echo "/* KDIR = $KDIR */"
+function set_config {
+        VAR=$1
+        VALUE=$2
+
+        eval "export $VAR=$VALUE"
+        echo "#define $VAR $VALUE"
+}
+function unset_config {
+        VAR=$1
+
+        eval "unset $VAR"
+        echo "#undef $VAR"
+}
+
+
+if (! grep -q ib_safe_file_access `dirname ${KDIR}`/source/include/rdma/ib.h > /dev/null 2>&1 ); then
+        set_config CONFIG_COMPAT_IB_SAFE_FILE_ACCESS 1
+fi
+
+if [ ! -f ${KDIR}/source/include/linux/rhashtable.h ] ; then
+	set_config CONFIG_COMPAT_RHASHTABLE 1
+fi
+
+KERNEL_VER=`uname -r | sed 's/\([^-]*\).*/\1/'`
+if [ $KERNEL_VER == "3.16.0" ] ; then
+	set_config CONFIG_COMPAT_KERNEL_3_16 1
+fi
+
+for CONF in $CONFIG_OPTS ; do
+	CNAME=`echo $CONF | cut -f1 -d=`
+	CVAL=`echo $CONF | cut -f2 -d=`
+
+	if [ "y" == "$CVAL" -o "m" == "$CVAL" ] ; then
+		set_config $CNAME 1
+	else
+		unset_config $CNAME
+	fi
+done
+
+

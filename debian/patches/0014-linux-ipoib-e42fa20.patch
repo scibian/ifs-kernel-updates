@@ -1,0 +1,34 @@
+Description: Remove unnecessary test for NULL before debugfs_remove() 
+ From linux e42fa20:
+ .
+ Fix checkpatch warning:
+ .
+ WARNING: debugfs_remove(NULL) is safe this check is probably not required
+ .
+ ifs-kernel-updates (3.16.0.491-1ifs) UNRELEASED; urgency=medium
+ .
+     * Convert to quilt. Corrected version.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Copyright: 2017 System Fabric Works, Inc. All Rights Reserved.
+Origin: https://github.com/torvalds/linux/commit/e42fa2092c1049ac9c0e38aaac39ef3c40e91a36#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-06-06>
+
+---
+
+
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_fs.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_fs.c
+@@ -281,10 +281,8 @@ void ipoib_delete_debug_files(struct net
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 
+-	if (priv->mcg_dentry)
+-		debugfs_remove(priv->mcg_dentry);
+-	if (priv->path_dentry)
+-		debugfs_remove(priv->path_dentry);
++	debugfs_remove(priv->mcg_dentry);
++	debugfs_remove(priv->path_dentry);
+ }
+ 
+ int ipoib_register_debugfs(void)

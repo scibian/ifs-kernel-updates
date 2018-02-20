@@ -1,0 +1,35 @@
+Description: Fix bad error flow in ipoib_add_port()
+ Patch 58e9cc9:
+ .
+ Error values of ib_query_port() and ib_query_device() weren't propagated
+ correctly. Because of that, ipoib_add_port() could return NULL value,
+ which escaped the IS_ERR() check in ipoib_add_one() and we crashed.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Amir Vadai <amirv@mellanox.com>
+Origin: https://github.com/torvalds/linux/commit/58e9cc90cda7bc732856a2ad3210328fbc4f6ca2#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
+@@ -1567,7 +1567,8 @@ static struct net_device *ipoib_add_port
+ 	SET_NETDEV_DEV(priv->dev, hca->dma_device);
+ 	priv->dev->dev_id = port - 1;
+ 
+-	if (!ib_query_port(hca, port, &attr))
++	result = ib_query_port(hca, port, &attr);
++	if (!result)
+ 		priv->max_ib_mtu = ib_mtu_enum_to_int(attr.max_mtu);
+ 	else {
+ 		printk(KERN_WARNING "%s: ib_query_port %d failed\n",
+@@ -1588,7 +1589,8 @@ static struct net_device *ipoib_add_port
+ 		goto device_init_failed;
+ 	}
+ 
+-	if (ipoib_set_dev_features(priv, hca))
++	result = ipoib_set_dev_features(priv, hca);
++	if (result)
+ 		goto device_init_failed;
+ 
+ 	/*

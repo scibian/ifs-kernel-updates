@@ -223,7 +223,7 @@ struct hfi1_ctxtdata {
 	struct kref kref;
 
 	/* Device context index */
-	unsigned ctxt;
+	u16 ctxt;
 	/*
 	 * non-zero if ctxt can be shared, and defines the maximum number of
 	 * sub-contexts for this device context.
@@ -256,24 +256,10 @@ struct hfi1_ctxtdata {
 	/* Queue for QP's waiting for HW receive array entries */
 	struct tid_queue rarr_queue;
 
-	/* number of pio bufs for this ctxt (all procs, if shared) */
-	u32 piocnt;
-	/* first pio buffer for this ctxt */
-	u32 pio_base;
-	/* chip offset of PIO buffers for this ctxt */
-	u32 piobufs;
 	/* per-context configuration flags */
 	unsigned long flags;
 	/* per-context event flags for fileops/intr communication */
 	unsigned long event_flags;
-	/* WAIT_RCV that timed out, no interrupt */
-	u32 rcvwait_to;
-	/* WAIT_PIO that timed out, no interrupt */
-	u32 piowait_to;
-	/* WAIT_RCV already happened, no wait */
-	u32 rcvnowait;
-	/* WAIT_PIO already happened, no wait */
-	u32 pionowait;
 	/* total number of polled urgent packets */
 	u32 urgent;
 	/* saved total number of polled urgent packets for poll edge trigger */
@@ -301,7 +287,6 @@ struct hfi1_ctxtdata {
 	u8 redirect_seq_cnt;
 	/* ctxt rcvhdrq head offset */
 	u32 head;
-	u32 pkt_count;
 	/* QPs waiting for context processing */
 	struct list_head qp_wait_list;
 	/* interrupt handling */
@@ -310,15 +295,6 @@ struct hfi1_ctxtdata {
 	unsigned numa_id; /* numa node of this context */
 	/* verbs stats per CTX */
 	struct hfi1_opcode_stats_perctx *opstats;
-	/*
-	 * This is the kernel thread that will keep making
-	 * progress on the user sdma requests behind the scenes.
-	 * There is one per context (shared contexts use the master's).
-	 */
-	struct task_struct *progress;
-	struct list_head sdma_queues;
-	/* protect sdma queues */
-	spinlock_t sdma_qlock;
 
 	/* Is ASPM interrupt supported for this context */
 	bool aspm_intr_supported;
@@ -691,7 +667,7 @@ struct hfi1_pportdata {
 	u8 link_enabled;	/* link enabled? */
 	u8 linkinit_reason;
 	u8 local_tx_rate;	/* rate given to 8051 firmware */
-	u8 last_pstate;		/* info only */
+	u8 pstate;		/* info only */
 	u8 qsfp_retry_count;
 
 	/* placeholders for IB MAD packet settings */
@@ -1284,10 +1260,10 @@ void handle_user_interrupt(struct hfi1_ctxtdata *rcd);
 int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd);
 int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd);
 int hfi1_create_ctxts(struct hfi1_devdata *dd);
-struct hfi1_ctxtdata *hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, u32 ctxt,
+struct hfi1_ctxtdata *hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, u16 ctxt,
 					   int numa);
-int hfi1_init_pportdata(struct pci_dev *pdev, struct hfi1_pportdata *ppd,
-			 struct hfi1_devdata *dd, u8 hw_pidx, u8 port);
+int hfi1_init_pportdata(struct pci_dev *, struct hfi1_pportdata *,
+			struct hfi1_devdata *, u8, u8);
 void hfi1_free_ctxtdata(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd);
 int hfi1_rcd_put(struct hfi1_ctxtdata *rcd);
 void hfi1_rcd_get(struct hfi1_ctxtdata *rcd);
@@ -1324,6 +1300,29 @@ static inline u32 driver_lstate(struct hfi1_pportdata *ppd)
 		return IB_PORT_DOWN;
 	else
 		return ppd->lstate;
+}
+
+/* return the driver's idea of the physical OPA port state */
+static inline u32 driver_pstate(struct hfi1_pportdata *ppd)
+{
+	/*
+	 * When DC is shut down and state is changed, its CSRs are not
+	 * impacted, therefore host_link_state should be used to get
+	 * current physical state.
+	 */
+	if (ppd->dd->dc_shutdown)
+		return driver_physical_state(ppd);
+	/*
+	 * The driver does some processing from the time the physical
+	 * link state is at LINKUP to the time the SM can be notified
+	 * as such. Return IB_PORTPHYSSTATE_TRAINING until the software
+	 * state is ready.
+	 */
+	if (ppd->pstate == PLS_LINKUP &&
+	    !(ppd->host_link_state & HLS_UP))
+		return IB_PORTPHYSSTATE_TRAINING;
+	else
+		return chip_to_opa_pstate(ppd->dd, ppd->pstate);
 }
 
 void receive_interrupt_work(struct work_struct *work);
@@ -1845,7 +1844,8 @@ int pcie_speeds(struct hfi1_devdata *dd);
 void request_msix(struct hfi1_devdata *dd, u32 *nent,
 		  struct hfi1_msix_entry *entry);
 void hfi1_enable_intx(struct pci_dev *pdev);
-void restore_pci_variables(struct hfi1_devdata *dd);
+int restore_pci_variables(struct hfi1_devdata *dd);
+int save_pci_variables(struct hfi1_devdata *dd);
 int do_pcie_gen3_transition(struct hfi1_devdata *dd);
 int parse_platform_config(struct hfi1_devdata *dd);
 int get_platform_config_field(struct hfi1_devdata *dd,
@@ -1873,6 +1873,7 @@ int process_receive_error(struct hfi1_packet *packet);
 int kdeth_process_expected(struct hfi1_packet *packet);
 int kdeth_process_eager(struct hfi1_packet *packet);
 int process_receive_invalid(struct hfi1_packet *packet);
+void seqfile_dump_rcd(struct seq_file *s, struct hfi1_ctxtdata *rcd);
 
 extern rhf_rcv_function_ptr snoop_rhf_rcv_functions[8];
 

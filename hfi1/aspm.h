@@ -234,7 +234,7 @@ static inline void aspm_disable_all(struct hfi1_devdata *dd)
 {
 	struct hfi1_ctxtdata *rcd;
 	unsigned long flags;
-	unsigned i;
+	u16 i;
 
 	for (i = 0; i < dd->first_user_ctxt; i++) {
 		rcd = dd->rcd[i];
@@ -253,7 +253,7 @@ static inline void aspm_enable_all(struct hfi1_devdata *dd)
 {
 	struct hfi1_ctxtdata *rcd;
 	unsigned long flags;
-	unsigned i;
+	u16 i;
 
 	aspm_enable(dd);
 
@@ -281,7 +281,7 @@ static inline void aspm_ctx_init(struct hfi1_ctxtdata *rcd)
 
 static inline void aspm_init(struct hfi1_devdata *dd)
 {
-	unsigned i;
+	u16 i;
 
 	spin_lock_init(&dd->aspm_lock);
 	dd->aspm_supported = aspm_hw_l1_supported(dd);

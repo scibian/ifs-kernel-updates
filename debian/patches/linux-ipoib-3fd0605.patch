@@ -1,0 +1,47 @@
+Description: Update broadcast record values after each successful join request
+ From linux 3fd0605:
+ .
+ Update the cached broadcast record in the priv object after every new
+ join of this broadcast domain group.
+ .
+ These values are needed for the port configuration (MTU size) and to
+ all the new multicast (non-broadcast) join requests initial parameters.
+ .
+ For example, SM starts with 2K MTU for all the fabric, and after that it
+ restarts (or handover to new SM) with new port configuration of 4K MTU.
+ Without using the new values, the driver will keep its old configuration
+ of 2K and will not apply the new configuration of 4K.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Erez Shitrit <erezsh@mellanox.com>
+Origin: https://github.com/torvalds/linux/commit/3fd0605caa74c3dc7fe69ed11ada452fe7169575#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
+@@ -226,7 +226,23 @@ static int ipoib_mcast_join_finish(struc
+ 			spin_unlock_irq(&priv->lock);
+ 			return -EAGAIN;
+ 		}
+-		priv->mcast_mtu = IPOIB_UD_MTU(ib_mtu_enum_to_int(priv->broadcast->mcmember.mtu));
++		/*update priv member according to the new mcast*/
++		priv->broadcast->mcmember.qkey = mcmember->qkey;
++		priv->broadcast->mcmember.mtu = mcmember->mtu;
++		priv->broadcast->mcmember.traffic_class = mcmember->traffic_class;
++		priv->broadcast->mcmember.rate = mcmember->rate;
++		priv->broadcast->mcmember.sl = mcmember->sl;
++		priv->broadcast->mcmember.flow_label = mcmember->flow_label;
++		priv->broadcast->mcmember.hop_limit = mcmember->hop_limit;
++		/* assume if the admin and the mcast are the same both can be changed */
++		if (priv->mcast_mtu == priv->admin_mtu)
++			priv->admin_mtu =
++			priv->mcast_mtu =
++			IPOIB_UD_MTU(ib_mtu_enum_to_int(priv->broadcast->mcmember.mtu));
++		else
++			priv->mcast_mtu =
++			IPOIB_UD_MTU(ib_mtu_enum_to_int(priv->broadcast->mcmember.mtu));
++
+ 		priv->qkey = be32_to_cpu(priv->broadcast->mcmember.qkey);
+ 		spin_unlock_irq(&priv->lock);
+ 		priv->tx_wr.wr.ud.remote_qkey = priv->qkey;

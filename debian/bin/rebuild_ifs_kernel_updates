@@ -1,0 +1,43 @@
+#!/bin/sh
+#
+# Copyright (c)2018 System Fabric Works, Inc.
+# License: GPLv2
+#
+# Rebuild ifs-kernel-updates package for the current kernel. This
+# is intended to be executed from within an extracted source package.
+
+KVER=`uname -r`
+KVER_NOARCH=`echo $KVER | sed 's/-[^-]*$//'`
+
+if [ ! -f debian/rules ] ; then
+	echo "FATAL: debian/rules missing."
+	echo "Must execute with ifs-kernel-updates as the working directory."
+	exit 1
+fi
+
+MISSING=
+for PKG in devscripts debhelper linux-headers-$KVER build-essential; do
+	if ! dpkg-query -l $PKG | grep -q ^ii ; then
+		MISSING="$MISSING $PKG"
+	fi
+done
+
+if [ ! -z "$MISSING" ] ; then
+	echo "FATAL: required packages are not installed: $MISSING"
+	exit 1
+fi
+
+make -f debian/rules prep
+if [ $? -ne 0 ]; then
+	echo "FATAL: make prep failed"
+	exit 1
+fi
+
+debuild -us -uc
+if [ $? -ne 0 ]; then
+	echo "FATAL: build ifs-kernel-updates failed"
+	exit 1
+fi
+
+echo "Built packages are in `dirname $PWD`."
+

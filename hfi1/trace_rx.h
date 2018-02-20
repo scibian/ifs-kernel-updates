@@ -114,7 +114,7 @@ TRACE_EVENT(hfi1_rcvhdr,
 );
 
 TRACE_EVENT(hfi1_receive_interrupt,
-	    TP_PROTO(struct hfi1_devdata *dd, u32 ctxt),
+	    TP_PROTO(struct hfi1_devdata *dd, u16 ctxt),
 	    TP_ARGS(dd, ctxt),
 	    TP_STRUCT__entry(DD_DEV_ENTRY(dd)
 			     __field(u32, ctxt)
@@ -214,9 +214,9 @@ TRACE_EVENT(
 	TP_printk("[%s] type %s pa %lx index %u order %u",
 		  __get_str(dev),
 		  show_tidtype(__entry->type),
-		 __entry->pa,
-		 __entry->index,
-		 __entry->order
+		  __entry->pa,
+		  __entry->index,
+		  __entry->order
 	)
 );
 

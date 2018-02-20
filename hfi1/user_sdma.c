@@ -91,6 +91,9 @@ MODULE_PARM_DESC(sdma_comp_size, "Size of User SDMA completion ring. Default: 12
 #define req_iovcnt(x) \
 	(((x) >> HFI1_SDMA_REQ_IOVCNT_SHIFT) & HFI1_SDMA_REQ_IOVCNT_MASK)
 
+/* Number of BTH.PSN bits used for sequence number in expected rcvs */
+#define BTH_SEQ_MASK 0x7ffull
+
 #define PBC2LRH(x) ((((x) & 0xfff) << 2) - 4)
 #define LRH2PBC(x) ((((x) >> 2) + 1) & 0xfff)
 
@@ -263,7 +266,7 @@ static inline u32 get_lrh_len(struct hfi1_pkt_header, u32 len);
 
 static int defer_packet_queue(
 	struct sdma_engine *sde,
-	struct iowait_work *,
+	struct iowait_work *wait,
 	struct sdma_txreq *txreq,
 	uint seq,
 	bool pkts_sent);
@@ -340,7 +343,6 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 	struct hfi1_devdata *dd;
 	struct hfi1_user_sdma_comp_q *cq;
 	struct hfi1_user_sdma_pkt_q *pq;
-	unsigned long flags;
 
 	if (!uctxt || !fd)
 		return -EBADF;
@@ -354,7 +356,6 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 	if (!pq)
 		return -ENOMEM;
 
-	INIT_LIST_HEAD(&pq->list);
 	pq->dd = dd;
 	pq->ctxt = uctxt->ctxt;
 	pq->subctxt = fd->subctxt;
@@ -415,10 +416,6 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 	fd->pq = pq;
 	fd->cq = cq;
 
-	spin_lock_irqsave(&uctxt->sdma_qlock, flags);
-	list_add(&pq->list, &uctxt->sdma_queues);
-	spin_unlock_irqrestore(&uctxt->sdma_qlock, flags);
-
 	return 0;
 
 pq_mmu_fail:
@@ -437,11 +434,10 @@ pq_reqs_nomem:
 	return ret;
 }
 
-int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd)
+int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd,
+			       struct hfi1_ctxtdata *uctxt)
 {
-	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_user_sdma_pkt_q *pq;
-	unsigned long flags;
 
 	hfi1_cdbg(SDMA, "[%u:%u:%u] Freeing user SDMA queues", uctxt->dd->unit,
 		  uctxt->ctxt, fd->subctxt);
@@ -449,10 +445,6 @@ int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd)
 	if (pq) {
 		if (pq->handler)
 			hfi1_mmu_rb_unregister(pq->handler);
-		spin_lock_irqsave(&uctxt->sdma_qlock, flags);
-		if (!list_empty(&pq->list))
-			list_del_init(&pq->list);
-		spin_unlock_irqrestore(&uctxt->sdma_qlock, flags);
 		iowait_sdma_drain(&pq->busy);
 		/* Wait until all requests have been freed. */
 		wait_event_interruptible(

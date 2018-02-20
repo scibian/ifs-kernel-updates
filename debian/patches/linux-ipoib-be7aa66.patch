@@ -1,0 +1,83 @@
+Description: change init sequence ordering
+ From linux be7aa66:
+ .
+ In preparation for using per device work queues, we need to move the
+ start of the neighbor thread task to after ipoib_ib_dev_init and move
+ the destruction of the neighbor task to before ipoib_ib_dev_cleanup.
+ Otherwise we will end up freeing our workqueue with work possibly
+ still on it.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Doug Ledford <dledford@redhat.com>
+Origin: https://github.com/torvalds/linux/commit/be7aa663fc1d9156798f5af3c60e6df45e1fe5de#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
+@@ -1264,15 +1264,13 @@ int ipoib_dev_init(struct net_device *de
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 
+-	if (ipoib_neigh_hash_init(priv) < 0)
+-		goto out;
+ 	/* Allocate RX/TX "rings" to hold queued skbs */
+ 	priv->rx_ring =	kzalloc(ipoib_recvq_size * sizeof *priv->rx_ring,
+ 				GFP_KERNEL);
+ 	if (!priv->rx_ring) {
+ 		printk(KERN_WARNING "%s: failed to allocate RX ring (%d entries)\n",
+ 		       ca->name, ipoib_recvq_size);
+-		goto out_neigh_hash_cleanup;
++		goto out;
+ 	}
+ 
+ 	priv->tx_ring = vzalloc(ipoib_sendq_size * sizeof *priv->tx_ring);
+@@ -1287,16 +1285,24 @@ int ipoib_dev_init(struct net_device *de
+ 	if (ipoib_ib_dev_init(dev, ca, port))
+ 		goto out_tx_ring_cleanup;
+ 
++	/*
++	 * Must be after ipoib_ib_dev_init so we can allocate a per
++	 * device wq there and use it here
++	 */
++	if (ipoib_neigh_hash_init(priv) < 0)
++		goto out_dev_uninit;
++
+ 	return 0;
+ 
++out_dev_uninit:
++	ipoib_ib_dev_cleanup(dev);
++
+ out_tx_ring_cleanup:
+ 	vfree(priv->tx_ring);
+ 
+ out_rx_ring_cleanup:
+ 	kfree(priv->rx_ring);
+ 
+-out_neigh_hash_cleanup:
+-	ipoib_neigh_hash_uninit(dev);
+ out:
+ 	return -ENOMEM;
+ }
+@@ -1319,6 +1325,12 @@ void ipoib_dev_cleanup(struct net_device
+ 	}
+ 	unregister_netdevice_many(&head);
+ 
++	/*
++	 * Must be before ipoib_ib_dev_cleanup or we delete an in use
++	 * work queue
++	 */
++	ipoib_neigh_hash_uninit(dev);
++
+ 	ipoib_ib_dev_cleanup(dev);
+ 
+ 	kfree(priv->rx_ring);
+@@ -1326,8 +1338,6 @@ void ipoib_dev_cleanup(struct net_device
+ 
+ 	priv->rx_ring = NULL;
+ 	priv->tx_ring = NULL;
+-
+-	ipoib_neigh_hash_uninit(dev);
+ }
+ 
+ static const struct header_ops ipoib_header_ops = {

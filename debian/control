@@ -2,25 +2,29 @@ Source: ifs-kernel-updates
 Maintainer: Brian T. Smith <bsmith@systemfabricworks.com>
 Section: kernel
 Priority: extra
-Standards-Version: 3.9.6
-Build-Depends: debhelper (>= 9),
- linux-headers-3.16.0-4-amd64
-
-Package: kmod-ifs-kernel-updates
-Architecture: linux-any
-Depends: ${misc:Depends},
- linux-image-3.16.0-4-amd64
-Conflicts: compat-rdma
-Replaces: compat-rdma
-Description: Extra kernel modules for IFS
- Updated kernel modules for OPA IFS
+Standards-Version: 3.9.8
+Homepage: http://www.intel.com
+Build-Depends: debhelper (>= 10),
+               linux-headers-4.9.0-4-amd64,
 
 Package: ifs-kernel-updates-dev
-Architecture: linux-any
+Architecture: amd64
 Section: libdevel
 Depends: ${misc:Depends},
- kmod-ifs-kernel-updates (=${binary:Version})
-Conflicts: compat-rdma
+Conflicts: compat-rdma,
 Description: Development headers for Intel HFI1 driver interface
- Development header files for Intel HFI1 driver interface
+ Development header files for Intel HFI1 driver interface. This is
+ used for software that communicates directly with the HFI1 driver,
+ as opposed to using an API such as PSM2 or libibverbs.
 
+Package: kmod-ifs-kernel-updates-4.9.0-4-amd64
+Architecture: amd64
+Depends: linux-image-4.9.0-4-amd64,
+         ${misc:Depends},
+Conflicts: compat-rdma,
+Replaces: compat-rdma,
+Description: Updated kernel modules for Omni-Path
+ Updated kernel modules for Omni-Path, compiled for kernel
+ 4.9.0-4-amd64.
+ Includes the hfi1 driver for Omni-Path hardware and updated
+ rdmavt.

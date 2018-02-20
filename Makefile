@@ -7,7 +7,9 @@
 ifneq ($(KERNELRELEASE),)
 #kbuild part of makefile
 
-obj-y := rdmavt/ ib_uverbs/ hfi1/ ib_mad/
+CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1
+
+obj-y := rdmavt/ hfi1/ ib_qib/
 
 else
 #normal makefile

@@ -150,9 +150,9 @@ struct iowait {
 	u32 count;
 	u32 tx_limit;
 	u32 tx_count;
+	u8 starved_cnt;
 	unsigned long flags;
 	struct iowait_work wait[IOWAIT_SES];
-	u8 starved_cnt;
 };
 
 #define SDMA_AVAIL_REASON 0
@@ -358,60 +358,6 @@ static inline u32 iowait_get_all_desc(struct iowait *w)
 }
 
 /**
- * iowait_packet_queued() - determine if a packet it queued
- * @wait: the wait structure
- */
-static inline bool iowait_packet_queued(struct iowait_work *w)
-{
-	return !list_empty(&w->tx_head);
-}
-
-/**
- * inc_wait_count - increment wait counts
- * @w: the log work struct
- * @n: the count
- */
-static inline void iowait_inc_wait_count(struct iowait_work *w, u16 n)
-{
-	if (!w)
-		return;
-	w->iow->tx_count++;
-	w->iow->count += n;
-}
-
-/**
- * iowait_get_tid_work - return iowait_work for tid SE
- * @w: the iowait struct
- */
-static inline struct iowait_work *iowait_get_tid_work(struct iowait *w)
-{
-	return &w->wait[IOWAIT_TID_SE];
-}
-
-/**
- * iowait_get_ib_work - return iowait_work for ib SE
- * @w: the iowait struct
- */
-static inline struct iowait_work *iowait_get_ib_work(struct iowait *w)
-{
-	return &w->wait[IOWAIT_IB_SE];
-}
-
-/**
- * iowait_ioww_to_iow - return iowait given iowait_work
- * @w: the iowait_work struct
- */
-static inline struct iowait *iowait_ioww_to_iow(struct iowait_work *w)
-{
-	if (likely(w))
-		return w->iow;
-	return NULL;
-}
-
-void iowait_cancel_work(struct iowait *w);
-int iowait_set_work_flag(struct iowait_work *w);
-
-/**
  * iowait_queue - Put the iowait on a wait queue
  * @pkts_sent: have some packets been sent before queuing?
  * @w: the iowait struct
@@ -472,5 +418,59 @@ static inline void iowait_starve_find_max(struct iowait *w, u8 *max,
 		*max_idx = idx;
 	}
 }
+
+/**
+ * iowait_packet_queued() - determine if a packet it queued
+ * @wait: the wait structure
+ */
+static inline bool iowait_packet_queued(struct iowait_work *w)
+{
+	return !list_empty(&w->tx_head);
+}
+
+/**
+ * inc_wait_count - increment wait counts
+ * @w: the log work struct
+ * @n: the count
+ */
+static inline void iowait_inc_wait_count(struct iowait_work *w, u16 n)
+{
+	if (!w)
+		return;
+	w->iow->tx_count++;
+	w->iow->count += n;
+}
+
+/**
+ * iowait_get_tid_work - return iowait_work for tid SE
+ * @w: the iowait struct
+ */
+static inline struct iowait_work *iowait_get_tid_work(struct iowait *w)
+{
+	return &w->wait[IOWAIT_TID_SE];
+}
+
+/**
+ * iowait_get_ib_work - return iowait_work for ib SE
+ * @w: the iowait struct
+ */
+static inline struct iowait_work *iowait_get_ib_work(struct iowait *w)
+{
+	return &w->wait[IOWAIT_IB_SE];
+}
+
+/**
+ * iowait_ioww_to_iow - return iowait given iowait_work
+ * @w: the iowait_work struct
+ */
+static inline struct iowait *iowait_ioww_to_iow(struct iowait_work *w)
+{
+	if (likely(w))
+		return w->iow;
+	return NULL;
+}
+
+void iowait_cancel_work(struct iowait *w);
+int iowait_set_work_flag(struct iowait_work *w);
 
 #endif

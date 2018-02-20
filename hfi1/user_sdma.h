@@ -55,13 +55,53 @@
 
 extern uint extended_psn;
 
+/*
+ * Define fields in the KDETH header so we can update the header
+ * template.
+ */
+#define KDETH_OFFSET_SHIFT        0
+#define KDETH_OFFSET_MASK         0x7fff
+#define KDETH_OM_SHIFT            15
+#define KDETH_OM_MASK             0x1
+#define KDETH_TID_SHIFT           16
+#define KDETH_TID_MASK            0x3ff
+#define KDETH_TIDCTRL_SHIFT       26
+#define KDETH_TIDCTRL_MASK        0x3
+#define KDETH_INTR_SHIFT          28
+#define KDETH_INTR_MASK           0x1
+#define KDETH_SH_SHIFT            29
+#define KDETH_SH_MASK             0x1
+#define KDETH_KVER_SHIFT          30
+#define KDETH_KVER_MASK           0x3
+#define KDETH_JKEY_SHIFT          0x0
+#define KDETH_JKEY_MASK           0xff
+#define KDETH_HCRC_UPPER_SHIFT    16
+#define KDETH_HCRC_UPPER_MASK     0xff
+#define KDETH_HCRC_LOWER_SHIFT    24
+#define KDETH_HCRC_LOWER_MASK     0xff
+
 #define AHG_KDETH_INTR_SHIFT 12
 #define AHG_KDETH_SH_SHIFT   13
 #define AHG_KDETH_ARRAY_SIZE  9
 
+#define KDETH_GET(val, field)						\
+	(((le32_to_cpu((val))) >> KDETH_##field##_SHIFT) & KDETH_##field##_MASK)
+#define KDETH_SET(dw, field, val) do {					\
+		u32 dwval = le32_to_cpu(dw);				\
+		dwval &= ~(KDETH_##field##_MASK << KDETH_##field##_SHIFT); \
+		dwval |= (((val) & KDETH_##field##_MASK) << \
+			  KDETH_##field##_SHIFT);			\
+		dw = cpu_to_le32(dwval);				\
+	} while (0)
+#define KDETH_RESET(dw, field, val) ({ dw = 0; KDETH_SET(dw, field, val); })
+
+/* KDETH OM multipliers and switch over point */
+#define KDETH_OM_SMALL     4
+#define KDETH_OM_LARGE     64
+#define KDETH_OM_MAX_SIZE  (1 << ((KDETH_OM_LARGE / KDETH_OM_SMALL) + 1))
+
 struct hfi1_user_sdma_pkt_q {
-	struct list_head list;
-	unsigned ctxt;
+	u16 ctxt;
 	u16 subctxt;
 	u16 n_max_reqs;
 	atomic_t n_reqs;
@@ -86,7 +126,8 @@ struct hfi1_user_sdma_comp_q {
 
 int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 				struct hfi1_filedata *fd);
-int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd);
+int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd,
+			       struct hfi1_ctxtdata *uctxt);
 int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 				   struct iovec *iovec, unsigned long dim,
 				   unsigned long *count);

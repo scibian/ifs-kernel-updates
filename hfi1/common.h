@@ -48,7 +48,7 @@
 #ifndef _COMMON_H
 #define _COMMON_H
 
-#include "update/hfi1_user.h"
+#include <rdma/hfi/hfi1_user.h>
 
 /*
  * This file contains defines, structures, etc. that are used

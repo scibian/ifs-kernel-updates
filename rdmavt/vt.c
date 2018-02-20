@@ -201,8 +201,13 @@ static int rvt_modify_port(struct ib_device *ibdev, u8 port_num,
 		return -EINVAL;
 
 	rvp = rdi->ports[port_index];
-	rvp->port_cap_flags |= props->set_port_cap_mask;
-	rvp->port_cap_flags &= ~props->clr_port_cap_mask;
+	if (port_modify_mask & IB_PORT_OPA_MASK_CHG) {
+		rvp->port_cap3_flags |= props->set_port_cap_mask;
+		rvp->port_cap3_flags &= ~props->clr_port_cap_mask;
+	} else {
+		rvp->port_cap_flags |= props->set_port_cap_mask;
+		rvp->port_cap_flags &= ~props->clr_port_cap_mask;
+	}
 
 	if (props->set_port_cap_mask || props->clr_port_cap_mask)
 		rdi->driver_f.cap_mask_chg(rdi, port_num);
@@ -370,6 +375,7 @@ enum {
 	REG_USER_MR,
 	DEREG_MR,
 	ALLOC_MR,
+	MAP_MR_SG,
 	ALLOC_FMR,
 	MAP_PHYS_FMR,
 	UNMAP_FMR,
@@ -630,8 +636,14 @@ static noinline int check_support(struct rvt_dev_info *rdi, int verb)
 
 	case ALLOC_MR:
 		check_driver_override(rdi, offsetof(struct ib_device,
-						    create_mr),
+						    alloc_mr),
 				      rvt_alloc_mr);
+		break;
+
+	case MAP_MR_SG:
+		check_driver_override(rdi, offsetof(struct ib_device,
+						    map_mr_sg),
+				      rvt_map_mr_sg);
 		break;
 
 	case MAP_PHYS_FMR:

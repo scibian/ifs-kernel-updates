@@ -1,0 +1,335 @@
+Description: Port hfi1 module
+ This patch ports the hfi1 module code from upstream to build against kernel
+ 3.16.0.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/hfi1/qp.c
++++ b/hfi1/qp.c
+@@ -154,11 +154,13 @@
+ 		       BIT(IB_QPT_UC) | BIT(IB_QPT_RC),
+ },
+ 
++/*
+ [IB_WR_REG_MR] = {
+ 	.length = sizeof(struct ib_reg_wr),
+ 	.qpt_support = BIT(IB_QPT_UC) | BIT(IB_QPT_RC),
+ 	.flags = RVT_OPERATION_LOCAL,
+ },
++*/
+ 
+ [IB_WR_LOCAL_INV] = {
+ 	.length = sizeof(struct ib_send_wr),
+--- a/hfi1/verbs.h
++++ b/hfi1/verbs.h
+@@ -77,6 +77,9 @@
+ 
+ #define HFI1_MAX_RDMA_ATOMIC     16
+ 
++#define IB_OPCODE_RC_SEND_LAST_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 1)
++#define IB_OPCODE_RC_SEND_ONLY_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 2)
++
+ /*
+  * Increment this value if any changes that break userspace ABI
+  * compatibility are made.
+--- a/hfi1/affinity.c
++++ b/hfi1/affinity.c
+@@ -48,7 +48,7 @@
+ #include <linux/cpumask.h>
+ #include <linux/module.h>
+ #include <linux/interrupt.h>
+-
++#include <rdma/ib_mad.h>
+ #include "hfi.h"
+ #include "affinity.h"
+ #include "sdma.h"
+--- a/hfi1/hfi.h
++++ b/hfi1/hfi.h
+@@ -64,6 +64,7 @@
+ #include <linux/kthread.h>
+ #include <linux/i2c.h>
+ #include <linux/i2c-algo-bit.h>
++#include "core_compat.h"
+ #include <rdma/ib_hdrs.h>
+ #include <linux/rhashtable.h>
+ #include <rdma/rdma_vt.h>
+--- a/hfi1/verbs.c
++++ b/hfi1/verbs.c
+@@ -1780,124 +1780,124 @@
+ 	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
+ }
+ 
+-static char *driver_cntr_names[] = {
+-	/* must be element 0*/
+-	"DRIVER_KernIntr",
+-	"DRIVER_ErrorIntr",
+-	"DRIVER_Tx_Errs",
+-	"DRIVER_Rcv_Errs",
+-	"DRIVER_HW_Errs",
+-	"DRIVER_NoPIOBufs",
+-	"DRIVER_CtxtsOpen",
+-	"DRIVER_RcvLen_Errs",
+-	"DRIVER_EgrBufFull",
+-	"DRIVER_EgrHdrFull"
+-};
+-
+-static int num_driver_cntrs = ARRAY_SIZE(driver_cntr_names);
+-
+-static struct rdma_hw_stats *alloc_hw_stats(struct ib_device *ibdev,
+-					    u8 port_num)
+-{
+-	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+-	struct rdma_hw_stats *stats;
+-	unsigned long lifespan = RDMA_HW_STATS_DEFAULT_LIFESPAN;
+-	int num_hw_cntrs, num_sw_cntrs, num_cntrs;
+-	int cntr_size, name_size, nameslen;
+-	char *stats_priv, *name_buffer, *p;
+-	char **cntr_names, **sw_cntr_names;
+-	int i;
+-
+-	if (!port_num) {
+-		num_hw_cntrs = dd->ndevcntrs;
+-		num_sw_cntrs = num_driver_cntrs;
+-		name_buffer = dd->cntrnames;
+-		nameslen = dd->cntrnameslen;
+-		sw_cntr_names = driver_cntr_names;
+-	} else {
+-		num_hw_cntrs = dd->nportcntrs;
+-		num_sw_cntrs = 0;
+-		name_buffer = dd->portcntrnames;
+-		nameslen = dd->portcntrnameslen;
+-		sw_cntr_names = NULL;
+-	}
+-
+-	/*
+-	 * The layout of the stats structure (N is the number of counters):
+-	 * "rdma_hw_stats | counters[N] | names[N] | name_buffer". The first
+-	 * two fields are expected by the caller. The last two fields are
+-	 * private.
+-	 */
+-	num_cntrs = num_hw_cntrs + num_sw_cntrs;
+-	cntr_size = num_cntrs  * sizeof(u64);
+-	name_size = num_cntrs * sizeof(char *);
+-	stats = kzalloc(sizeof(*stats) + cntr_size + name_size + nameslen,
+-			GFP_KERNEL);
+-	if (!stats)
+-		return NULL;
+-
+-	stats_priv = (char *)stats + sizeof(*stats) + cntr_size;
+-	cntr_names = (char **)stats_priv;
+-	p = stats_priv + name_size;
+-	memcpy(p, name_buffer, nameslen);
+-
+-	for (i = 0; i < num_hw_cntrs; i++) {
+-		cntr_names[i] = p;
+-		p = strchr(p, '\n');
+-		if (!p)
+-			break;
+-		*p++ = '\0';
+-	}
+-
+-	for (i = 0; i < num_sw_cntrs; i++)
+-		cntr_names[num_hw_cntrs + i] = sw_cntr_names[i];
+-
+-	stats->names = (const char * const *)cntr_names;
+-	stats->num_counters = num_cntrs;
+-	stats->lifespan = msecs_to_jiffies(lifespan);
+-	return stats;
+-}
+-
+-static u64 hfi1_sps_ints(void)
+-{
+-	unsigned long flags;
+-	struct hfi1_devdata *dd;
+-	u64 sps_ints = 0;
+-
+-	spin_lock_irqsave(&hfi1_devs_lock, flags);
+-	list_for_each_entry(dd, &hfi1_dev_list, list) {
+-		sps_ints += get_all_cpu_total(dd->int_counter);
+-	}
+-	spin_unlock_irqrestore(&hfi1_devs_lock, flags);
+-	return sps_ints;
+-}
+-
+-static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats,
+-			u8 port, int index)
+-{
+-	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+-	u64 *values;
+-	int count;
+-
+-	if (!port) {
+-		u64 *v = (u64 *)&hfi1_stats;
+-		int i;
+-
+-		hfi1_read_cntrs(dd, NULL, &values);
+-		values[dd->ndevcntrs] = hfi1_sps_ints();
+-		for (i = 1; i < num_driver_cntrs; i++)
+-			values[dd->ndevcntrs + i] = v[i];
+-		count = dd->ndevcntrs + num_driver_cntrs;
+-	} else {
+-		struct hfi1_ibport *ibp = to_iport(ibdev, port);
+-
+-		hfi1_read_portcntrs(ppd_from_ibp(ibp), NULL, &values);
+-		count = dd->nportcntrs;
+-	}
+-
+-	memcpy(stats->value, values, count * sizeof(u64));
+-	return count;
+-}
++/* static char *driver_cntr_names[] = { */
++/* 	/\* must be element 0*\/ */
++/* 	"DRIVER_KernIntr", */
++/* 	"DRIVER_ErrorIntr", */
++/* 	"DRIVER_Tx_Errs", */
++/* 	"DRIVER_Rcv_Errs", */
++/* 	"DRIVER_HW_Errs", */
++/* 	"DRIVER_NoPIOBufs", */
++/* 	"DRIVER_CtxtsOpen", */
++/* 	"DRIVER_RcvLen_Errs", */
++/* 	"DRIVER_EgrBufFull", */
++/* 	"DRIVER_EgrHdrFull" */
++/* }; */
++
++/*static int num_driver_cntrs = ARRAY_SIZE(driver_cntr_names);*/
++
++/* static struct rdma_hw_stats *alloc_hw_stats(struct ib_device *ibdev, */
++/* 					    u8 port_num) */
++/* { */
++/* 	struct hfi1_devdata *dd = dd_from_ibdev(ibdev); */
++/* 	struct rdma_hw_stats *stats; */
++/* 	unsigned long lifespan = RDMA_HW_STATS_DEFAULT_LIFESPAN; */
++/* 	int num_hw_cntrs, num_sw_cntrs, num_cntrs; */
++/* 	int cntr_size, name_size, nameslen; */
++/* 	char *stats_priv, *name_buffer, *p; */
++/* 	char **cntr_names, **sw_cntr_names; */
++/* 	int i; */
++
++/* 	if (!port_num) { */
++/* 		num_hw_cntrs = dd->ndevcntrs; */
++/* 		num_sw_cntrs = num_driver_cntrs; */
++/* 		name_buffer = dd->cntrnames; */
++/* 		nameslen = dd->cntrnameslen; */
++/* 		sw_cntr_names = driver_cntr_names; */
++/* 	} else { */
++/* 		num_hw_cntrs = dd->nportcntrs; */
++/* 		num_sw_cntrs = 0; */
++/* 		name_buffer = dd->portcntrnames; */
++/* 		nameslen = dd->portcntrnameslen; */
++/* 		sw_cntr_names = NULL; */
++/* 	} */
++
++/* 	/\* */
++/* 	 * The layout of the stats structure (N is the number of counters): */
++/* 	 * "rdma_hw_stats | counters[N] | names[N] | name_buffer". The first */
++/* 	 * two fields are expected by the caller. The last two fields are */
++/* 	 * private. */
++/* 	 *\/ */
++/* 	num_cntrs = num_hw_cntrs + num_sw_cntrs; */
++/* 	cntr_size = num_cntrs  * sizeof(u64); */
++/* 	name_size = num_cntrs * sizeof(char *); */
++/* 	stats = kzalloc(sizeof(*stats) + cntr_size + name_size + nameslen, */
++/* 			GFP_KERNEL); */
++/* 	if (!stats) */
++/* 		return NULL; */
++
++/* 	stats_priv = (char *)stats + sizeof(*stats) + cntr_size; */
++/* 	cntr_names = (char **)stats_priv; */
++/* 	p = stats_priv + name_size; */
++/* 	memcpy(p, name_buffer, nameslen); */
++
++/* 	for (i = 0; i < num_hw_cntrs; i++) { */
++/* 		cntr_names[i] = p; */
++/* 		p = strchr(p, '\n'); */
++/* 		if (!p) */
++/* 			break; */
++/* 		*p++ = '\0'; */
++/* 	} */
++
++/* 	for (i = 0; i < num_sw_cntrs; i++) */
++/* 		cntr_names[num_hw_cntrs + i] = sw_cntr_names[i]; */
++
++/* 	stats->names = (const char * const *)cntr_names; */
++/* 	stats->num_counters = num_cntrs; */
++/* 	stats->lifespan = msecs_to_jiffies(lifespan); */
++/* 	return stats; */
++/* } */
++
++/* static u64 hfi1_sps_ints(void) */
++/* { */
++/* 	unsigned long flags; */
++/* 	struct hfi1_devdata *dd; */
++/* 	u64 sps_ints = 0; */
++
++/* 	spin_lock_irqsave(&hfi1_devs_lock, flags); */
++/* 	list_for_each_entry(dd, &hfi1_dev_list, list) { */
++/* 		sps_ints += get_all_cpu_total(dd->int_counter); */
++/* 	} */
++/* 	spin_unlock_irqrestore(&hfi1_devs_lock, flags); */
++/* 	return sps_ints; */
++/* } */
++
++/* static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats, */
++/* 			u8 port, int index) */
++/* { */
++/* 	struct hfi1_devdata *dd = dd_from_ibdev(ibdev); */
++/* 	u64 *values; */
++/* 	int count; */
++
++/* 	if (!port) { */
++/* 		u64 *v = (u64 *)&hfi1_stats; */
++/* 		int i; */
++
++/* 		hfi1_read_cntrs(dd, NULL, &values); */
++/* 		values[dd->ndevcntrs] = hfi1_sps_ints(); */
++/* 		for (i = 1; i < num_driver_cntrs; i++) */
++/* 			values[dd->ndevcntrs + i] = v[i]; */
++/* 		count = dd->ndevcntrs + num_driver_cntrs; */
++/* 	} else { */
++/* 		struct hfi1_ibport *ibp = to_iport(ibdev, port); */
++
++/* 		hfi1_read_portcntrs(ppd_from_ibp(ibp), NULL, &values); */
++/* 		count = dd->nportcntrs; */
++/* 	} */
++
++/* 	memcpy(stats->value, values, count * sizeof(u64)); */
++/* 	return count; */
++/* } */
+ 
+ /**
+  * hfi1_register_ib_device - register our device with the infiniband core
+@@ -1946,8 +1946,9 @@
+ 	ibdev->phys_port_cnt = dd->num_pports;
+ 	ibdev->dma_device = &dd->pcidev->dev;
+ 	ibdev->modify_device = modify_device;
+-	ibdev->alloc_hw_stats = alloc_hw_stats;
+-	ibdev->get_hw_stats = get_hw_stats;
++	/* alloc_hw_stats and get_hw_stats are not supported in kernel 3.16 */
++	/*ibdev->alloc_hw_stats = alloc_hw_stats;*/
++	/*ibdev->get_hw_stats = get_hw_stats;*/
+ 
+ 	/* keep process mad in the driver */
+ 	ibdev->process_mad = hfi1_process_mad;
+--- a/hfi1/tid_rdma.c
++++ b/hfi1/tid_rdma.c
+@@ -54,6 +54,7 @@
+ #include "trace.h"
+ #include <rdma/ib_umem.h>
+ #include "qp.h"
++#include <linux/random.h>
+ 
+ u32 tid_rdma_flow_wt;
+ 
+--- a/hfi1/opfn.c
++++ b/hfi1/opfn.c
+@@ -116,7 +116,7 @@
+ 	/* Drop opfn.lock before calling ib_post_send() */
+ 	spin_unlock_irqrestore(&priv->opfn.lock, flags);
+ 
+-	ret = ib_post_send(&qp->ibqp, &wr.wr, &bad_send_wr);
++	ret = ib_post_send(&qp->ibqp, (struct ib_send_wr *)&wr.wr, &bad_send_wr);
+ 	if (ret)
+ 		goto err;
+ 	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",

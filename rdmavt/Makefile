@@ -7,7 +7,7 @@
 ifneq ($(KERNELRELEASE),)
 #kbuild part of makefile
 
-ccflags-y := -I$(src)/../include
+NOSTDINC_FLAGS += -I${M}/include
 
 obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
 

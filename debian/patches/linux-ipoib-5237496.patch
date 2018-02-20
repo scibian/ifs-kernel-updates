@@ -1,0 +1,34 @@
+Description: Fix RCU annotations in ipoib_neigh_hash_init()
+ From linux 5237496:
+ .
+ Avoid that sparse complains about ipoib_neigh_hash_init(). This
+ patch does not change any functionality. See also patch "IPoIB:
+ Fix memory leak in the neigh table deletion flow" (commit ID
+ 66172c09938b).
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Bart Van Assche <bart.vanassche@sandisk.com>
+Origin: https://github.com/torvalds/linux/commit/523749678145e932014394e1fe44759ccedec576#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
+@@ -1118,7 +1118,7 @@ static int ipoib_neigh_hash_init(struct
+ {
+ 	struct ipoib_neigh_table *ntbl = &priv->ntbl;
+ 	struct ipoib_neigh_hash *htbl;
+-	struct ipoib_neigh **buckets;
++	struct ipoib_neigh __rcu **buckets;
+ 	u32 size;
+ 
+ 	clear_bit(IPOIB_NEIGH_TBL_FLUSH, &priv->flags);
+@@ -1136,7 +1136,7 @@ static int ipoib_neigh_hash_init(struct
+ 	htbl->size = size;
+ 	htbl->mask = (size - 1);
+ 	htbl->buckets = buckets;
+-	ntbl->htbl = htbl;
++	RCU_INIT_POINTER(ntbl->htbl, htbl);
+ 	htbl->ntbl = ntbl;
+ 	atomic_set(&ntbl->entries, 0);
+ 

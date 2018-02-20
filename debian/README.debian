@@ -1,0 +1,7 @@
+
+ifs-kernel-updates is named according to the kernel version that
+it is built against. gbp.conf tells gbp to execute "make -f debian/rules prep"
+before invoking debuild.
+
+The prep target creates package control files from the debian/*.in files,
+replacing targets with the current kernel version.

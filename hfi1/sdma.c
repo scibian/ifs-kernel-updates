@@ -53,7 +53,6 @@
 #include <linux/timer.h>
 #include <linux/vmalloc.h>
 #include <linux/highmem.h>
-#include <linux/jhash.h>
 
 #include "hfi.h"
 #include "common.h"
@@ -249,8 +248,6 @@ static void dump_sdma_state(struct sdma_engine *sde);
 static void sdma_make_progress(struct sdma_engine *sde, u64 status);
 static void sdma_desc_avail(struct sdma_engine *sde, uint avail);
 static void sdma_flush_descq(struct sdma_engine *sde);
-/* Needed for RHEL 7.2 backport */
-static void sdma_rht_destroy(struct rhashtable *ht);
 
 /**
  * sdma_state_name() - return state string from enum
@@ -833,18 +830,14 @@ struct sdma_rht_node {
 
 #define NR_CPUS_HINT 192
 
-static int info_mutex_is_held(void)
-{
-       return 1;
-}
-
-static struct rhashtable_params sdma_rht_params = {
+static const struct rhashtable_params sdma_rht_params = {
 	.nelem_hint = NR_CPUS_HINT,
 	.head_offset = offsetof(struct sdma_rht_node, node),
 	.key_offset = offsetof(struct sdma_rht_node, cpu_id),
-	.key_len = sizeof(unsigned long),
-	.hashfn = jhash,
-	.mutex_is_held = info_mutex_is_held,
+	.key_len = FIELD_SIZEOF(struct sdma_rht_node, cpu_id),
+	.max_size = NR_CPUS,
+	.min_size = 8,
+	.automatic_shrinking = true,
 };
 
 /*
@@ -875,7 +868,8 @@ struct sdma_engine *sdma_select_user_engine(struct hfi1_devdata *dd,
 
 	cpu_id = smp_processor_id();
 	rcu_read_lock();
-	rht_node = rhashtable_lookup(dd->sdma_rht, &cpu_id);
+	rht_node = rhashtable_lookup_fast(dd->sdma_rht, &cpu_id,
+					  sdma_rht_params);
 
 	if (rht_node && rht_node->map[vl]) {
 		struct sdma_rht_map_elem *map = rht_node->map[vl];
@@ -973,7 +967,8 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 			goto out;
 		}
 
-		rht_node = rhashtable_lookup(dd->sdma_rht, &cpu);
+		rht_node = rhashtable_lookup_fast(dd->sdma_rht, &cpu,
+						  sdma_rht_params);
 		if (!rht_node) {
 			rht_node = kzalloc(sizeof(*rht_node), GFP_KERNEL);
 			if (!rht_node) {
@@ -997,8 +992,17 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 			rht_node->map[vl]->ctr = 1;
 			rht_node->map[vl]->sde[0] = sde;
 
-			rhashtable_insert(dd->sdma_rht,
-					  &rht_node->node, GFP_KERNEL);
+			ret = rhashtable_insert_fast(dd->sdma_rht,
+						     &rht_node->node,
+						     sdma_rht_params);
+			if (ret) {
+				kfree(rht_node->map[vl]);
+				kfree(rht_node);
+				dd_dev_err(sde->dd, "Failed to set process to sde affinity for cpu %lu\n",
+					   cpu);
+				goto out;
+			}
+
 		} else {
 			int ctr, pow;
 
@@ -1031,7 +1035,8 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 		if (cpumask_test_cpu(cpu, mask))
 			continue;
 
-		rht_node = rhashtable_lookup(dd->sdma_rht, &cpu);
+		rht_node = rhashtable_lookup_fast(dd->sdma_rht, &cpu,
+						  sdma_rht_params);
 		if (rht_node) {
 			bool empty = true;
 			int i;
@@ -1054,19 +1059,10 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 			}
 
 			if (empty) {
-				ret = rhashtable_remove(dd->sdma_rht,
-							&rht_node->node,
-							GFP_KERNEL);
-				/*
-				 * The return check WARN_ON is inverted for
-				 * RHEL 7.2 backport since the return value
-				 * from rhashtable_remove() is different from
-				 * rhashtable_remove_fast() upstream,
-				 * rhashtable_remove() returns bool true on
-				 * success, while rhashtable_remove_fast()
-				 * returns 0 on success.
-				 */		
-				WARN_ON(!ret);
+				ret = rhashtable_remove_fast(dd->sdma_rht,
+							     &rht_node->node,
+							     sdma_rht_params);
+				WARN_ON(ret);
 
 				for (i = 0; i < HFI1_MAX_VLS_SUPPORTED; i++)
 					kfree(rht_node->map[i]);
@@ -1087,12 +1083,12 @@ out_free:
 
 ssize_t sdma_get_cpu_to_sde_map(struct sdma_engine *sde, char *buf)
 {
+	int n;
 	mutex_lock(&process_to_sde_mutex);
-	if (cpumask_empty(&sde->cpu_mask)) {
+	if (cpumask_empty(&sde->cpu_mask))
 		snprintf(buf, PAGE_SIZE, "%s\n", "empty");
-	} else {
-		int n = cpulist_scnprintf(buf, PAGE_SIZE - 2, &sde->cpu_mask);
-
+	else {
+		n = cpulist_scnprintf(buf, PAGE_SIZE - 2, &sde->cpu_mask);
 		buf[n++] = '\n';
 		buf[n] = '\0';
 	}
@@ -1126,7 +1122,8 @@ void sdma_seqfile_dump_cpu_list(struct seq_file *s,
 	struct sdma_rht_node *rht_node;
 	int i, j;
 
-	rht_node = rhashtable_lookup(dd->sdma_rht, &cpuid);
+	rht_node = rhashtable_lookup_fast(dd->sdma_rht, &cpuid,
+					  sdma_rht_params);
 	if (!rht_node)
 		return;
 
@@ -1341,7 +1338,7 @@ static void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 	dd->per_sdma = NULL;
 
 	if (dd->sdma_rht) {
-		sdma_rht_destroy(dd->sdma_rht);
+		rhashtable_free_and_destroy(dd->sdma_rht, sdma_rht_free, NULL);
 		kfree(dd->sdma_rht);
 		dd->sdma_rht = NULL;
 	}
@@ -1352,10 +1349,8 @@ static void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
  * @dd: hfi1_devdata
  * @port: port number (currently only zero)
  *
- * sdma_init initializes the specified number of engines.
- *
- * The code initializes each sde, its csrs.  Interrupts
- * are not required to be enabled.
+ * Initializes each sde and its csrs.
+ * Interrupts are not required to be enabled.
  *
  * Returns:
  * 0 - success, -errno on failure
@@ -1609,23 +1604,6 @@ void sdma_start(struct hfi1_devdata *dd)
 		sde = &dd->per_sdma[i];
 		sdma_process_event(sde, sdma_event_e10_go_hw_start);
 	}
-}
-
-/* Needed for RHEL 7.2 backport */
-static void sdma_rht_destroy(struct rhashtable *ht)
-{
-	const struct bucket_table *tbl;
-	struct sdma_rht_node *rht_node, *next;
-	unsigned int i;
-
-	tbl = rht_dereference(ht->tbl, ht);
-	for (i = 0; i < tbl->size; i++) {
-		rht_for_each_entry_safe(rht_node, next, tbl->buckets[i],
-					ht, node)
-			sdma_rht_free(rht_node, NULL);
-	}
-
-	rhashtable_destroy(ht);
 }
 
 /**

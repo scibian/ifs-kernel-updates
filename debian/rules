@@ -1,13 +1,11 @@
 #!/usr/bin/make -f
 #
-# Copyright (c)2017 System Fabric Works, Inc. All Rights Reserved,
-#
 
 #export DH_VERBOSE=1
 
 export CFLAGS=
 
-# used by debian/gen-compat-config
+# used by debian/bin/gen-compat-config
 export CONFIG_OPTS=CONFIG_COMPAT=y \
 	CONFIG_INFINIBAND_HFI1=m \
 	CONFIG_HFI1_VERBS_31BIT_PSN=y \
@@ -16,32 +14,60 @@ export CONFIG_OPTS=CONFIG_COMPAT=y \
 	CONFIG_INFINIBAND_IPOIB=m \
 	CONFIG_INFINIBAND_IPOIB_CM=y
 
+PREP_FILES=debian/control \
+	debian/kmod-ifs-kernel-updates-$(KVER).lintian-overrides \
+	debian/kmod-ifs-kernel-updates-$(KVER).install
+
 MJOBS=$(patsubst parallel=%,%,$(filter parallel=%,$(DEB_BUILD_OPTIONS)))
 ifeq ($(strip $(MJOBS)),)
 MJOBS=1
 endif
 
-KDIR ?= /lib/modules/$(shell uname -r)/build/
+KVER ?= $(shell uname -r)
+KVER_NOARCH ?= $(shell echo $(KVER) | sed 's/-[^-]*$$//')
+KDIR ?= /lib/modules/$(KVER)/build/
 export KDIR
+
+# Create package control using the build environment. This must
+# be executed prior to the build
+.PHONY: prep
+prep: clean-prep $(PREP_FILES)
+
+.PHONY: clean-prep
+clean-prep:
+	$(RM) $(PREP_FILES)
+
+debian/control: debian/control.in
+	sed "s/@KERNEL_VER@/$(KVER)/g" $< > $@
+
+debian/kmod-ifs-kernel-updates-$(KVER).lintian-overrides: debian/kmod-ifs-kernel-updates.lintian-overrides.in
+	sed "s/@KERNEL_VER@/$(KVER)/g" $< > $@
+
+debian/kmod-ifs-kernel-updates-$(KVER).install: debian/kmod-ifs-kernel-updates.install.in
+	sed "s/@KERNEL_VER@/$(KVER)/g" $< > $@
 
 %:
 	dh $@ --parallel
 
+.PHONY: override_dh_auto_configure
 override_dh_auto_configure:
-	./debian/gen-compat-config-deb > ifs-kernel-updates-conf.h
+	./debian/bin/gen-compat-config-deb > ifs-kernel-updates-conf.h
 
+.PHONY: override_dh_auto_clean
 override_dh_auto_clean:
 	rm -f ifs-kernel-updates-conf.h
-	rm -f debian/unifdef
+	rm -f debian/bin/unifdef
 	dh_auto_clean $@
 
+.PHONY: override_dh_auto_build
 override_dh_auto_build:
-	cd debian && gcc unifdef.c -o unifdef
+	cd debian/bin && gcc unifdef.c -o unifdef
 	$(MAKE) -j$(MJOBS) $(CONFIG_OPTS) M=$$PWD V=1
 
+.PHONY: override_dh_auto_install
 override_dh_auto_install:
 	dh_auto_install $@
-	install -m 0755 -d debian/tmp/usr/include/rdma/hfi/
-	./debian/headers_install debian/tmp/usr/include/rdma/hfi/ $(CURDIR) include/update/hfi1_user.h
-
+	install -m 0755 -d debian/tmp/usr/include/uapi/rdma/hfi
+	./debian/bin/headers_install debian/tmp/usr/include/uapi/rdma/hfi $(CURDIR) include/rdma/hfi/hfi1_user.h
+	chmod 0644 debian/tmp/usr/include/uapi/rdma/hfi/hfi1_user.h
 

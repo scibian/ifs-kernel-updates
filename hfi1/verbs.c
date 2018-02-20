@@ -553,35 +553,6 @@ static inline opcode_handler qp_ok(struct hfi1_packet *packet)
 	return NULL;
 }
 
-static u64 hfi1_fault_tx(struct rvt_qp *qp, u8 opcode, u64 pbc)
-{
-#ifdef CONFIG_HFI1_FAULT_INJECTION
-	if ((opcode & IB_OPCODE_MSP) == IB_OPCODE_MSP)
-		/*
-		 * In order to drop non-IB traffic we
-		 * set PbcInsertHrc to NONE (0x2).
-		 * The packet will still be delivered
-		 * to the receiving node but a
-		 * KHdrHCRCErr (KDETH packet with a bad
-		 * HCRC) will be triggered and the
-		 * packet will not be delivered to the
-		 * correct context.
-		 */
-		pbc |= (u64)PBC_IHCRC_NONE << PBC_INSERT_HCRC_SHIFT;
-	else
-		/*
-		 * In order to drop regular verbs
-		 * traffic we set the PbcTestEbp
-		 * flag. The packet will still be
-		 * delivered to the receiving node but
-		 * a 'late ebp error' will be
-		 * triggered and will be dropped.
-		 */
-		pbc |= PBC_TEST_EBP;
-#endif
-	return pbc;
-}
-
 static opcode_handler tid_qp_ok(int opcode, struct hfi1_packet *packet)
 {
 	if (packet->qp->ibqp.qp_type != IB_QPT_RC ||
@@ -698,6 +669,35 @@ drop_rcu:
 	rcu_read_unlock();
 drop:
 	ibp->rvp.n_pkt_drops++;
+}
+
+static u64 hfi1_fault_tx(struct rvt_qp *qp, u8 opcode, u64 pbc)
+{
+#ifdef CONFIG_HFI1_FAULT_INJECTION
+	if ((opcode & IB_OPCODE_MSP) == IB_OPCODE_MSP)
+		/*
+		 * In order to drop non-IB traffic we
+		 * set PbcInsertHrc to NONE (0x2).
+		 * The packet will still be delivered
+		 * to the receiving node but a
+		 * KHdrHCRCErr (KDETH packet with a bad
+		 * HCRC) will be triggered and the
+		 * packet will not be delivered to the
+		 * correct context.
+		 */
+		pbc |= (u64)PBC_IHCRC_NONE << PBC_INSERT_HCRC_SHIFT;
+	else
+		/*
+		 * In order to drop regular verbs
+		 * traffic we set the PbcTestEbp
+		 * flag. The packet will still be
+		 * delivered to the receiving node but
+		 * a 'late ebp error' will be
+		 * triggered and will be dropped.
+		 */
+		pbc |= PBC_TEST_EBP;
+#endif
+	return pbc;
 }
 
 static inline void hfi1_handle_packet(struct hfi1_packet *packet,
@@ -1031,7 +1031,8 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		if (unlikely(ret))
 			goto bail_build;
 	}
-	ret =  sdma_send_txreq(tx->sde, ps->wait, &tx->txreq, ps->pkts_sent);
+	ret =  sdma_send_txreq(tx->sde, ps->wait, &tx->txreq,
+			       ps->pkts_sent);
 	if (unlikely(ret < 0)) {
 		if (ret == -ECOMM)
 			goto bail_ecomm;
@@ -1153,7 +1154,9 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 
 		/* set PBC_DC_INFO bit (aka SC[4]) in pbc_flags */
 		pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
-		
+		if (unlikely(hfi1_dbg_fault_opcode(qp, opcode, false)))
+			pbc = hfi1_fault_tx(qp, opcode, pbc);
+
 		/*
 		 * Determine whether to insert the HCRC based on packet
 		 * opcode.
@@ -1161,10 +1164,7 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		if ((opcode & IB_OPCODE_TID_RDMA) != IB_OPCODE_TID_RDMA)
 			pbc |= (u64)PBC_IHCRC_NONE <<
 				PBC_INSERT_HCRC_SHIFT;
-		if (unlikely(hfi1_dbg_fault_opcode(qp, opcode, false)))
-			pbc = hfi1_fault_tx(qp, opcode, pbc);
 		pbc = create_pbc(ppd, pbc, qp->srate_mbps, vl, plen);
-
 	}
 	if (cb)
 		iowait_pio_inc(&priv->s_iowait);
@@ -1579,7 +1579,7 @@ static int query_port(struct rvt_dev_info *rdi, u8 port_num,
 	props->lmc = ppd->lmc;
 	/* OPA logical states match IB logical states */
 	props->state = driver_lstate(ppd);
-	props->phys_state = hfi1_ibphys_portstate(ppd);
+	props->phys_state = driver_pstate(ppd);
 	props->gid_tbl_len = HFI1_GUIDS_PER_PORT;
 	props->active_width = (u8)opa_width_to_ib(ppd->link_width_active);
 	/* see rate_show() in ib core/sysfs.c */
@@ -1753,13 +1753,22 @@ static void init_ibport(struct hfi1_pportdata *ppd)
 		ibp->sc_to_sl[i] = i;
 	}
 
+	for (i = 0; i < RVT_MAX_TRAP_LISTS ; i++)
+		INIT_LIST_HEAD(&ibp->rvp.trap_lists[i].list);
+	setup_timer(&ibp->rvp.trap_timer, hfi1_handle_trap_timer,
+		    (unsigned long)ibp);
+
 	spin_lock_init(&ibp->rvp.lock);
 	/* Set the prefix to the default value (see ch. 4.1.1) */
 	ibp->rvp.gid_prefix = IB_DEFAULT_GID_PREFIX;
 	ibp->rvp.sm_lid = 0;
-	/* Below should only set bits defined in OPA PortInfo.CapabilityMask */
+	/*
+	 * Below should only set bits defined in OPA PortInfo.CapabilityMask
+	 * and PortInfo.CapabilityMask3
+	 */
 	ibp->rvp.port_cap_flags = IB_PORT_AUTO_MIGR_SUP |
 		IB_PORT_CAP_MASK_NOTICE_SUP;
+	ibp->rvp.port_cap3_flags = OPA_CAP_MASK3_IsSharedSpaceSupported;
 	ibp->rvp.pma_counter_select[0] = IB_PMA_PORT_XMIT_DATA;
 	ibp->rvp.pma_counter_select[1] = IB_PMA_PORT_RCV_DATA;
 	ibp->rvp.pma_counter_select[2] = IB_PMA_PORT_XMIT_PKTS;
@@ -1768,6 +1777,125 @@ static void init_ibport(struct hfi1_pportdata *ppd)
 
 	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
 	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
+}
+
+static char *driver_cntr_names[] = {
+	/* must be element 0*/
+	"DRIVER_KernIntr",
+	"DRIVER_ErrorIntr",
+	"DRIVER_Tx_Errs",
+	"DRIVER_Rcv_Errs",
+	"DRIVER_HW_Errs",
+	"DRIVER_NoPIOBufs",
+	"DRIVER_CtxtsOpen",
+	"DRIVER_RcvLen_Errs",
+	"DRIVER_EgrBufFull",
+	"DRIVER_EgrHdrFull"
+};
+
+static int num_driver_cntrs = ARRAY_SIZE(driver_cntr_names);
+
+static struct rdma_hw_stats *alloc_hw_stats(struct ib_device *ibdev,
+					    u8 port_num)
+{
+	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+	struct rdma_hw_stats *stats;
+	unsigned long lifespan = RDMA_HW_STATS_DEFAULT_LIFESPAN;
+	int num_hw_cntrs, num_sw_cntrs, num_cntrs;
+	int cntr_size, name_size, nameslen;
+	char *stats_priv, *name_buffer, *p;
+	char **cntr_names, **sw_cntr_names;
+	int i;
+
+	if (!port_num) {
+		num_hw_cntrs = dd->ndevcntrs;
+		num_sw_cntrs = num_driver_cntrs;
+		name_buffer = dd->cntrnames;
+		nameslen = dd->cntrnameslen;
+		sw_cntr_names = driver_cntr_names;
+	} else {
+		num_hw_cntrs = dd->nportcntrs;
+		num_sw_cntrs = 0;
+		name_buffer = dd->portcntrnames;
+		nameslen = dd->portcntrnameslen;
+		sw_cntr_names = NULL;
+	}
+
+	/*
+	 * The layout of the stats structure (N is the number of counters):
+	 * "rdma_hw_stats | counters[N] | names[N] | name_buffer". The first
+	 * two fields are expected by the caller. The last two fields are
+	 * private.
+	 */
+	num_cntrs = num_hw_cntrs + num_sw_cntrs;
+	cntr_size = num_cntrs  * sizeof(u64);
+	name_size = num_cntrs * sizeof(char *);
+	stats = kzalloc(sizeof(*stats) + cntr_size + name_size + nameslen,
+			GFP_KERNEL);
+	if (!stats)
+		return NULL;
+
+	stats_priv = (char *)stats + sizeof(*stats) + cntr_size;
+	cntr_names = (char **)stats_priv;
+	p = stats_priv + name_size;
+	memcpy(p, name_buffer, nameslen);
+
+	for (i = 0; i < num_hw_cntrs; i++) {
+		cntr_names[i] = p;
+		p = strchr(p, '\n');
+		if (!p)
+			break;
+		*p++ = '\0';
+	}
+
+	for (i = 0; i < num_sw_cntrs; i++)
+		cntr_names[num_hw_cntrs + i] = sw_cntr_names[i];
+
+	stats->names = (const char * const *)cntr_names;
+	stats->num_counters = num_cntrs;
+	stats->lifespan = msecs_to_jiffies(lifespan);
+	return stats;
+}
+
+static u64 hfi1_sps_ints(void)
+{
+	unsigned long flags;
+	struct hfi1_devdata *dd;
+	u64 sps_ints = 0;
+
+	spin_lock_irqsave(&hfi1_devs_lock, flags);
+	list_for_each_entry(dd, &hfi1_dev_list, list) {
+		sps_ints += get_all_cpu_total(dd->int_counter);
+	}
+	spin_unlock_irqrestore(&hfi1_devs_lock, flags);
+	return sps_ints;
+}
+
+static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats,
+			u8 port, int index)
+{
+	struct hfi1_devdata *dd = dd_from_ibdev(ibdev);
+	u64 *values;
+	int count;
+
+	if (!port) {
+		u64 *v = (u64 *)&hfi1_stats;
+		int i;
+
+		hfi1_read_cntrs(dd, NULL, &values);
+		values[dd->ndevcntrs] = hfi1_sps_ints();
+		for (i = 1; i < num_driver_cntrs; i++)
+			values[dd->ndevcntrs + i] = v[i];
+		count = dd->ndevcntrs + num_driver_cntrs;
+	} else {
+		struct hfi1_ibport *ibp = to_iport(ibdev, port);
+
+		hfi1_read_portcntrs(ppd_from_ibp(ibp), NULL, &values);
+		count = dd->nportcntrs;
+	}
+
+	memcpy(stats->value, values, count * sizeof(u64));
+	return count;
 }
 
 /**
@@ -1817,6 +1945,8 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	ibdev->phys_port_cnt = dd->num_pports;
 	ibdev->dma_device = &dd->pcidev->dev;
 	ibdev->modify_device = modify_device;
+	ibdev->alloc_hw_stats = alloc_hw_stats;
+	ibdev->get_hw_stats = get_hw_stats;
 
 	/* keep process mad in the driver */
 	ibdev->process_mad = hfi1_process_mad;

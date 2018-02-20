@@ -1,0 +1,58 @@
+Description: Remove IPOIB_MCAST_RUN bi
+ From linux 0e5544d:
+ .
+ After Doug Ledford's changes there is no need in that bit, it's
+ semantic becomes subset of the IPOIB_FLAG_OPER_UP bit.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Erez Shitrit <erezsh@mellanox.com
+Origin: https://github.com/torvalds/linux/commit/0e5544d9bff432bfcac49ecf237738cc7cf3d032#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
+@@ -87,7 +87,6 @@ enum {
+ 	IPOIB_FLAG_ADMIN_UP	  = 2,
+ 	IPOIB_PKEY_ASSIGNED	  = 3,
+ 	IPOIB_FLAG_SUBINTERFACE	  = 5,
+-	IPOIB_MCAST_RUN		  = 6,
+ 	IPOIB_STOP_REAPER	  = 7,
+ 	IPOIB_FLAG_ADMIN_CM	  = 9,
+ 	IPOIB_FLAG_UMCAST	  = 10,
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
+@@ -71,7 +71,7 @@ static void __ipoib_mcast_schedule_join_
+ 					       struct ipoib_mcast *mcast,
+ 					       bool delay)
+ {
+-	if (!test_bit(IPOIB_MCAST_RUN, &priv->flags))
++	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
+ 		return;
+ 
+ 	/*
+@@ -519,7 +519,7 @@ void ipoib_mcast_join_task(struct work_s
+ 	struct ipoib_mcast *mcast = NULL;
+ 	int create = 1;
+ 
+-	if (!test_bit(IPOIB_MCAST_RUN, &priv->flags))
++	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
+ 		return;
+ 
+ 	if (ib_query_port(priv->ca, priv->port, &port_attr) ||
+@@ -629,7 +629,6 @@ int ipoib_mcast_start_thread(struct net_
+ 	ipoib_dbg_mcast(priv, "starting multicast thread\n");
+ 
+ 	spin_lock_irqsave(&priv->lock, flags);
+-	set_bit(IPOIB_MCAST_RUN, &priv->flags);
+ 	__ipoib_mcast_schedule_join_thread(priv, NULL, 0);
+ 	spin_unlock_irqrestore(&priv->lock, flags);
+ 
+@@ -644,7 +643,6 @@ int ipoib_mcast_stop_thread(struct net_d
+ 	ipoib_dbg_mcast(priv, "stopping multicast thread\n");
+ 
+ 	spin_lock_irqsave(&priv->lock, flags);
+-	clear_bit(IPOIB_MCAST_RUN, &priv->flags);
+ 	cancel_delayed_work(&priv->mcast_task);
+ 	spin_unlock_irqrestore(&priv->lock, flags);
+ 

@@ -67,6 +67,7 @@
 #include "aspm.h"
 #include "affinity.h"
 #include "exp_rcv.h"
+#include "user_exp_rcv.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -147,7 +148,7 @@ static void hfi1_deferred_init(struct work_struct *work);
  */
 int hfi1_create_ctxts(struct hfi1_devdata *dd)
 {
-	unsigned i;
+	u16 i;
 	int ret;
 
 	/* Control context has to be always 0 */
@@ -207,7 +208,7 @@ int hfi1_create_ctxts(struct hfi1_devdata *dd)
 nomem:
 	ret = -ENOMEM;
 
-	for (i = 0; dd->rcd && i < dd->num_rcv_contexts; ++i)
+	for (i = 0; dd->rcd && i < dd->first_user_ctxt; ++i)
 		hfi1_rcd_put(dd->rcd[i]);
 
 	/* All the contexts should be freed, free the array */
@@ -249,7 +250,7 @@ void hfi1_rcd_get(struct hfi1_ctxtdata *rcd)
 /*
  * Common code for user and kernel context setup.
  */
-struct hfi1_ctxtdata *hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, u32 ctxt,
+struct hfi1_ctxtdata *hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, u16 ctxt,
 					   int numa)
 {
 	struct hfi1_devdata *dd = ppd->dd;
@@ -626,8 +627,8 @@ static int init_after_reset(struct hfi1_devdata *dd)
 	 */
 	for (i = 0; i < dd->num_rcv_contexts; i++)
 		hfi1_rcvctrl(dd, HFI1_RCVCTRL_CTXT_DIS |
-				  HFI1_RCVCTRL_INTRAVAIL_DIS |
-				  HFI1_RCVCTRL_TAILUPD_DIS, i);
+			     HFI1_RCVCTRL_INTRAVAIL_DIS |
+			     HFI1_RCVCTRL_TAILUPD_DIS, dd->rcd[i]);
 	pio_send_control(dd, PSC_GLOBAL_DISABLE);
 	for (i = 0; i < dd->num_send_contexts; i++)
 		sc_disable(dd->send_contexts[i].sc);
@@ -638,7 +639,7 @@ static int init_after_reset(struct hfi1_devdata *dd)
 static void enable_chip(struct hfi1_devdata *dd)
 {
 	u32 rcvmask;
-	u32 i;
+	u16 i;
 
 	/* enable PIO send */
 	pio_send_control(dd, PSC_GLOBAL_ENABLE);
@@ -659,7 +660,7 @@ static void enable_chip(struct hfi1_devdata *dd)
 			rcvmask |= HFI1_RCVCTRL_NO_EGR_DROP_ENB;
 		if (HFI1_CAP_IS_KSET(TID_RDMA))
 			rcvmask |= HFI1_RCVCTRL_TIDFLOW_ENB;
-		hfi1_rcvctrl(dd, rcvmask, i);
+		hfi1_rcvctrl(dd, rcvmask, dd->rcd[i]);
 		sc_enable(dd->rcd[i]->sc);
 	}
 }
@@ -735,7 +736,8 @@ wq_error:
 int hfi1_init(struct hfi1_devdata *dd, int reinit)
 {
 	int ret = 0, pidx, lastfail = 0;
-	unsigned i, len;
+	unsigned long len;
+	u16 i;
 	struct hfi1_ctxtdata *rcd;
 	struct hfi1_pportdata *ppd;
 
@@ -958,10 +960,10 @@ static void shutdown_device(struct hfi1_devdata *dd)
 		ppd = dd->pport + pidx;
 		for (i = 0; i < dd->num_rcv_contexts; i++)
 			hfi1_rcvctrl(dd, HFI1_RCVCTRL_TAILUPD_DIS |
-					  HFI1_RCVCTRL_CTXT_DIS |
-					  HFI1_RCVCTRL_INTRAVAIL_DIS |
-					  HFI1_RCVCTRL_PKEY_DIS |
-					  HFI1_RCVCTRL_ONE_PKT_EGR_DIS, i);
+				     HFI1_RCVCTRL_CTXT_DIS |
+				     HFI1_RCVCTRL_INTRAVAIL_DIS |
+				     HFI1_RCVCTRL_PKEY_DIS |
+				     HFI1_RCVCTRL_ONE_PKT_EGR_DIS, dd->rcd[i]);
 		/*
 		 * Gracefully stop all sends allowing any in progress to
 		 * trickle out first.

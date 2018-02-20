@@ -67,18 +67,6 @@ static const char * const irq_type_names[] = {
 	"OTHER",
 };
 
-/* For backporting from kernel 4.6 to RHEL 7.2 */
-#define topology_sibling_cpumask topology_thread_cpumask
-
-/* Copied from include/linux/cpumask.h */
-/**
- * cpumask_pr_args - printf args to output a cpumask
- * @maskp: cpumask to be printed
- *
- * Can be used to provide arguments for '%*pb[l]' when printing a cpumask.
- */
-#define cpumask_pr_args(maskp)          nr_cpu_ids, cpumask_bits(maskp)
-
 /* Per NUMA node count of HFI devices */
 static unsigned int *hfi1_per_node_cntr;
 
@@ -88,9 +76,6 @@ static inline void init_cpu_mask_set(struct cpu_mask_set *set)
 	cpumask_clear(&set->used);
 	set->gen = 0;
 }
-
-/* For backporting from kernel 4.6 to RHEL 7.2 */
-#define topology_sibling_cpumask topology_thread_cpumask
 
 /* Initialize non-HT cpu cores mask */
 void init_real_cpu_mask(void)
@@ -705,13 +690,13 @@ int hfi1_get_proc_affinity(int node)
 		  cpumask_pr_args(hw_thread_mask));
 
 	node_mask = cpumask_of_node(node);
-	hfi1_cdbg(PROC, "device on NUMA %u, CPUs %*pbl", node,
+	hfi1_cdbg(PROC, "Device on NUMA %u, CPUs %*pbl", node,
 		  cpumask_pr_args(node_mask));
 
 	/* Get cpumask of available CPUs on preferred NUMA */
 	cpumask_and(available_mask, hw_thread_mask, node_mask);
 	cpumask_andnot(available_mask, available_mask, &set->used);
-	hfi1_cdbg(PROC, "Available CPUs on NUMA %u:  %*pbl", node,
+	hfi1_cdbg(PROC, "Available CPUs on NUMA %u: %*pbl", node,
 		  cpumask_pr_args(available_mask));
 
 	/*
@@ -740,7 +725,7 @@ int hfi1_get_proc_affinity(int node)
 		/* Excluding preferred NUMA cores */
 		cpumask_andnot(available_mask, available_mask, node_mask);
 		hfi1_cdbg(PROC,
-			  "Preferred NUMA node cores are taken, cores available in other NUMA nodes:  %*pbl",
+			  "Preferred NUMA node cores are taken, cores available in other NUMA nodes: %*pbl",
 			  cpumask_pr_args(available_mask));
 
 		/*
@@ -751,7 +736,7 @@ int hfi1_get_proc_affinity(int node)
 		if (!cpumask_empty(diff))
 			cpumask_copy(available_mask, diff);
 	}
-	hfi1_cdbg(PROC, "possible CPUs for process %*pbl",
+	hfi1_cdbg(PROC, "Possible CPUs for process: %*pbl",
 		  cpumask_pr_args(available_mask));
 
 	cpu = cpumask_first(available_mask);
@@ -792,50 +777,3 @@ void hfi1_put_proc_affinity(int cpu)
 	mutex_unlock(&affinity->lock);
 }
 
-/* For porting to RHEL 7.2. Copied from lib/bitmap.c and include/linux/cpumask.h */
-/**
- * bitmap_print_to_pagebuf - convert bitmap to list or hex format ASCII string
- * @list: indicates whether the bitmap must be list
- * @buf: page aligned buffer into which string is placed
- * @maskp: pointer to bitmap to convert
- * @nmaskbits: size of bitmap, in bits
- *
- * Output format is a comma-separated list of decimal numbers and
- * ranges if list is specified or hex digits grouped into comma-separated
- * sets of 8 digits/set. Returns the number of characters written to buf.
- *
- * It is assumed that @buf is a pointer into a PAGE_SIZE area and that
- * sufficient storage remains at @buf to accommodate the
- *  bitmap_print_to_pagebuf() output.
- */
-static int bitmap_print_to_pagebuf(bool list, char *buf, const unsigned long *maskp,
-				   int nmaskbits)
-{
-        ptrdiff_t len = PTR_ALIGN(buf + PAGE_SIZE - 1, PAGE_SIZE) - buf;
-        int n = 0;
-
-        if (len > 1)
-                n = list ? scnprintf(buf, len, "%*pbl\n", nmaskbits, maskp) :
-                           scnprintf(buf, len, "%*pb\n", nmaskbits, maskp);
-        return n;
-}
-
-/**
- * cpumap_print_to_pagebuf  - copies the cpumask into the buffer either
- *      as comma-separated list of cpus or hex values of cpumask
- * @list: indicates whether the cpumap must be list
- * @mask: the cpumask to copy
- * @buf: the buffer to copy into
- *
- * Returns the length of the (null-terminated) @buf string, zero if
- * nothing is copied.
- */
-static inline ssize_t
-cpumap_print_to_pagebuf(bool list, char *buf, const struct cpumask *mask)
-{
-        return bitmap_print_to_pagebuf(list, buf, cpumask_bits(mask),
-                                      nr_cpu_ids);
-}
-
-/* Prevents concurrent reads and writes of the sdma_affinity attrib */
-static DEFINE_MUTEX(sdma_affinity_mutex);

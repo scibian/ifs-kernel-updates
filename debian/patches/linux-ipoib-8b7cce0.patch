@@ -1,0 +1,67 @@
+Description: Prevent lockdep warning in __ipoib_ib_dev_flush
+ From linux 8b7cce0:
+ .
+ __ipoib_ib_dev_flush calls itself recursively on child devices, and lockdep
+ complains about locking vlan_rwsem twice (see below). Use down_read_nested
+ instead of down_read to prevent the warning.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Haggai Eran <haggaie@mellanox.com>
+Origin: https://github.com/torvalds/linux/commit/8b7cce0dae956b329d09099f8739821936cf7c0f#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
+@@ -985,20 +985,21 @@ static inline int update_child_pkey(stru
+ }
+ 
+ static void __ipoib_ib_dev_flush(struct ipoib_dev_priv *priv,
+-				enum ipoib_flush_level level)
++				enum ipoib_flush_level level,
++				int nesting)
+ {
+ 	struct ipoib_dev_priv *cpriv;
+ 	struct net_device *dev = priv->dev;
+ 	int result;
+ 
+-	down_read(&priv->vlan_rwsem);
++	down_read_nested(&priv->vlan_rwsem, nesting);
+ 
+ 	/*
+ 	 * Flush any child interfaces too -- they might be up even if
+ 	 * the parent is down.
+ 	 */
+ 	list_for_each_entry(cpriv, &priv->child_intfs, list)
+-		__ipoib_ib_dev_flush(cpriv, level);
++		__ipoib_ib_dev_flush(cpriv, level, nesting + 1);
+ 
+ 	up_read(&priv->vlan_rwsem);
+ 
+@@ -1085,7 +1086,7 @@ void ipoib_ib_dev_flush_light(struct wor
+ 	struct ipoib_dev_priv *priv =
+ 		container_of(work, struct ipoib_dev_priv, flush_light);
+ 
+-	__ipoib_ib_dev_flush(priv, IPOIB_FLUSH_LIGHT);
++	__ipoib_ib_dev_flush(priv, IPOIB_FLUSH_LIGHT, 0);
+ }
+ 
+ void ipoib_ib_dev_flush_normal(struct work_struct *work)
+@@ -1093,7 +1094,7 @@ void ipoib_ib_dev_flush_normal(struct wo
+ 	struct ipoib_dev_priv *priv =
+ 		container_of(work, struct ipoib_dev_priv, flush_normal);
+ 
+-	__ipoib_ib_dev_flush(priv, IPOIB_FLUSH_NORMAL);
++	__ipoib_ib_dev_flush(priv, IPOIB_FLUSH_NORMAL, 0);
+ }
+ 
+ void ipoib_ib_dev_flush_heavy(struct work_struct *work)
+@@ -1101,7 +1102,7 @@ void ipoib_ib_dev_flush_heavy(struct wor
+ 	struct ipoib_dev_priv *priv =
+ 		container_of(work, struct ipoib_dev_priv, flush_heavy);
+ 
+-	__ipoib_ib_dev_flush(priv, IPOIB_FLUSH_HEAVY);
++	__ipoib_ib_dev_flush(priv, IPOIB_FLUSH_HEAVY, 0);
+ }
+ 
+ void ipoib_ib_dev_cleanup(struct net_device *dev)

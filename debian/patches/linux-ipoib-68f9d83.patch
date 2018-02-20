@@ -1,0 +1,35 @@
+Description: Remove unnecessary port query
+ There are two queries for port attributes one after another. A second
+ call is not needed since port_attr structure already holds the data.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Alex Estrin <alex.estrin@intel.com>
+Origin: https://github.com/torvalds/linux/commit/68f9d83c7765b110de54677573e9538f3ca6ca04#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
+@@ -529,21 +529,13 @@ void ipoib_mcast_join_task(struct work_s
+ 			  port_attr.state);
+ 		return;
+ 	}
++	priv->local_lid = port_attr.lid;
+ 
+ 	if (ib_query_gid(priv->ca, priv->port, 0, &priv->local_gid))
+ 		ipoib_warn(priv, "ib_query_gid() failed\n");
+ 	else
+ 		memcpy(priv->dev->dev_addr + 4, priv->local_gid.raw, sizeof (union ib_gid));
+ 
+-	{
+-		struct ib_port_attr attr;
+-
+-		if (!ib_query_port(priv->ca, priv->port, &attr))
+-			priv->local_lid = attr.lid;
+-		else
+-			ipoib_warn(priv, "ib_query_port failed\n");
+-	}
+-
+ 	if (!priv->broadcast) {
+ 		struct ipoib_mcast *broadcast;
+ 

@@ -288,12 +288,9 @@ int hfi1_diag_add(struct hfi1_devdata *dd)
 
 	snprintf(name, sizeof(name), "%s_diagpkt", class_name());
 	if (atomic_inc_return(&diagpkt_count) == 1) {
-		kobject_get(&dd->kobj);
 		ret = hfi1_cdev_init(HFI1_DIAGPKT_MINOR, name,
 				     &diagpkt_file_ops, &diagpkt_cdev,
 				     &diagpkt_device, false, &dd->kobj);
-		if (ret)
-			kobject_put(&dd->kobj);
 	}
 
 	return ret;
@@ -318,18 +315,15 @@ static void hfi1_snoop_remove(struct hfi1_devdata *dd)
 
 	spin_lock_irqsave(&dd->hfi1_snoop.snoop_lock, flags);
 	drain_snoop_list(&dd->hfi1_snoop.queue);
-	spin_unlock_irqrestore(&dd->hfi1_snoop.snoop_lock, flags);
 	hfi1_cdev_cleanup(&dd->hfi1_snoop.cdev, &dd->hfi1_snoop.class_dev);
-	kobject_put(&dd->kobj);
+	spin_unlock_irqrestore(&dd->hfi1_snoop.snoop_lock, flags);
 }
 
 void hfi1_diag_remove(struct hfi1_devdata *dd)
 {
 	hfi1_snoop_remove(dd);
-	if (atomic_dec_and_test(&diagpkt_count)) {
+	if (atomic_dec_and_test(&diagpkt_count))
 		hfi1_cdev_cleanup(&diagpkt_cdev, &diagpkt_device);
-		kobject_put(&dd->kobj);
-	}
 	hfi1_cdev_cleanup(&dd->diag_cdev, &dd->diag_device);
 }
 
@@ -601,7 +595,6 @@ static int hfi1_snoop_add(struct hfi1_devdata *dd, const char *name)
 	INIT_LIST_HEAD(&dd->hfi1_snoop.queue);
 	init_waitqueue_head(&dd->hfi1_snoop.waitq);
 
-	kobject_get(&dd->kobj);
 	ret = hfi1_cdev_init(HFI1_SNOOP_CAPTURE_BASE + dd->unit, name,
 			     &snoop_file_ops,
 			     &dd->hfi1_snoop.cdev, &dd->hfi1_snoop.class_dev,
@@ -611,7 +604,6 @@ static int hfi1_snoop_add(struct hfi1_devdata *dd, const char *name)
 		dd_dev_err(dd, "Couldn't create %s device: %d", name, ret);
 		hfi1_cdev_cleanup(&dd->hfi1_snoop.cdev,
 				  &dd->hfi1_snoop.class_dev);
-		kobject_put(&dd->kobj);
 	}
 
 	return ret;
@@ -1161,7 +1153,7 @@ static long hfi1_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (!ppd)
 			return -EINVAL;
 
-		value = hfi1_ibphys_portstate(ppd);
+		value = driver_pstate(ppd);
 		value <<= 4;
 		value |= driver_lstate(ppd);
 
@@ -1172,8 +1164,8 @@ static long hfi1_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 			struct hfi1_ibport *ibp = &ppd->ibport_data;
 
 			link_info.port_state = value;
-			link_info.node_guid = get_sguid(ibp,
-							HFI1_PORT_GUID_INDEX);
+                        link_info.node_guid = get_sguid(ibp,
+                                                        HFI1_PORT_GUID_INDEX);
 			link_info.link_speed_active =
 						ppd->link_speed_active;
 			link_info.link_width_active =
@@ -1306,40 +1298,11 @@ static inline int hfi1_filter_check(void *val, const char *msg)
 
 static int hfi1_filter_lid(void *ibhdr, void *packet_data, void *value)
 {
-	struct ib_header *hdr;
-	int ret;
-
-	ret = hfi1_filter_check(ibhdr, "header");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(value, "user");
-	if (ret)
-		return ret;
-	hdr = (struct ib_header *)ibhdr;
-
-	if (*((u16 *)value) == be16_to_cpu(hdr->lrh[3])) /* matches slid */
-		return HFI1_FILTER_HIT; /* matched */
-
 	return HFI1_FILTER_MISS; /* Not matched */
 }
 
 static int hfi1_filter_dlid(void *ibhdr, void *packet_data, void *value)
 {
-	struct ib_header *hdr;
-	int ret;
-
-	ret = hfi1_filter_check(ibhdr, "header");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(value, "user");
-	if (ret)
-		return ret;
-
-	hdr = (struct ib_header *)ibhdr;
-
-	if (*((u16 *)value) == be16_to_cpu(hdr->lrh[1]))
-		return HFI1_FILTER_HIT;
-
 	return HFI1_FILTER_MISS;
 }
 
@@ -1347,159 +1310,28 @@ static int hfi1_filter_dlid(void *ibhdr, void *packet_data, void *value)
 static int hfi1_filter_mad_mgmt_class(void *ibhdr, void *packet_data,
 				      void *value)
 {
-	struct ib_header *hdr;
-	struct ib_other_headers *ohdr = NULL;
-	struct ib_smp *smp = NULL;
-	u32 qpn = 0;
-	int ret;
-
-	ret = hfi1_filter_check(ibhdr, "header");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(packet_data, "packet_data");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(value, "user");
-	if (ret)
-		return ret;
-
-	hdr = (struct ib_header *)ibhdr;
-
-	/* Check for GRH */
-	if ((be16_to_cpu(hdr->lrh[0]) & 3) == HFI1_LRH_BTH)
-		ohdr = &hdr->u.oth; /* LRH + BTH + DETH */
-	else
-		ohdr = &hdr->u.l.oth; /* LRH + GRH + BTH + DETH */
-
-	qpn = be32_to_cpu(ohdr->bth[1]) & 0x00FFFFFF;
-	if (qpn <= 1) {
-		smp = (struct ib_smp *)packet_data;
-		if (*((u8 *)value) == smp->mgmt_class)
-			return HFI1_FILTER_HIT;
-		else
-			return HFI1_FILTER_MISS;
-	}
-	return HFI1_FILTER_ERR;
+	return HFI1_FILTER_MISS;
 }
 
 static int hfi1_filter_qp_number(void *ibhdr, void *packet_data, void *value)
 {
-	struct ib_header *hdr;
-	struct ib_other_headers *ohdr = NULL;
-	int ret;
-
-	ret = hfi1_filter_check(ibhdr, "header");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(value, "user");
-	if (ret)
-		return ret;
-
-	hdr = (struct ib_header *)ibhdr;
-
-	/* Check for GRH */
-	if ((be16_to_cpu(hdr->lrh[0]) & 3) == HFI1_LRH_BTH)
-		ohdr = &hdr->u.oth; /* LRH + BTH + DETH */
-	else
-		ohdr = &hdr->u.l.oth; /* LRH + GRH + BTH + DETH */
-	if (*((u32 *)value) == (be32_to_cpu(ohdr->bth[1]) & 0x00FFFFFF))
-		return HFI1_FILTER_HIT;
-
 	return HFI1_FILTER_MISS;
 }
 
 static int hfi1_filter_ibpacket_type(void *ibhdr, void *packet_data,
 				     void *value)
 {
-	u32 lnh = 0;
-	u8 opcode = 0;
-	struct ib_header *hdr;
-	struct ib_other_headers *ohdr = NULL;
-	int ret;
-
-	ret = hfi1_filter_check(ibhdr, "header");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(value, "user");
-	if (ret)
-		return ret;
-
-	hdr = (struct ib_header *)ibhdr;
-
-	lnh = (be16_to_cpu(hdr->lrh[0]) & 3);
-
-	if (lnh == HFI1_LRH_BTH)
-		ohdr = &hdr->u.oth;
-	else if (lnh == HFI1_LRH_GRH)
-		ohdr = &hdr->u.l.oth;
-	else
-		return HFI1_FILTER_ERR;
-
-	opcode = be32_to_cpu(ohdr->bth[0]) >> 24;
-
-	if (*((u8 *)value) == ((opcode >> 5) & 0x7))
-		return HFI1_FILTER_HIT;
-
 	return HFI1_FILTER_MISS;
 }
 
 static int hfi1_filter_ib_service_level(void *ibhdr, void *packet_data,
 					void *value)
 {
-	struct ib_header *hdr;
-	int ret;
-
-	ret = hfi1_filter_check(ibhdr, "header");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(value, "user");
-	if (ret)
-		return ret;
-
-	hdr = (struct ib_header *)ibhdr;
-
-	if ((*((u8 *)value)) == ((be16_to_cpu(hdr->lrh[0]) >> 4) & 0xF))
-		return HFI1_FILTER_HIT;
-
 	return HFI1_FILTER_MISS;
 }
 
 static int hfi1_filter_ib_pkey(void *ibhdr, void *packet_data, void *value)
 {
-	u32 lnh = 0;
-	struct ib_header *hdr;
-	struct ib_other_headers *ohdr = NULL;
-	int ret;
-
-	ret = hfi1_filter_check(ibhdr, "header");
-	if (ret)
-		return ret;
-	ret = hfi1_filter_check(value, "user");
-	if (ret)
-		return ret;
-
-	hdr = (struct ib_header *)ibhdr;
-
-	lnh = (be16_to_cpu(hdr->lrh[0]) & 3);
-	if (lnh == HFI1_LRH_BTH)
-		ohdr = &hdr->u.oth;
-	else if (lnh == HFI1_LRH_GRH)
-		ohdr = &hdr->u.l.oth;
-	else
-		return HFI1_FILTER_ERR;
-
-	/* P_key is 16-bit entity, however top most bit indicates
-	 * type of membership. 0 for limited and 1 for Full.
-	 * Limited members cannot accept information from other
-	 * Limited members, but communication is allowed between
-	 * every other combination of membership.
-	 * Hence we'll omit comparing top-most bit while filtering
-	 */
-
-	if ((*(u16 *)value & 0x7FFF) ==
-		((be32_to_cpu(ohdr->bth[0])) & 0x7FFF))
-		return HFI1_FILTER_HIT;
-
 	return HFI1_FILTER_MISS;
 }
 
@@ -1570,8 +1402,8 @@ static inline void *hfi1_get_packet_header(struct hfi1_devdata *dd,
 int snoop_recv_handler(struct hfi1_packet *packet)
 {
 	struct hfi1_pportdata *ppd = packet->rcd->ppd;
-	struct ib_header *hdr = hfi1_get_packet_header(packet->rcd->dd,
-						       packet->rhf_addr);
+	struct hfi1_ib_header *hdr = hfi1_get_packet_header(packet->rcd->dd,
+							    packet->rhf_addr);
 	int header_size = (u8 *)packet->rhf_addr - (u8 *)hdr;
 	void *data = packet->ebuf;
 	u32 tlen = packet->tlen;
@@ -1583,9 +1415,6 @@ int snoop_recv_handler(struct hfi1_packet *packet)
 
 	snoop_dbg("PACKET IN: hdr size %d tlen %d data %p", header_size, tlen,
 		  data);
-
-	trace_snoop_capture(ppd->dd, header_size, hdr, tlen - header_size,
-			    data);
 
 	if (!ppd->dd->hfi1_snoop.filter_callback) {
 		snoop_dbg("filter not set");
@@ -1877,7 +1706,7 @@ out:
 }
 
 /*
- * Callers of this must pass a ib_header type for the from ptr. Currently
+ * Callers of this must pass a hfi1_ib_header type for the from ptr. Currently
  * this can be used anywhere, but the intention is for inline ACKs for RC and
  * CCA packets. We don't restrict this usage though.
  */
@@ -1903,7 +1732,7 @@ void snoop_inline_pio_send(struct hfi1_devdata *dd, struct pio_buf *pbuf,
 		ret = HFI1_FILTER_HIT;
 	} else {
 		ret = dd->hfi1_snoop.filter_callback(
-				(struct ib_header *)from,
+				(struct hfi1_ib_header *)from,
 				NULL,
 				dd->hfi1_snoop.filter_value);
 	}

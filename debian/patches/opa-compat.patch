@@ -1,0 +1,213 @@
+Description: Add opa-compat module and headers
+ Adds source code for the opa-compat module. This module provides headers and kernel module
+ functionality required by ifs-kernel-updates but is missing from the target kernel.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- /dev/null
++++ b/include/core_compat.h
+@@ -0,0 +1,39 @@
++/*
++ * Copyright (c) 2010 Intel Corporation.  All rights reserved.
++ * Copyright (c) 2016-2017 System Fabric Works, Inc.  All rights reserved.
++ * (C) 2012 Google, Inc.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef CORE_COMPAT_H
++#define CORE_COMPAT_H
++
++
++#endif
+--- /dev/null
++++ b/opa_compat/Makefile
+@@ -0,0 +1,33 @@
++#
++# opa_compat module
++# Copyright (c)2017 System Fabric Works, Inc.
++#
++# Called from the kernel module build system.
++#
++
++
++ifneq ($(KERNELRELEASE),)
++#kbuild part of makefile
++
++ccflags-y := -I$(src)/../include -include $(src)/../ifs-kernel-updates-conf.h
++
++obj-m += opa_compat.o
++
++opa_compat-y := main.o util.o
++
++else
++#normal makefile
++KDIR ?= /lib/modules/`uname -r`/build
++
++default:
++	env
++	$(MAKE) -C $(KDIR) M=$$PWD NOSTDINC_FLAGS=-I$$PWD
++
++clean:
++	$(MAKE) -C $(KDIR) M=$$PWD clean
++
++install:
++	$(MAKE) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
++
++endif
++
+--- /dev/null
++++ b/opa_compat/main.c
+@@ -0,0 +1,33 @@
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Copyright (c)2017 System Fabric Works, Inc.
++ */
++#include <linux/module.h>
++
++MODULE_AUTHOR("Luis R. Rodriguez");
++MODULE_AUTHOR("Brian T. Smith");
++MODULE_DESCRIPTION("Kernel backport module");
++MODULE_LICENSE("GPL");
++
++
++void backport_dependency_symbol(void)
++{
++}
++EXPORT_SYMBOL_GPL(backport_dependency_symbol);
++
++
++static int __init backport_init(void)
++{
++        return 0;
++}
++module_init(backport_init);
++
++static void __exit backport_exit(void)
++{
++        return;
++}
++module_exit(backport_exit);
++
+--- a/hfi1/Makefile
++++ b/hfi1/Makefile
+@@ -4,10 +4,14 @@
+ #
+ # Called from the kernel module build system.
+ #
++-include ../compat.config
++
++LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
++
+ ifneq ($(KERNELRELEASE),)
+ #kbuild part of makefile
+ 
+-NOSTDINC_FLAGS += -I${M}/include
++ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
+ 
+ obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
+ 
+@@ -34,7 +38,7 @@
+ 	$(MAKE) -C $(KDIR) M=$$PWD clean
+ 
+ install:
+-	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
++	$(MAKE) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
+ 
+ endif
+ 
+--- a/rdmavt/Makefile
++++ b/rdmavt/Makefile
+@@ -4,10 +4,13 @@
+ #
+ # Called from the kernel module build system.
+ #
++
++LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
++
+ ifneq ($(KERNELRELEASE),)
+ #kbuild part of makefile
+ 
+-NOSTDINC_FLAGS += -I${M}/include
++ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
+ 
+ obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
+ 
+@@ -27,7 +30,7 @@
+ 	$(MAKE) -C $(KDIR) M=$$PWD clean
+ 
+ install:
+-	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
++	$(MAKE) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
+ 
+ endif
+ 
+--- a/hfi1/mad.h
++++ b/hfi1/mad.h
+@@ -51,6 +51,7 @@
+ #include <rdma/opa_smi.h>
+ #include <rdma/opa_port_info.h>
+ #include "opa_compat.h"
++#include "core_compat.h"
+ 
+ /*
+  * OPA Traps
+--- /dev/null
++++ b/opa_compat/util.c
+@@ -0,0 +1,14 @@
++/*
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ *
++ * Copyright (c)2017 System Fabric Works, Inc.
++ */
++
++#include <linux/kernel.h>
++#include <linux/export.h>
++#include <linux/uaccess.h>
++#include <linux/slab.h>
++#include "core_compat.h"
++
+--- a/Makefile
++++ b/Makefile
+@@ -9,6 +9,8 @@
+ 
+ CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1
+ 
++# opa_compat is not built, as it is currently empty. Leaving the patch
++# in, as support for other kernels may require its use.
+ obj-y := rdmavt/ \
+ 	hfi1/
+ 

@@ -1,0 +1,37 @@
+Description: Fix ndo_get_iflink
+ From linux 2c15395:
+ Currently, iflink of the parent interface was always accessed, even
+ when interface didn't have a parent and hence we crashed there.
+ .
+ Handle the interface types properly: for a child interface, return
+ the ifindex of the parent, for parent interface, return its ifindex.
+ .
+ For child devices, make sure to set the parent pointer prior to
+ invoking register_netdevice(), this allows the new ndo to be called
+ by the stack immediately after the child device is registered.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Erez Shitrit <erezsh@mellanox.com>
+Origin: https://github.com/torvalds/linux/commit/2c1539597419df6dfeb8ed774d60198b5830b8f7#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_vlan.c
++++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_vlan.c
+@@ -58,6 +58,7 @@ int __ipoib_vlan_add(struct ipoib_dev_pr
+ 	/* MTU will be reset when mcast join happens */
+ 	priv->dev->mtu   = IPOIB_UD_MTU(priv->max_ib_mtu);
+ 	priv->mcast_mtu  = priv->admin_mtu = priv->dev->mtu;
++	priv->parent = ppriv->dev;
+ 	set_bit(IPOIB_FLAG_SUBINTERFACE, &priv->flags);
+ 
+ 	result = ipoib_set_dev_features(priv, ppriv->ca);
+@@ -84,8 +85,6 @@ int __ipoib_vlan_add(struct ipoib_dev_pr
+ 		goto register_failed;
+ 	}
+ 
+-	priv->parent = ppriv->dev;
+-
+ 	ipoib_create_debug_files(priv->dev);
+ 
+ 	/* RTNL childs don't need proprietary sysfs entries */

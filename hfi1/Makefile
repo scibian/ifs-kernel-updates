@@ -1,0 +1,40 @@
+#
+# hfi1 module
+#
+#
+# Called from the kernel module build system.
+#
+ifneq ($(KERNELRELEASE),)
+#kbuild part of makefile
+
+ccflags-y := -I$(src)/../include
+
+obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
+
+hfi1-y := affinity.o chip.o device.o diag.o driver.o efivar.o eprom.o exp_rcv.o\
+	file_ops.o firmware.o init.o intr.o mad.o mmu_rb.o pcie.o pio.o \
+	pio_copy.o platform.o qp.o qsfp.o rc.o ruc.o sdma.o sysfs.o trace.o \
+	uc.o ud.o user_exp_rcv.o user_pages.o user_sdma.o verbs.o \
+	verbs_txreq.o tid_rdma.o opfn.o iowait.o
+hfi1-$(CONFIG_DEBUG_FS) += debugfs.o
+
+CFLAGS_trace.o = -I$(src)
+ifdef MVERSION
+CFLAGS_driver.o = -DHFI_DRIVER_VERSION_BASE=\"$(MVERSION)\"
+endif
+
+else
+#normal makefile
+KDIR ?= /lib/modules/`uname -r`/build
+
+default:
+	$(MAKE) -C $(KDIR) M=$$PWD NOSTDINC_FLAGS=-I$$PWD
+
+clean:
+	$(MAKE) -C $(KDIR) M=$$PWD clean
+
+install:
+	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
+
+endif
+

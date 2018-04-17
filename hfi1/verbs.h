@@ -77,9 +77,6 @@ struct hfi1_packet;
 
 #define HFI1_MAX_RDMA_ATOMIC     16
 
-#define IB_OPCODE_RC_SEND_LAST_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 1)
-#define IB_OPCODE_RC_SEND_ONLY_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 2)
-
 /*
  * Increment this value if any changes that break userspace ABI
  * compatibility are made.
@@ -101,12 +98,6 @@ struct hfi1_packet;
 #define HFI1_VENDOR_IPG		cpu_to_be16(0xFFA0)
 
 #define IB_DEFAULT_GID_PREFIX	cpu_to_be64(0xfe80000000000000ULL)
-
-/* Needed for RHEL 7.2 backport */
-#define IB_WC_REG_MR IB_WC_FAST_REG_MR
-
-/* For porting to RHEL 7.2. Copied from include/linux/kernel.h */
-#define U64_MAX         ((u64)~0ULL)
 
 #define RC_OP(x) IB_OPCODE_RC_##x
 #define UC_OP(x) IB_OPCODE_UC_##x

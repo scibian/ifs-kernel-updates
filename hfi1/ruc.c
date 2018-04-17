@@ -74,8 +74,10 @@ static int init_sge(struct rvt_qp *qp, struct rvt_rwqe *wqe)
 		if (wqe->sg_list[i].length == 0)
 			continue;
 		/* Check LKEY */
-		if (!rvt_lkey_ok(rkt, pd, j ? &ss->sg_list[j - 1] : &ss->sge,
-				 &wqe->sg_list[i], IB_ACCESS_LOCAL_WRITE))
+		ret = rvt_lkey_ok(rkt, pd, j ? &ss->sg_list[j - 1] : &ss->sge,
+				  NULL, &wqe->sg_list[i],
+				  IB_ACCESS_LOCAL_WRITE);
+		if (unlikely(ret <= 0))
 			goto bad_lkey;
 		qp->r_len += wqe->sg_list[i].length;
 		j++;
@@ -781,10 +783,10 @@ void hfi1_make_ruc_header(struct rvt_qp *qp, struct ib_other_headers *ohdr,
 
 /**
  * schedule_send_yield - test for a yield required for QP send engine
+ * @timeout: Final time for timeout slice for jiffies
  * @qp: a pointer to QP
  * @ps: a pointer to a structure with commonly lookup values for
  *      the the send engine progress
- * @tid - true if the tid leg
  *
  * This routine checks if the time slice for the QP has expired
  * for RC QPs, if so an additional work entry is queued. At this
@@ -963,17 +965,6 @@ void hfi1_do_tid_send(struct rvt_qp *qp)
 	ps.timeout_int = qp->timeout_jiffies / 8;
 
 	trace_hfi1_rc_do_tid_send(qp, false);
-
-	if (qp->ibqp.qp_type != IB_QPT_RC)
-		return;
-
-	if (!loopback &&
-	    ((qp->remote_ah_attr.dlid & ~((1 << ps.ppd->lmc) - 1)) ==
-	     ps.ppd->lid)) {
-		ruc_loopback(qp);
-		return;
-	}
-
 
 	spin_lock_irqsave(&qp->s_lock, ps.flags);
 

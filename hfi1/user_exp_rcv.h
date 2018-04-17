@@ -51,9 +51,8 @@
 
 #include "exp_rcv.h"
 
-struct tid_pageset;
-
-int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd);
+int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
+			   struct hfi1_ctxtdata *uctxt);
 void hfi1_user_exp_rcv_free(struct hfi1_filedata *fd);
 int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 			    struct hfi1_tid_info *tinfo);
@@ -62,11 +61,11 @@ int hfi1_user_exp_rcv_clear(struct hfi1_filedata *fd,
 int hfi1_user_exp_rcv_invalid(struct hfi1_filedata *fd,
 			      struct hfi1_tid_info *tinfo);
 
-u32 find_phys_blocks(struct page **, unsigned, struct tid_pageset *);
-
 struct tid_pageset {
 	u16 idx;
 	u16 count;
 };
+
+u32 find_phys_blocks(struct page **, unsigned, struct tid_pageset *);
 
 #endif /* _HFI1_USER_EXP_RCV_H */

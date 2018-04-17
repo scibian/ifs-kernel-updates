@@ -45,7 +45,6 @@
  *
  */
 
-#include <linux/random.h>
 #include "hfi.h"
 #include "qp.h"
 #include "rc.h"
@@ -1457,6 +1456,8 @@ int hfi1_kern_exp_rcv_clear(struct tid_rdma_request *req)
 
 	for (i = 0; i < flow->tnode_cnt; i++)
 		kern_unprogram_rcv_group(flow, i);
+	/* To prevent double unprogramming */
+	flow->tnode_cnt = 0;
 	/* get head before dropping lock */
 	fqp = first_qp(rcd, &rcd->rarr_queue);
 	spin_unlock_irqrestore(&rcd->exp_lock, flags);
@@ -1541,7 +1542,7 @@ int hfi1_kern_exp_rcv_init(struct hfi1_ctxtdata *rcd, int reinit)
 		return 0;
 
 	rcd->jkey = TID_RDMA_JKEY;
-	hfi1_set_ctxt_jkey(rcd->dd, rcd->ctxt, rcd->jkey);
+	hfi1_set_ctxt_jkey(rcd->dd, rcd, rcd->jkey);
 	return hfi1_alloc_ctxt_rcv_groups(rcd);
 }
 
@@ -2569,6 +2570,7 @@ void hfi1_rc_rcv_tid_rdma_write_resp(struct hfi1_packet *packet)
 	flow->npkts = rvt_div_round_up_mtu(qp, flow->length);
 	flow->flow_state.lpsn = flow->flow_state.spsn +
 		flow->npkts - 1;
+	flow->flow_state.resp_ib_psn = psn;
 	/* payload length = packet length - (header length + ICRC length) */
 	pktlen = packet->tlen - (packet->hlen + 4);
 	memcpy(flow->tid_entry, packet->ebuf, pktlen);
@@ -2579,8 +2581,6 @@ void hfi1_rc_rcv_tid_rdma_write_resp(struct hfi1_packet *packet)
 #endif
 
 	req->comp_seg++;
-	if (unlikely(qpriv->s_tid_tail == HFI1_QP_WQE_INVALID))
-		qpriv->s_tid_tail = qpriv->s_tid_cur;
 
 #ifdef TIDRDMA_DEBUG
 	hfi1_cdbg(TIDRDMA,

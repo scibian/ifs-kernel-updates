@@ -116,7 +116,7 @@ void opfn_conn_request(struct rvt_qp *qp)
 	/* Drop opfn.lock before calling ib_post_send() */
 	spin_unlock_irqrestore(&priv->opfn.lock, flags);
 
-	ret = ib_post_send(&qp->ibqp,(struct ib_send_wr *)&wr.wr, &bad_send_wr);
+	ret = ib_post_send(&qp->ibqp, &wr.wr, &bad_send_wr);
 	if (ret)
 		goto err;
 	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",

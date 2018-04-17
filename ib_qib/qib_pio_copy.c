@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2005 Intel Inc. All rights reserved.
+ * Copyright (c) 2009 QLogic Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -30,29 +30,35 @@
  * SOFTWARE.
  */
 
-#ifndef __MAD_RMPP_H__
-#define __MAD_RMPP_H__
+#include "qib.h"
 
-enum {
-	IB_RMPP_RESULT_PROCESSED,
-	IB_RMPP_RESULT_CONSUMED,
-	IB_RMPP_RESULT_INTERNAL,
-	IB_RMPP_RESULT_UNHANDLED
-};
+/**
+ * qib_pio_copy - copy data to MMIO space, in multiples of 32-bits
+ * @to: destination, in MMIO space (must be 64-bit aligned)
+ * @from: source (must be 64-bit aligned)
+ * @count: number of 32-bit quantities to copy
+ *
+ * Copy data from kernel space to MMIO space, in multiples of 32 bits at a
+ * time.  Order of access is not guaranteed, nor is a memory barrier
+ * performed afterwards.
+ */
+void qib_pio_copy(void __iomem *to, const void *from, size_t count)
+{
+#ifdef CONFIG_64BIT
+	u64 __iomem *dst = to;
+	const u64 *src = from;
+	const u64 *end = src + (count >> 1);
 
-int ib_send_rmpp_mad(struct ib_mad_send_wr_private *mad_send_wr);
+	while (src < end)
+		__raw_writeq(*src++, dst++);
+	if (count & 1)
+		__raw_writel(*(const u32 *)src, dst);
+#else
+	u32 __iomem *dst = to;
+	const u32 *src = from;
+	const u32 *end = src + count;
 
-struct ib_mad_recv_wc *
-ib_process_rmpp_recv_wc(struct ib_mad_agent_private *agent,
-			struct ib_mad_recv_wc *mad_recv_wc);
-
-int ib_process_rmpp_send_wc(struct ib_mad_send_wr_private *mad_send_wr,
-			    struct ib_mad_send_wc *mad_send_wc);
-
-void ib_rmpp_send_handler(struct ib_mad_send_wc *mad_send_wc);
-
-void ib_cancel_rmpp_recvs(struct ib_mad_agent_private *agent);
-
-int ib_retry_rmpp(struct ib_mad_send_wr_private *mad_send_wr);
-
-#endif	/* __MAD_RMPP_H__ */
+	while (src < end)
+		__raw_writel(*src++, dst++);
+#endif
+}

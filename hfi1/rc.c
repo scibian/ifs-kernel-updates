@@ -559,17 +559,49 @@ bail:
 	return 0;
 }
 
+/*
+ * Call this function when the last TID RDMA WRITE DATA packet for a request
+ * is built.
+ */
+static void update_tid_tail(struct rvt_qp *qp)
+	__must_hold(&qp->s_lock)
+{
+	struct hfi1_qp_priv *priv = qp->priv;
+	u32 i;
+	struct rvt_swqe *wqe;
+
+	lockdep_assert_held(&qp->s_lock);
+	/* Can't move beyond s_tid_cur */
+	if (priv->s_tid_tail == priv->s_tid_cur)
+		return;
+	for (i = priv->s_tid_tail + 1; ; i++) {
+		if (i == qp->s_size)
+			i = 0;
+
+		if (i == priv->s_tid_cur)
+			break;
+		wqe = rvt_get_swqe_ptr(qp, i);
+		if (wqe->wr.opcode == IB_WR_TID_RDMA_WRITE)
+			break;
+	}
+	priv->s_tid_tail = i;
+	priv->s_state = TID_OP(WRITE_RESP);
+}
+
 int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
+	__must_hold(&qp->s_lock)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 	struct rvt_swqe *wqe;
-	u32 bth1 = 0, bth2 = 0, hwords = 5, len, middle = 0, i;
+	u32 bth1 = 0, bth2 = 0, hwords = 5, len, middle = 0;
 	struct ib_other_headers *ohdr;
 	struct rvt_sge_state *ss = &qp->s_sge;
 	struct rvt_ack_entry *e = &qp->s_ack_queue[qp->s_tail_ack_queue];
 	struct tid_rdma_request *req = ack_to_tid_req(e);
 	bool last = false;
+	u8 opcode = TID_OP(WRITE_DATA);
 
+	lockdep_assert_held(&qp->s_lock);
 #ifdef TIDRDMA_DEBUG
 	hfi1_cdbg(TIDRDMA,
 		  "priv->n_tid_requests %u priv->n_requests %u priv->s_flags 0x%x",
@@ -649,71 +681,6 @@ int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		  req->cur_seg, req->comp_seg);
 #endif
 	switch (priv->s_state) {
-	case TID_OP(WRITE_DATA_LAST):
-		/*
-		 * A special case should be considered here: when a TID RDMA
-		 * WRITE request is followed by a series of other type of
-		 * requests (eg TID RDMA READ) that wrap around to the entry
-		 * just before the old TID RDMA WRITE request entry, and a new
-		 * TID RDMA WRITE request is queued, it will overwrite the old
-		 * completed TID RDMA WRITE request. At this moment, the
-		 * priv->s_state is still TID_OP(WRITE_DATA_LAST) (from the
-		 * completion of the old TID RDMA WRITE request),
-		 * priv->s_tid_tail == priv->s_tid_cur (still points to the
-		 * current entry), and req->cur_seg == req->comp_seg == 0.
-		 * When the new TID RDMA WRITE request is sent to the responder
-		 * and a TID RDMA WRITE RESP packet is received, req->comp will
-		 * be incremented to 1 and this function will be called. In
-		 * this case, it can't bail out.
-		 */
-		if (priv->s_tid_tail == priv->s_tid_cur &&
-		    req->cur_seg == req->comp_seg)
-			goto bail;
-		if (wqe->wr.opcode != IB_WR_TID_RDMA_WRITE ||
-		    req->cur_seg == req->comp_seg) {
-			for (i = priv->s_tid_tail + 1; ; i++) {
-				if (i == qp->s_size)
-					i = 0;
-				wqe = rvt_get_swqe_ptr(qp, i);
-				if (i == priv->s_tid_cur) {
-					req = wqe_to_tid_req(wqe);
-					/*
-					 * If there are no more TID RDMA WRITE
-					 * requests in the wqe array, don't
-					 * update the priv->s_state.
-					 */
-					if (wqe->wr.opcode !=
-					    IB_WR_TID_RDMA_WRITE ||
-					    req->cur_seg == req->comp_seg)
-						goto bail;
-					break;
-				}
-				if (wqe->wr.opcode == IB_WR_TID_RDMA_WRITE) {
-					req = wqe_to_tid_req(wqe);
-					/*
-					 * Advancing s_tid_tail only happens
-					 * a TID RDMA WRITE response has been
-					 * received. Therefore, if comp_seg is
-					 * 0, it means that qp->s_head has
-					 * overtaken s_tid_tail due to normal
-					 * IB requests.
-					 */
-					if (req->state ==
-						TID_REQUEST_INACTIVE ||
-					    req->state ==
-						TID_REQUEST_COMPLETE ||
-					    (req->state ==
-						TID_REQUEST_ACTIVE &&
-					     !req->comp_seg))
-						continue;
-					break;
-				}
-			}
-			priv->s_tid_tail = i;
-		}
-		priv->s_state = TID_OP(WRITE_RESP);
-		/* fall through */
-
 	case TID_OP(WRITE_REQ):
 	case TID_OP(WRITE_RESP):
 		priv->tid_ss.sge = wqe->sg_list[0];
@@ -777,6 +744,10 @@ int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 					qp->s_flags |= RVT_S_WAIT_TID_RESP;
 			} else {
 				priv->s_state = TID_OP(WRITE_DATA_LAST);
+				opcode = TID_OP(WRITE_DATA_LAST);
+
+				/* Advance the s_tid_tail now */
+				update_tid_tail(qp);
 			}
 #ifdef TIDRDMA_DEBUG
 			hfi1_cdbg(TIDRDMA,
@@ -799,7 +770,7 @@ int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 	ps->s_txreq->sde = priv->s_sde;
 	ps->s_txreq->ss = ss;
 	ps->s_txreq->s_cur_size = len;
-	hfi1_make_ruc_header(qp, ohdr, (priv->s_state << 24), bth1, bth2,
+	hfi1_make_ruc_header(qp, ohdr, (opcode << 24), bth1, bth2,
 			     middle, ps);
 	return 1;
 done_free_tx:
@@ -1028,7 +999,7 @@ check_s_state:
 		case IB_WR_RDMA_WRITE:
 			if (newreq && !(qp->s_flags & RVT_S_UNLIMITED_CREDIT))
 				qp->s_lsn++;
-			/* FALLTHROUGH */
+			goto no_flow_control;
 		case IB_WR_RDMA_WRITE_WITH_IMM:
 			/* If no credit, return. */
 			if (!(qp->s_flags & RVT_S_UNLIMITED_CREDIT) &&
@@ -1036,6 +1007,7 @@ check_s_state:
 				qp->s_flags |= RVT_S_WAIT_SSN_CREDIT;
 				goto bail;
 			}
+no_flow_control:
 			put_ib_reth_vaddr(
 				wqe->rdma_wr.remote_addr,
 				&ohdr->u.rc.reth);
@@ -1083,17 +1055,16 @@ check_s_state:
 					qp->s_lsn++;
 
 			}
-			/* If no credit, return. */
-			if (!(qp->s_flags & RVT_S_UNLIMITED_CREDIT) &&
-			    rvt_cmp_msn(wqe->ssn, qp->s_lsn + 1) > 0) {
-				qp->s_flags |= RVT_S_WAIT_SSN_CREDIT;
-				goto bail;
-			}
+
 			hwords += build_tid_rdma_write_req(qp, wqe, ohdr, &bth1,
 							   &bth2, &len);
 			ss = NULL;
 			if (priv->s_tid_cur == HFI1_QP_WQE_INVALID) {
 				priv->s_tid_cur = qp->s_cur;
+				if (priv->s_tid_tail == HFI1_QP_WQE_INVALID) {
+					priv->s_tid_tail = qp->s_cur;
+					priv->s_state = TID_OP(WRITE_RESP);
+				}
 			} else if (priv->s_tid_cur == priv->s_tid_head) {
 				struct rvt_swqe *__w;
 				struct tid_rdma_request *__r;
@@ -1126,8 +1097,30 @@ check_s_state:
 				    __r->state == TID_REQUEST_COMPLETE ||
 				    ((__r->state == TID_REQUEST_ACTIVE ||
 				      __r->state == TID_REQUEST_SYNC) &&
-				     __r->comp_seg == __r->total_segs))
+				     __r->comp_seg == __r->total_segs)) {
+					if (priv->s_tid_tail ==
+					    priv->s_tid_cur &&
+					    priv->s_state ==
+					    TID_OP(WRITE_DATA_LAST)) {
+						priv->s_tid_tail = qp->s_cur;
+						priv->s_state =
+							TID_OP(WRITE_RESP);
+					}
 					priv->s_tid_cur = qp->s_cur;
+				}
+				/*
+				 * A corner case: when the last TID RDMA WRITE
+				 * request was completed, s_tid_head,
+				 * s_tid_cur, and s_tid_tail all point to the
+				 * same location. Other requests are posted and
+				 * s_cur wraps around to the same location,
+				 * where a new TID RDMA WRITE is posted. In
+				 * this case, none of the indices need to be
+				 * updated. However, the priv->s_state should.
+				 */
+				if (priv->s_tid_tail == qp->s_cur &&
+				    priv->s_state == TID_OP(WRITE_DATA_LAST))
+					priv->s_state = TID_OP(WRITE_RESP);
 			}
 			req = wqe_to_tid_req(wqe);
 			if (newreq) {
@@ -2082,8 +2075,6 @@ void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr)
 				     wqe,
 				     ib_hfi1_wc_opcode[wqe->wr.opcode],
 				     IB_WC_SUCCESS);
-		if (wqe->wr.opcode == IB_WR_OPFN)
-			opfn_schedule_conn_request(qp);
 	}
 	/*
 	 * If we were waiting for sends to complete before re-sending,
@@ -2144,8 +2135,6 @@ struct rvt_swqe *do_rc_completion(struct rvt_qp *qp, struct rvt_swqe *wqe,
 				     wqe,
 				     ib_hfi1_wc_opcode[wqe->wr.opcode],
 				     IB_WC_SUCCESS);
-		if (wqe->wr.opcode == IB_WR_OPFN)
-			opfn_schedule_conn_request(qp);
 	} else {
 		struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 
@@ -2410,15 +2399,8 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
                         qp->s_flags &= ~RVT_S_WAIT_ACK;
                         hfi1_schedule_send(qp);
                 }
-		/*
-		 * TID RDMA response packets containing AETH headers do
-		 * not transmit credit information. However, the invalid
-		 * credit field should be ignored by the QP.
-		 */
-		if (opcode != TID_OP(WRITE_RESP) &&
-		    opcode != TID_OP(READ_RESP) &&
-		    opcode != TID_OP(ACK))
-                	rvt_get_credit(qp, aeth);
+
+		rvt_get_credit(qp, aeth);
                 qp->s_rnr_retry = qp->s_rnr_retry_cnt;
                 qp->s_retry = qp->s_retry_cnt;
                 update_last_psn(qp, psn);
@@ -3062,9 +3044,8 @@ void hfi1_rc_rcv(struct hfi1_packet *packet)
 	struct hfi1_ibport *ibp = rcd_to_iport(rcd);
 	struct hfi1_qp_priv *qpriv = qp->priv;
 	struct ib_other_headers *ohdr = packet->ohdr;
-	u32 bth0;
+	u32 bth0, bth1 = be32_to_cpu(ohdr->bth[1]);
 	u32 opcode = packet->opcode;
-	u32 bth1 = be32_to_cpu(ohdr->bth[1]);
 	u32 hdrsize = packet->hlen;
 	u32 psn;
 	u32 pad = packet->pad;
@@ -3086,7 +3067,9 @@ void hfi1_rc_rcv(struct hfi1_packet *packet)
 
 	is_fecn = process_ecn(qp, packet, false);
 	opfn_trigger_conn_request(qp, bth1);
+
 	psn = ib_bth_get_psn(ohdr);
+	opcode = (bth0 >> 24) & 0xff;
 
 	/*
 	 * Process responses (ACKs) before anything else.  Note that the
@@ -3703,9 +3686,7 @@ static u32 build_tid_rdma_write_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
 
 	KDETH_RESET(ohdr->u.tid_rdma.w_rsp.kdeth0, KVER, 0x1);
 	KDETH_RESET(ohdr->u.tid_rdma.w_rsp.kdeth1, JKEY, remote->jkey);
-	ohdr->u.tid_rdma.w_rsp.aeth = cpu_to_be32((qp->r_msn & IB_MSN_MASK) |
-						  (IB_AETH_CREDIT_INVAL <<
-						   IB_AETH_CREDIT_SHIFT));
+	ohdr->u.tid_rdma.w_rsp.aeth = rvt_compute_aeth(qp);
 	ohdr->u.tid_rdma.w_rsp.tid_flow_psn =
 		cpu_to_be32((flow->flow_state.generation <<
 			     HFI1_KDETH_BTH_SEQ_SHIFT) |
@@ -3821,10 +3802,7 @@ static u32 build_tid_rdma_write_ack(struct rvt_qp *qp, struct rvt_ack_entry *e,
 				  HFI1_KDETH_BTH_SEQ_SHIFT) |
 				 (flow->flow_state.lpsn &
 				  HFI1_KDETH_BTH_SEQ_MASK));
-		ohdr->u.tid_rdma.ack.aeth =
-			cpu_to_be32((qp->r_msn & IB_MSN_MASK) |
-				    (IB_AETH_CREDIT_INVAL <<
-				     IB_AETH_CREDIT_SHIFT));
+		ohdr->u.tid_rdma.ack.aeth = rvt_compute_aeth(qp);
 	}
 	KDETH_RESET(ohdr->u.tid_rdma.ack.kdeth0, KVER, 0x1);
 	ohdr->u.tid_rdma.ack.tid_flow_qp =
@@ -4218,9 +4196,7 @@ static u32 build_tid_rdma_read_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
 	resp->verbs_qp = cpu_to_be32(qp->remote_qpn);
 	rcu_read_unlock();
 
-	resp->aeth = cpu_to_be32((qp->r_msn & IB_MSN_MASK) |
-				 ( IB_AETH_CREDIT_INVAL
-				   << IB_AETH_CREDIT_SHIFT));
+	resp->aeth = rvt_compute_aeth(qp);
 	resp->verbs_psn = cpu_to_be32(mask_psn(flow->flow_state.ib_spsn +
 					       flow->pkt));
 

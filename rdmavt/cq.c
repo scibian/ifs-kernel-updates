@@ -498,8 +498,6 @@ int rvt_poll_cq(struct ib_cq *ibcq, int num_entries, struct ib_wc *entry)
 	return npolled;
 }
 
-#define MIN_NICE	-20
-
 /**
  * rvt_driver_cq_init - Init cq resources on behalf of driver
  * @rdi: rvt dev structure
@@ -530,7 +528,7 @@ int rvt_driver_cq_init(struct rvt_dev_info *rdi)
 		return PTR_ERR(task);
 	}
 
-	set_user_nice(task, MIN_NICE);
+	set_user_nice(task, -20);
 	cpu = cpumask_first(cpumask_of_node(rdi->dparms.node));
 	kthread_bind(task, cpu);
 	wake_up_process(task);

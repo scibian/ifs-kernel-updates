@@ -51,7 +51,6 @@
 #include <rdma/rdma_vt.h>
 #include <rdma/ib_pack.h>
 #include <rdma/ib_verbs.h>
-#include <linux/sched.h>
 #include <rdma/rdmavt_cq.h>
 /*
  * Atomic bit definitions for r_aflags.
@@ -154,80 +153,6 @@
 	(RVT_PROCESS_SEND_OK | RVT_FLUSH_SEND | RVT_PROCESS_RECV_OK)
 
 /*
- * For back porting from kernel 4.6 to RHEL 7.2.
- * Copied from include/rdma/ib_verbs.h.
- */
-struct ib_send_wr_hdr {
-	struct ib_send_wr      *next;
-	u64                     wr_id;
-	struct ib_sge          *sg_list;
-	int                     num_sge;
-	enum ib_wr_opcode       opcode;
-	int                     send_flags;
-	union {
-		__be32          imm_data;
-		u32             invalidate_rkey;
-	} ex;
-};
-
-struct ib_rdma_wr {
-	struct ib_send_wr_hdr   wr;
-	u64                     remote_addr;
-	u32                     rkey;
-};
-
-static inline struct ib_rdma_wr *rdma_wr(struct ib_send_wr *wr)
-{
-	return container_of((struct ib_send_wr_hdr *)wr, struct ib_rdma_wr,
-			    wr);
-}
-
-struct ib_atomic_wr {
-	struct ib_send_wr_hdr   wr;
-	u64                     remote_addr;
-	u64                     compare_add;
-	u64                     swap;
-	u64                     compare_add_mask;
-	u64                     swap_mask;
-	u32                     rkey;
-};
-
-static inline struct ib_atomic_wr *atomic_wr(struct ib_send_wr *wr)
-{
-	return container_of((struct ib_send_wr_hdr *)wr, struct ib_atomic_wr,
-			    wr);
-}
-
-struct ib_ud_wr {
-	struct ib_send_wr_hdr   wr;
-	struct ib_ah            *ah;
-	void                    *header;
-	int                     hlen;
-	int                     mss;
-	u32                     remote_qpn;
-	u32                     remote_qkey;
-	u16                     pkey_index;
-	u8                      port_num;
-};
-
-static inline struct ib_ud_wr *ud_wr(struct ib_send_wr *wr)
-{
-	return container_of((struct ib_send_wr_hdr *)wr, struct ib_ud_wr, wr);
-}
-
-struct ib_reg_wr {
-	struct ib_send_wr_hdr   wr;
-	struct ib_mr            *mr;
-	u32                     key;
-	int                     access;
-};
-
-static inline struct ib_reg_wr *reg_wr(struct ib_send_wr *wr)
-{
-	return container_of((struct ib_send_wr_hdr *)wr, struct ib_reg_wr, wr);
-}
-
-/*
  * Internal send flags
  */
 #define RVT_SEND_RESERVE_USED           IB_SEND_RESERVED_START
@@ -325,10 +250,6 @@ struct rvt_ack_entry {
 
 #define RVT_OPERATION_MAX (IB_WR_RESERVED10 + 1)
 
-/* Needed for RHEL 7.2 backport */
-#define IB_WR_REG_MR IB_WR_FAST_REG_MR
-#define IB_WC_REG_MR IB_WC_FAST_REG_MR
-
 /**
  * rvt_operation_params - op table entry
  * @length - the length to copy into the swqe entry
@@ -363,7 +284,6 @@ struct rvt_qp {
 
 	unsigned long timeout_jiffies;  /* computed from timeout */
 
-	enum ib_mtu path_mtu;
 	int srate_mbps;		/* s_srate (below) converted to Mbit/s */
 	pid_t pid;		/* pid for user mode QPs */
 	u32 remote_qpn;
@@ -762,4 +682,34 @@ void rvt_del_timers_sync(struct rvt_qp *qp);
 void rvt_stop_rc_timers(struct rvt_qp *qp);
 void rvt_add_retry_timer(struct rvt_qp *qp);
 
+/**
+ * struct rvt_qp_iter - the iterator for QPs
+ * @qp - the current QP
+ *
+ * This structure defines the current iterator
+ * state for sequenced access to all QPs relative
+ * to an rvt_dev_info.
+ */
+struct rvt_qp_iter {
+	struct rvt_qp *qp;
+	/* private: backpointer */
+	struct rvt_dev_info *rdi;
+	/* private: callback routine */
+	void (*cb)(struct rvt_qp *qp, u64 v);
+	/* private: for arg to callback routine */
+	u64 v;
+	/* private: number of SMI,GSI QPs for device */
+	int specials;
+	/* private: current iterator index */
+	int n;
+};
+
+struct rvt_qp_iter *rvt_qp_iter_init(struct rvt_dev_info *rdi,
+				     u64 v,
+				     void (*cb)(struct rvt_qp *qp, u64 v));
+int rvt_qp_iter_next(struct rvt_qp_iter *iter);
+void rvt_qp_iter(struct rvt_dev_info *rdi,
+		 u64 v,
+		 void (*cb)(struct rvt_qp *qp, u64 v));
+void rvt_qp_mr_clean(struct rvt_qp *qp, u32 lkey);
 #endif          /* DEF_RDMAVT_INCQP_H */

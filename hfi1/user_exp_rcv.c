@@ -63,44 +63,47 @@ struct tid_rb_node {
 	struct page *pages[0];
 };
 
+#define EXP_TID_SET_EMPTY(set) (set.count == 0 && list_empty(&set.list))
+
 #define num_user_pages(vaddr, len)				       \
 	(1 + (((((unsigned long)(vaddr) +			       \
-		 (unsigned long)(len) - 1) & PAGE_MASK) -	       \
-	       ((unsigned long)vaddr & PAGE_MASK)) >> PAGE_SHIFT))
+	 (unsigned long)(len) - 1) & PAGE_MASK) -	       \
+       ((unsigned long)vaddr & PAGE_MASK)) >> PAGE_SHIFT))
 
 static void unlock_exp_tids(struct hfi1_ctxtdata *uctxt,
-			    struct exp_tid_set *set,
-			    struct hfi1_filedata *fd);
+		    struct exp_tid_set *set,
+		    struct hfi1_filedata *fd);
 static int set_rcvarray_entry(struct hfi1_filedata *fd, unsigned long vaddr,
-			      u32 rcventry, struct tid_group *grp,
-			      struct page **pages, unsigned npages);
+		      u32 rcventry, struct tid_group *grp,
+		      struct page **pages, unsigned npages);
 static int tid_rb_insert(void *arg, struct mmu_rb_node *node);
 static void cacheless_tid_rb_remove(struct hfi1_filedata *fdata,
-				    struct tid_rb_node *tnode);
+			    struct tid_rb_node *tnode);
 static void tid_rb_remove(void *arg, struct mmu_rb_node *node);
 static int tid_rb_invalidate(void *arg, struct mmu_rb_node *mnode);
 static int program_rcvarray(struct hfi1_filedata *fd, unsigned long vaddr,
-			    struct tid_group *grp, struct tid_pageset *sets,
-			    unsigned start, u16 count, struct page **pages,
-			    u32 *tidlist, unsigned *tididx, unsigned *pmapped);
+		    struct tid_group *grp, struct tid_pageset *sets,
+		    unsigned start, u16 count, struct page **pages,
+		    u32 *tidlist, unsigned *tididx, unsigned *pmapped);
 static int unprogram_rcvarray(struct hfi1_filedata *fd, u32 tidinfo,
-			      struct tid_group **grp);
+		      struct tid_group **grp);
 static void clear_tid_node(struct hfi1_filedata *fd, struct tid_rb_node *node);
 
 static struct mmu_rb_ops tid_rb_ops = {
-	.insert = tid_rb_insert,
-	.remove = tid_rb_remove,
-	.invalidate = tid_rb_invalidate
+.insert = tid_rb_insert,
+.remove = tid_rb_remove,
+.invalidate = tid_rb_invalidate
 };
 
 /*
- * Initialize context and file private data needed for Expected
- * receive caching. This needs to be done after the context has
- * been configured with the eager/expected RcvEntry counts.
- */
-int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd)
+=======
+* Initialize context and file private data needed for Expected
+* receive caching. This needs to be done after the context has
+* been configured with the eager/expected RcvEntry counts.
+*/
+int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
+                           struct hfi1_ctxtdata *uctxt)
 {
-	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
 	int ret = 0;
 
@@ -166,22 +169,21 @@ int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd)
 		fd->tid_limit = uctxt->expected_count;
 	}
 	spin_unlock(&fd->tid_lock);
-
 	return ret;
 }
 
 void hfi1_user_exp_rcv_free(struct hfi1_filedata *fd)
 {
-	struct hfi1_ctxtdata *uctxt = fd->uctxt;
+struct hfi1_ctxtdata *uctxt = fd->uctxt;
 
-	/*
-	 * The notifier would have been removed when the process'es mm
-	 * was freed.
-	 */
-	if (fd->handler) {
-		hfi1_mmu_rb_unregister(fd->handler);
-	} else {
-		if (!EXP_TID_SET_EMPTY(uctxt->tid_full_list))
+/*
+ * The notifier would have been removed when the process'es mm
+ * was freed.
+ */
+if (fd->handler) {
+	hfi1_mmu_rb_unregister(fd->handler);
+} else {
+	if (!EXP_TID_SET_EMPTY(uctxt->tid_full_list))
 			unlock_exp_tids(uctxt, &uctxt->tid_full_list, fd);
 		if (!EXP_TID_SET_EMPTY(uctxt->tid_used_list))
 			unlock_exp_tids(uctxt, &uctxt->tid_used_list, fd);

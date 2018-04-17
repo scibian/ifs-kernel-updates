@@ -1,5 +1,9 @@
+#ifndef _QIB_DEBUGFS_H
+#define _QIB_DEBUGFS_H
+
+#ifdef CONFIG_DEBUG_FS
 /*
- * Copyright (c) 2004 Topspin Communications.  All rights reserved.
+ * Copyright (c) 2013 Intel Corporation.  All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -30,25 +34,12 @@
  * SOFTWARE.
  */
 
-#ifndef _CORE_PRIV_H
-#define _CORE_PRIV_H
+struct qib_ibdev;
+void qib_dbg_ibdev_init(struct qib_ibdev *ibd);
+void qib_dbg_ibdev_exit(struct qib_ibdev *ibd);
+void qib_dbg_init(void);
+void qib_dbg_exit(void);
 
-#include <linux/list.h>
-#include <linux/spinlock.h>
+#endif
 
-#include <rdma/ib_verbs.h>
-
-int  ib_device_register_sysfs(struct ib_device *device,
-			      int (*port_callback)(struct ib_device *,
-						   u8, struct kobject *));
-void ib_device_unregister_sysfs(struct ib_device *device);
-
-int  ib_sysfs_setup(void);
-void ib_sysfs_cleanup(void);
-
-int  ib_cache_setup(void);
-void ib_cache_cleanup(void);
-
-int ib_resolve_eth_l2_attrs(struct ib_qp *qp,
-			    struct ib_qp_attr *qp_attr, int *qp_attr_mask);
-#endif /* _CORE_PRIV_H */
+#endif                          /* _QIB_DEBUGFS_H */

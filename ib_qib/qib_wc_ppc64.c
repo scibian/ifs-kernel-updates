@@ -1,9 +1,5 @@
 /*
- * Copyright (c) 2004 Mellanox Technologies Ltd.  All rights reserved.
- * Copyright (c) 2004 Infinicon Corporation.  All rights reserved.
- * Copyright (c) 2004 Intel Corporation.  All rights reserved.
- * Copyright (c) 2004 Topspin Corporation.  All rights reserved.
- * Copyright (c) 2004 Voltaire Corporation.  All rights reserved.
+ * Copyright (c) 2006, 2007, 2008 QLogic Corporation. All rights reserved.
  *
  * This software is available to you under a choice of one of two
  * licenses.  You may choose to be licensed under the terms of the GNU
@@ -34,18 +30,33 @@
  * SOFTWARE.
  */
 
-#ifndef __AGENT_H_
-#define __AGENT_H_
+/*
+ * This file is conditionally built on PowerPC only.  Otherwise weak symbol
+ * versions of the functions exported from here are used.
+ */
 
-#include <linux/err.h>
-#include <rdma/ib_mad.h>
+#include "qib.h"
 
-extern int ib_agent_port_open(struct ib_device *device, int port_num);
+/**
+ * qib_enable_wc - enable write combining for MMIO writes to the device
+ * @dd: qlogic_ib device
+ *
+ * Nothing to do on PowerPC, so just return without error.
+ */
+int qib_enable_wc(struct qib_devdata *dd)
+{
+	return 0;
+}
 
-extern int ib_agent_port_close(struct ib_device *device, int port_num);
-
-extern void agent_send_response(const struct ib_mad_hdr *mad_hdr, const struct ib_grh *grh,
-				const struct ib_wc *wc, const struct ib_device *device,
-				int port_num, int qpn, size_t resp_mad_len, bool opa);
-
-#endif	/* __AGENT_H_ */
+/**
+ * qib_unordered_wc - indicate whether write combining is unordered
+ *
+ * Because our performance depends on our ability to do write
+ * combining mmio writes in the most efficient way, we need to
+ * know if we are on a processor that may reorder stores when
+ * write combining.
+ */
+int qib_unordered_wc(void)
+{
+	return 1;
+}

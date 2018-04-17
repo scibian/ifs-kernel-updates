@@ -1,4 +1,3 @@
-#ifdef CONFIG_DEBUG_FS
 /*
  * Copyright(c) 2015, 2016, 2017 Intel Corporation.
  *
@@ -64,7 +63,6 @@
 
 static struct dentry *hfi1_dbg_root;
 
-/* For porting to RHEL 7.2. Copied from fs/debugsfs/file.c */
 extern struct srcu_struct debugfs_srcu;
 DEFINE_SRCU(debugfs_srcu);
 
@@ -309,10 +307,10 @@ DEBUGFS_FILE_OPS(ctx_stats);
 static void *_qp_stats_seq_start(struct seq_file *s, loff_t *pos)
 	__acquires(RCU)
 {
-	struct qp_iter *iter;
+	struct rvt_qp_iter *iter;
 	loff_t n = *pos;
 
-	iter = qp_iter_init(s->private);
+	iter = rvt_qp_iter_init(s->private, 0, NULL);
 
 	/* stop calls rcu_read_unlock */
 	rcu_read_lock();
@@ -321,7 +319,7 @@ static void *_qp_stats_seq_start(struct seq_file *s, loff_t *pos)
 		return NULL;
 
 	do {
-		if (qp_iter_next(iter)) {
+		if (rvt_qp_iter_next(iter)) {
 			kfree(iter);
 			return NULL;
 		}
@@ -334,11 +332,11 @@ static void *_qp_stats_seq_next(struct seq_file *s, void *iter_ptr,
 				loff_t *pos)
 	__must_hold(RCU)
 {
-	struct qp_iter *iter = iter_ptr;
+	struct rvt_qp_iter *iter = iter_ptr;
 
 	(*pos)++;
 
-	if (qp_iter_next(iter)) {
+	if (rvt_qp_iter_next(iter)) {
 		kfree(iter);
 		return NULL;
 	}
@@ -354,7 +352,7 @@ static void _qp_stats_seq_stop(struct seq_file *s, void *iter_ptr)
 
 static int _qp_stats_seq_show(struct seq_file *s, void *iter_ptr)
 {
-	struct qp_iter *iter = iter_ptr;
+	struct rvt_qp_iter *iter = iter_ptr;
 
 	if (!iter)
 		return 0;
@@ -409,6 +407,48 @@ static int _sdes_seq_show(struct seq_file *s, void *v)
 DEBUGFS_SEQ_FILE_OPS(sdes);
 DEBUGFS_SEQ_FILE_OPEN(sdes)
 DEBUGFS_FILE_OPS(sdes);
+
+static void *_rcds_seq_start(struct seq_file *s, loff_t *pos)
+{
+	struct hfi1_ibdev *ibd;
+	struct hfi1_devdata *dd;
+
+	ibd = (struct hfi1_ibdev *)s->private;
+	dd = dd_from_dev(ibd);
+	if (!dd->rcd || *pos >= dd->n_krcv_queues)
+		return NULL;
+	return pos;
+}
+
+static void *_rcds_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
+	struct hfi1_devdata *dd = dd_from_dev(ibd);
+
+	++*pos;
+	if (!dd->rcd || *pos >= dd->n_krcv_queues)
+		return NULL;
+	return pos;
+}
+
+static void _rcds_seq_stop(struct seq_file *s, void *v)
+{
+}
+
+static int _rcds_seq_show(struct seq_file *s, void *v)
+{
+	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
+	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	loff_t *spos = v;
+	loff_t i = *spos;
+
+	seqfile_dump_rcd(s, dd->rcd[i]);
+	return 0;
+}
+
+DEBUGFS_SEQ_FILE_OPS(rcds);
+DEBUGFS_SEQ_FILE_OPEN(rcds)
+DEBUGFS_FILE_OPS(rcds);
 
 /* read the per-device counters */
 static ssize_t dev_counters_read(struct file *file, char __user *buf,
@@ -557,18 +597,11 @@ static ssize_t asic_flags_write(struct file *file, const char __user *buf,
 	ppd = private2ppd(file);
 	dd = ppd->dd;
 
-	buff = kmalloc(count + 1, GFP_KERNEL);
-	if (!buff)
-		return -ENOMEM;
-
-	ret = copy_from_user(buff, buf, count);
-	if (ret > 0) {
-		ret = -EFAULT;
-		goto do_free;
-	}
-
 	/* zero terminate and read the expected integer */
-	buff[count] = 0;
+	buff = memdup_user_nul(buf, count);
+	if (IS_ERR(buff))
+		return PTR_ERR(buff);
+
 	ret = kstrtoull(buff, 0, &value);
 	if (ret)
 		goto do_free;
@@ -1389,6 +1422,7 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 	DEBUGFS_SEQ_FILE_CREATE(ctx_stats, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(qp_stats, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(sdes, ibd->hfi1_ibdev_dbg, ibd);
+	DEBUGFS_SEQ_FILE_CREATE(rcds, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(sdma_cpu_list, ibd->hfi1_ibdev_dbg, ibd);
 	/* dev counter files */
 	for (i = 0; i < ARRAY_SIZE(cntr_ops); i++)
@@ -1559,5 +1593,3 @@ void hfi1_dbg_exit(void)
 	synchronize_srcu(&debugfs_srcu);
 	hfi1_dbg_root = NULL;
 }
-
-#endif

@@ -196,6 +196,15 @@
 #define LSTATE_ARMED   0x3
 #define LSTATE_ACTIVE  0x4
 
+/* DCC_CFG_RESET reset states */
+#define LCB_RX_FPE_TX_FPE_INTO_RESET   (DCC_CFG_RESET_RESET_LCB    | \
+					DCC_CFG_RESET_RESET_TX_FPE | \
+					DCC_CFG_RESET_RESET_RX_FPE | \
+					DCC_CFG_RESET_ENABLE_CCLK_BCC)
+					/* 0x17 */
+
+#define LCB_RX_FPE_TX_FPE_OUT_OF_RESET  DCC_CFG_RESET_ENABLE_CCLK_BCC /* 0x10 */
+
 /* DC8051_STS_CUR_STATE port values (physical link states) */
 #define PLS_DISABLED			   0x30
 #define PLS_OFFLINE				   0x90
@@ -283,6 +292,7 @@
 #define HREQ_SET_TX_EQ_ABS	0x04
 #define HREQ_SET_TX_EQ_REL	0x05
 #define HREQ_ENABLE		0x06
+#define HREQ_LCB_RESET		0x07
 #define HREQ_CONFIG_DONE	0xfe
 #define HREQ_INTERFACE_TEST	0xff
 
@@ -384,7 +394,7 @@
 #define TX_SETTINGS		     0x06
 #define VERIFY_CAP_LOCAL_PHY	     0x07
 #define VERIFY_CAP_LOCAL_FABRIC	     0x08
-#define VERIFY_CAP_LOCAL_LINK_WIDTH  0x09
+#define VERIFY_CAP_LOCAL_LINK_MODE   0x09
 #define LOCAL_DEVICE_ID		     0x0a
 #define RESERVED_REGISTERS	     0x0b
 #define LOCAL_LNI_INFO		     0x0c
@@ -509,6 +519,7 @@
 #define DOWN_REMOTE_REASON_SHIFT 16
 #define DOWN_REMOTE_REASON_MASK  0xff
 
+#define HOST_INTERFACE_VERSION 1
 #define HOST_INTERFACE_VERSION_SHIFT 16
 #define HOST_INTERFACE_VERSION_MASK  0xff
 
@@ -584,6 +595,10 @@ enum {
 #define LOOPBACK_LCB	2
 #define LOOPBACK_CABLE	3	/* external cable */
 
+/* set up bits in MISC_CONFIG_BITS */
+#define LOOPBACK_SERDES_CONFIG_BIT_MASK_SHIFT 0
+#define EXT_CFG_LCB_RESET_SUPPORTED_SHIFT     3
+
 /* Bit offset into the GUID which carries HFI id information */
 #define GUID_HFI_INDEX_SHIFT     39
 #define HFI_ASIC_GUID(guid) ((guid) & ~(1ULL << GUID_HFI_INDEX_SHIFT))
@@ -654,7 +669,6 @@ u64 create_pbc(struct hfi1_pportdata *ppd, u64 flags, int srate_mbs, u32 vl,
 #define NUM_PCIE_SERDES 16	/* number of PCIe serdes on the SBus */
 extern const u8 pcie_serdes_broadcast[];
 extern const u8 pcie_pcs_addrs[2][NUM_PCIE_SERDES];
-extern uint platform_config_load;
 
 /* SBus commands */
 #define RESET_SBUS_RECEIVER 0x20
@@ -738,8 +752,8 @@ int read_8051_config(struct hfi1_devdata *, u8, u8, u32 *);
 int start_link(struct hfi1_pportdata *ppd);
 int bringup_serdes(struct hfi1_pportdata *ppd);
 void set_intr_state(struct hfi1_devdata *dd, u32 enable);
-void apply_link_downgrade_policy(struct hfi1_pportdata *ppd,
-				 int refresh_widths);
+bool apply_link_downgrade_policy(struct hfi1_pportdata *ppd,
+				 bool refresh_widths);
 void update_usrhead(struct hfi1_ctxtdata *rcd, u32 hd, u32 updegr, u32 egrhd,
 		    u32 intr_adjust, u32 npkts);
 int stop_drain_data_vls(struct hfi1_devdata *dd);
@@ -752,14 +766,13 @@ void clear_linkup_counters(struct hfi1_devdata *dd);
 u32 hdrqempty(struct hfi1_ctxtdata *rcd);
 int is_ax(struct hfi1_devdata *dd);
 int is_bx(struct hfi1_devdata *dd);
+bool is_urg_masked(struct hfi1_ctxtdata *rcd);
 u32 read_physical_state(struct hfi1_devdata *dd);
 u32 chip_to_opa_pstate(struct hfi1_devdata *dd, u32 chip_pstate);
-u32 get_logical_state(struct hfi1_pportdata *ppd);
-void cache_physical_state(struct hfi1_pportdata *ppd);
 const char *opa_lstate_name(u32 lstate);
 const char *opa_pstate_name(u32 pstate);
-u32 driver_physical_state(struct hfi1_pportdata *ppd);
-u32 driver_logical_state(struct hfi1_pportdata *ppd);
+u32 driver_pstate(struct hfi1_pportdata *ppd);
+u32 driver_lstate(struct hfi1_pportdata *ppd);
 
 int acquire_lcb_access(struct hfi1_devdata *dd, int sleep_ok);
 int release_lcb_access(struct hfi1_devdata *dd, int sleep_ok);
@@ -1194,22 +1207,6 @@ enum {
 	C_SW_CPU_RC_ACKS,
 	C_SW_CPU_RC_QACKS,
 	C_SW_CPU_RC_DELAYED_COMP,
-#ifdef CONFIG_HFI1_TID_RDMA_COUNTERS
-	C_SW_CPU_TRDMA_TX_W_REQ,
-	C_SW_CPU_TRDMA_RX_W_REQ,
-	C_SW_CPU_TRDMA_TX_W_RESP,
-	C_SW_CPU_TRDMA_RX_W_RESP,
-	C_SW_CPU_TRDMA_TX_W_DATA,
-	C_SW_CPU_TRDMA_RX_W_DATA,
-	C_SW_CPU_TRDMA_TX_W_DATALAST,
-	C_SW_CPU_TRDMA_RX_W_DATALAST,
-	C_SW_CPU_TRDMA_TX_ACK,
-	C_SW_CPU_TRDMA_RX_ACK,
-	C_SW_CPU_TRDMA_TX_R_REQ,
-	C_SW_CPU_TRDMA_RX_R_REQ,
-	C_SW_CPU_TRDMA_TX_R_RESP,
-	C_SW_CPU_TRDMA_RX_R_RESP,
-#endif
 	C_RCV_HDR_OVF_0,
 	C_RCV_HDR_OVF_1,
 	C_RCV_HDR_OVF_2,
@@ -1393,6 +1390,8 @@ int hfi1_set_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt,
 		       u16 pkey);
 int hfi1_clear_ctxt_pkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *ctxt);
 void hfi1_read_link_quality(struct hfi1_devdata *dd, u8 *link_quality);
+void hfi1_init_vnic_rsm(struct hfi1_devdata *dd);
+void hfi1_deinit_vnic_rsm(struct hfi1_devdata *dd);
 
 /*
  * Interrupt source table.

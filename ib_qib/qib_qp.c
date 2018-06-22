@@ -126,7 +126,11 @@ static void get_map_page(struct rvt_qpn_table *qpt, struct rvt_qpn_map *map,
  * zero/one for QP type IB_QPT_SMI/IB_QPT_GSI.
  */
 int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 		  enum ib_qp_type type, u8 port, gfp_t gfp)
+#else
+		  enum ib_qp_type type, u8 port)
+#endif
 {
 	u32 i, offset, max_scan, qpn;
 	struct rvt_qpn_map *map;
@@ -135,6 +139,9 @@ int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
 	struct qib_devdata *dd = container_of(verbs_dev, struct qib_devdata,
 					      verbs_dev);
 	u16 qpt_mask = dd->qpn_mask;
+#if !HAVE_IB_QP_CREATE_USE_GFP_NOIO
+	gfp_t gfp = GFP_KERNEL;
+#endif
 
 	if (type == IB_QPT_SMI || type == IB_QPT_GSI) {
 		unsigned n;
@@ -317,9 +324,16 @@ u32 qib_mtu_from_qp(struct rvt_dev_info *rdi, struct rvt_qp *qp, u32 pmtu)
 	return ib_mtu_enum_to_int(pmtu);
 }
 
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp)
+#else
+void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
+#endif
 {
 	struct qib_qp_priv *priv;
+#if !HAVE_IB_QP_CREATE_USE_GFP_NOIO
+	gfp_t gfp = GFP_KERNEL;
+#endif
 
 	priv = kzalloc(sizeof(*priv), gfp);
 	if (!priv)
@@ -452,7 +466,7 @@ void qib_qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 		   qp->s_last, qp->s_acked, qp->s_cur,
 		   qp->s_tail, qp->s_head, qp->s_size,
 		   qp->remote_qpn,
-		   qp->remote_ah_attr.dlid);
+		   rdma_ah_get_dlid(&qp->remote_ah_attr));
 }
 
 #endif

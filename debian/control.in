@@ -6,6 +6,7 @@ Standards-Version: 3.9.8
 Homepage: http://www.intel.com
 Build-Depends: debhelper (>= 10),
                linux-headers-@KERNEL_VER@,
+			   unifdef
 
 Package: ifs-kernel-updates-dev
 Architecture: amd64

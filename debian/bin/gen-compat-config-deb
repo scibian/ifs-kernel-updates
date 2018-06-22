@@ -2,7 +2,9 @@
 # Copyright 2013        Mellanox Technologies. All rights reserved.
 # Copyright 2012        Luis R. Rodriguez <mcgrof@frijolero.org>
 # Copyright 2012        Hauke Mehrtens <hauke@hauke-m.de>
-# Copyright 2017        System Fabric Works, Inc. All Rights Reserved
+# Copyright 2017-2018   System Fabric Works, Inc. All Rights Reserved
+
+# Originally packaged in Intel IFS compat-rdma/ofed-scripts/gen-compat-config.sh
 
 echo "/* KDIR = $KDIR */"
 function set_config {

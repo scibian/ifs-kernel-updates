@@ -72,9 +72,7 @@ void opfn_conn_request(struct rvt_qp *qp)
 	unsigned long flags;
 	int ret = 0;
 
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
-
+	trace_hfi1_opfn_state_conn_request(qp);
 	spin_lock_irqsave(&priv->opfn.lock, flags);
 	/*
 	 * Exit if the extended bit is not set, or if nothing is requested, or
@@ -103,8 +101,7 @@ void opfn_conn_request(struct rvt_qp *qp)
 		goto done;
 	}
 
-	hfi1_cdbg(OPFN, "QP%u(0x%x) send ID%u data 0x%llx",
-		  qp->ibqp.qp_num, qp->state, capcode, data);
+	trace_hfi1_opfn_data_conn_request(qp, capcode, data);
 	data = (data & ~0xf) | capcode;
 
 	memset(&wr, 0, sizeof(wr));
@@ -119,11 +116,11 @@ void opfn_conn_request(struct rvt_qp *qp)
 	ret = ib_post_send(&qp->ibqp, &wr.wr, &bad_send_wr);
 	if (ret)
 		goto err;
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
+	trace_hfi1_opfn_state_conn_request(qp);
 	return;
 err:
-	hfi1_cdbg(OPFN, "ib_post_send failed ret %d", ret);
+	trace_hfi1_msg_opfn_conn_request(qp, "ib_ost_send failed: ret = ",
+					 (u64)ret);
 	spin_lock_irqsave(&priv->opfn.lock, flags);
 	/*
 	 * In case of an unexpected error return from ib_post_send
@@ -155,9 +152,7 @@ void opfn_schedule_conn_request(struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
-
+	trace_hfi1_opfn_state_sched_conn_request(qp);
 	/* XXX: should we be scheduling to a different workqueue? */
 	schedule_work(&priv->opfn.opfn_work);
 }
@@ -171,11 +166,9 @@ void opfn_conn_response(struct rvt_qp *qp, struct rvt_ack_entry *e,
 	u8 capcode;
 	unsigned long flags;
 
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
+	trace_hfi1_opfn_state_conn_response(qp);
 	capcode = data & 0xf;
-	hfi1_cdbg(OPFN, "QP%u(0x%x) resp ID%u data 0x%llx",
-		  qp->ibqp.qp_num, qp->state, capcode, data);
+	trace_hfi1_opfn_data_conn_response(qp, capcode, data);
 	if (!capcode || capcode >= STL_VERBS_EXTD_MAX)
 		return;
 
@@ -200,8 +193,7 @@ void opfn_conn_response(struct rvt_qp *qp, struct rvt_ack_entry *e,
 	if (extd->response(qp, &data))
 		priv->opfn.completed |= OPFN_CODE(capcode);
 	e->atomic_data = (data & ~0xf) | capcode;
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
+	trace_hfi1_opfn_state_conn_response(qp);
 	spin_unlock_irqrestore(&priv->opfn.lock, flags);
 }
 
@@ -212,11 +204,9 @@ void opfn_conn_reply(struct rvt_qp *qp, u64 data)
 	u8 capcode;
 	unsigned long flags;
 
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
+	trace_hfi1_opfn_state_conn_reply(qp);
 	capcode = data & 0xf;
-	hfi1_cdbg(OPFN, "QP%u(0x%x) rcv'ed ID%u data 0x%llx",
-		  qp->ibqp.qp_num, qp->state, capcode, data);
+	trace_hfi1_opfn_data_conn_reply(qp, capcode, data);
 	if (!capcode || capcode >= STL_VERBS_EXTD_MAX)
 		return;
 
@@ -241,8 +231,7 @@ clear:
 	 * progress
 	 */
 	priv->opfn.curr = STL_VERBS_EXTD_NONE;
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
+	trace_hfi1_opfn_state_conn_reply(qp);
 done:
 	spin_unlock_irqrestore(&priv->opfn.lock, flags);
 }
@@ -254,14 +243,13 @@ void opfn_conn_error(struct rvt_qp *qp)
 	unsigned long flags;
 	u16 capcode;
 
-	hfi1_cdbg(OPFN, "requested=0x%x, completed=0x%x, current=0x%x",
-		  priv->opfn.requested, priv->opfn.completed, priv->opfn.curr);
+	trace_hfi1_opfn_state_conn_error(qp);
 	/*
 	 * The QP has gone into the Error state. We have to invalidate all
 	 * negotiated feature, including the one in progress (if any). The RC
 	 * QP handling will clean the WQE for the connection request.
 	 */
-	hfi1_cdbg(OPFN, "QP%u(0x%x) error", qp->ibqp.qp_num, qp->state);
+	trace_hfi1_msg_opfn_conn_error(qp, "error. qp state ", (u64)qp->state);
 	spin_lock_irqsave(&priv->opfn.lock, flags);
 	while (priv->opfn.completed) {
 		capcode = priv->opfn.completed & ~(priv->opfn.completed - 1);
@@ -274,4 +262,68 @@ void opfn_conn_error(struct rvt_qp *qp)
 	priv->opfn.requested = 0;
 	priv->opfn.curr = STL_VERBS_EXTD_NONE;
 	spin_unlock_irqrestore(&priv->opfn.lock, flags);
+}
+
+void opfn_init(struct rvt_qp *qp, struct ib_qp_attr *attr, int attr_mask)
+{
+	struct ib_qp *ibqp = &qp->ibqp;
+	struct hfi1_qp_priv *priv = qp->priv;
+	unsigned long flags;
+
+	if (attr_mask & IB_QP_RETRY_CNT)
+		priv->s_retry = attr->retry_cnt;
+
+	spin_lock_irqsave(&priv->opfn.lock, flags);
+	if (ibqp->qp_type == IB_QPT_RC && HFI1_CAP_IS_KSET(TID_RDMA)) {
+		struct tid_rdma_params *local = &priv->tid_rdma.local;
+
+		if (attr_mask & IB_QP_TIMEOUT)
+			priv->tid_retry_timeout_jiffies =
+				HFI1_TID_RETRY_TO_FACTOR * qp->timeout_jiffies;
+		if (qp->pmtu == enum_to_mtu(OPA_MTU_4096) ||
+		    qp->pmtu == enum_to_mtu(OPA_MTU_8192)) {
+			tid_rdma_opfn_init(qp, local);
+			/*
+			 * We only want to set the OPFN requested bit when the
+			 * QP transitions to RTS.
+			 */
+			if (attr_mask & IB_QP_STATE &&
+			    attr->qp_state == IB_QPS_RTS) {
+				priv->opfn.requested |= OPFN_MASK(TID_RDMA);
+				/*
+				 * If the QP is transitioning to RTS and the
+				 * opfn.completed for TID RDMA has already been
+				 * set, the QP is being moved *back* into RTS.
+				 * We can now renegotiate the TID RDMA
+				 * parameters.
+				 */
+				if (priv->opfn.completed &
+				    OPFN_MASK(TID_RDMA)) {
+					priv->opfn.completed &=
+						~OPFN_MASK(TID_RDMA);
+					/*
+					 * Since the opfn.completed bit was
+					 * already set, it is safe to assume
+					 * that the opfn.extended is also set.
+					 */
+					opfn_schedule_conn_request(qp);
+				}
+			}
+		} else {
+			memset(local, 0, sizeof(*local));
+		}
+	}
+	spin_unlock_irqrestore(&priv->opfn.lock, flags);
+}
+
+void opfn_trigger_conn_request(struct rvt_qp *qp, u32 bth1)
+{
+	struct hfi1_qp_priv *priv = qp->priv;
+
+	if (!priv->opfn.extended && hfi1_opfn_extended(bth1) &&
+	    HFI1_CAP_IS_KSET(OPFN)) {
+		priv->opfn.extended = true;
+		if (qp->state == IB_QPS_RTS)
+			opfn_conn_request(qp);
+	}
 }

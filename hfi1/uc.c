@@ -65,7 +65,7 @@ int hfi1_make_uc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 	struct hfi1_qp_priv *priv = qp->priv;
 	struct ib_other_headers *ohdr;
 	struct rvt_swqe *wqe;
-	u32 hwords = 5;
+	u32 hwords;
 	u32 bth0 = 0;
 	u32 len;
 	u32 pmtu = qp->pmtu;
@@ -93,9 +93,22 @@ int hfi1_make_uc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		goto done_free_tx;
 	}
 
-	ohdr = &ps->s_txreq->phdr.hdr.u.oth;
-	if (qp->remote_ah_attr.ah_flags & IB_AH_GRH)
-		ohdr = &ps->s_txreq->phdr.hdr.u.l.oth;
+	if (priv->hdr_type == HFI1_PKT_TYPE_9B) {
+		/* header size in 32-bit words LRH+BTH = (8+12)/4. */
+		hwords = 5;
+		if (rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH)
+			ohdr = &ps->s_txreq->phdr.hdr.ibh.u.l.oth;
+		else
+			ohdr = &ps->s_txreq->phdr.hdr.ibh.u.oth;
+	} else {
+		/* header size in 32-bit words 16B LRH+BTH = (16+12)/4. */
+		hwords = 7;
+		if ((rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH) &&
+		    (hfi1_check_mcast(rdma_ah_get_dlid(&qp->remote_ah_attr))))
+			ohdr = &ps->s_txreq->phdr.hdr.opah.u.l.oth;
+		else
+			ohdr = &ps->s_txreq->phdr.hdr.opah.u.oth;
+	}
 
 	/* Get the next send request. */
 	wqe = rvt_get_swqe_ptr(qp, qp->s_cur);
@@ -294,7 +307,7 @@ bail_no_tx:
 void hfi1_uc_rcv(struct hfi1_packet *packet)
 {
 	struct hfi1_ibport *ibp = rcd_to_iport(packet->rcd);
-	void *data = packet->ebuf;
+	void *data = packet->payload;
 	u32 tlen = packet->tlen;
 	struct rvt_qp *qp = packet->qp;
 	struct ib_other_headers *ohdr = packet->ohdr;
@@ -306,6 +319,7 @@ void hfi1_uc_rcv(struct hfi1_packet *packet)
 	u32 pmtu = qp->pmtu;
 	struct ib_reth *reth;
 	int ret;
+	u8 extra_bytes = pad + packet->extra_byte + (SIZE_OF_CRC << 2);
 
 	if (hfi1_ruc_check_hdr(ibp, packet))
 		return;
@@ -405,7 +419,12 @@ send_first:
 		/* FALLTHROUGH */
 	case OP(SEND_MIDDLE):
 		/* Check for invalid length PMTU or posted rwqe len. */
-		if (unlikely(tlen != (hdrsize + pmtu + 4)))
+		/*
+		 * There will be no padding for 9B packet but 16B packets
+		 * will come in with some padding since we always add
+		 * CRC and LT bytes which will need to be flit aligned
+		 */
+		if (unlikely(tlen != (hdrsize + pmtu + extra_bytes)))
 			goto rewind;
 		qp->r_rcv_len += pmtu;
 		if (unlikely(qp->r_rcv_len > qp->r_len))
@@ -425,10 +444,10 @@ no_immediate_data:
 send_last:
 		/* Check for invalid length. */
 		/* LAST len should be >= 1 */
-		if (unlikely(tlen < (hdrsize + pad + 4)))
+		if (unlikely(tlen < (hdrsize + extra_bytes)))
 			goto rewind;
 		/* Don't count the CRC. */
-		tlen -= (hdrsize + pad + 4);
+		tlen -= (hdrsize + extra_bytes);
 		wc.byte_len = tlen + qp->r_rcv_len;
 		if (unlikely(wc.byte_len > qp->r_len))
 			goto rewind;
@@ -440,7 +459,7 @@ last_imm:
 		wc.status = IB_WC_SUCCESS;
 		wc.qp = &qp->ibqp;
 		wc.src_qp = qp->remote_qpn;
-		wc.slid = qp->remote_ah_attr.dlid;
+		wc.slid = rdma_ah_get_dlid(&qp->remote_ah_attr);
 		/*
 		 * It seems that IB mandates the presence of an SL in a
 		 * work completion only for the UD transport (see section
@@ -452,7 +471,7 @@ last_imm:
 		 *
 		 * See also OPA Vol. 1, section 9.7.6, and table 9-17.
 		 */
-		wc.sl = qp->remote_ah_attr.sl;
+		wc.sl = rdma_ah_get_sl(&qp->remote_ah_attr);
 		/* zero fields that are N/A */
 		wc.vendor_err = 0;
 		wc.pkey_index = 0;
@@ -521,7 +540,7 @@ rdma_last_imm:
 		if (unlikely(tlen < (hdrsize + pad + 4)))
 			goto drop;
 		/* Don't count the CRC. */
-		tlen -= (hdrsize + pad + 4);
+		tlen -= (hdrsize + extra_bytes);
 		if (unlikely(tlen + qp->r_rcv_len != qp->r_len))
 			goto drop;
 		if (test_and_clear_bit(RVT_R_REWIND_SGE, &qp->r_aflags)) {
@@ -541,14 +560,12 @@ rdma_last_imm:
 
 	case OP(RDMA_WRITE_LAST):
 rdma_last:
-		/* Get the number of bytes the message was padded by. */
-		pad = ib_bth_get_pad(ohdr);
 		/* Check for invalid length. */
 		/* LAST len should be >= 1 */
 		if (unlikely(tlen < (hdrsize + pad + 4)))
 			goto drop;
 		/* Don't count the CRC. */
-		tlen -= (hdrsize + pad + 4);
+		tlen -= (hdrsize + extra_bytes);
 		if (unlikely(tlen + qp->r_rcv_len != qp->r_len))
 			goto drop;
 		hfi1_copy_sge(&qp->r_sge, data, tlen, true, false);

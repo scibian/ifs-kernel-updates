@@ -137,8 +137,7 @@
 				  HFI1_CAP_STATIC_RATE_CTRL |		\
 				  HFI1_CAP_PRINT_UNIMPL |		\
 				  HFI1_CAP_TID_UNMAP |			\
-				  HFI1_CAP_OPFN |			\
-				  HFI1_CAP_TID_RDMA)
+				  HFI1_CAP_OPFN)
 /*
  * A set of capability bits that are "global" and are not allowed to be
  * set in the user bitmask.
@@ -207,7 +206,7 @@
  * to the driver itself, not the software interfaces it supports.
  */
 #ifndef HFI1_DRIVER_VERSION_BASE
-#define HFI1_DRIVER_VERSION_BASE "0.9-294"
+#define HFI1_DRIVER_VERSION_BASE "10.7-0"
 #endif
 
 /* create the final driver version string */
@@ -331,20 +330,13 @@ struct diag_pkt {
 /* misc. */
 #define SC15_PACKET 0xF
 #define SIZE_OF_CRC 1
+#define SIZE_OF_LT 1
+#define MAX_16B_PADDING 12 /* CRC = 4, LT = 1, Pad = 0 to 7 bytes */
 
 #define LIM_MGMT_P_KEY       0x7FFF
 #define FULL_MGMT_P_KEY      0xFFFF
 
 #define DEFAULT_P_KEY LIM_MGMT_P_KEY
-
-/**
- * 0xF8 - 4 bits of multicast range and 1 bit for collective range
- * Example: For 24 bit LID space,
- * Multicast range: 0xF00000 to 0xF7FFFF
- * Collective range: 0xF80000 to 0xFFFFFE
- */
-#define HFI1_MCAST_NR 0x4 /* Number of top bits set */
-#define HFI1_COLLECTIVE_NR 0x1 /* Number of bits after MCAST_NR */
 
 #define HFI1_PSM_IOC_BASE_SEQ 0x0
 

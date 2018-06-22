@@ -1,3 +1,5 @@
-ignore-ib_qib.patch
-opa-compat.patch
-port-4-9-0.patch
+init-Makefile-port.patch
+fix-Makefile-install.patch
+port-rdmavt.patch
+port-hfi1.patch
+rdmavt-get_link_layer.patch

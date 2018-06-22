@@ -190,8 +190,8 @@ static inline void rvt_skip_sge(struct rvt_sge_state *ss, u32 length,
 
 	while (length) {
 		u32 len = rvt_get_sge_length(sge, length);
-		WARN_ON_ONCE(len == 0);
 
+		WARN_ON_ONCE(len == 0);
 		rvt_update_sge(ss, len, release);
 		length -= len;
 	}

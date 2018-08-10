@@ -92,5 +92,7 @@ void opfn_conn_response(struct rvt_qp *qp, struct rvt_ack_entry *e,
 			struct ib_atomic_eth *ateth);
 void opfn_conn_reply(struct rvt_qp *qp, u64 data);
 void opfn_conn_error(struct rvt_qp *qp);
+void opfn_init(struct rvt_qp *qp, struct ib_qp_attr *attr, int attr_mask);
+void opfn_trigger_conn_request(struct rvt_qp *qp, u32 bth1);
 
 #endif /* _HFI1_OPFN_H */

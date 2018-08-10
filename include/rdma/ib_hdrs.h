@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016, 2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -48,14 +48,10 @@
 #ifndef IB_HDRS_H
 #define IB_HDRS_H
 
+#include "compat.h"
 #include <linux/types.h>
 #include <asm/unaligned.h>
 #include <rdma/ib_verbs.h>
-
-/*For backport compatibility*/
-#ifndef IB_QPN_MASK
-#define IB_QPN_MASK	0xFFFFFF
-#endif
 
 #define IB_SEQ_NAK	(3 << 29)
 
@@ -135,6 +131,7 @@ union ib_ehdrs {
 		struct tid_rdma_write_data w_data;
 		struct tid_rdma_read_req r_req;
 		struct tid_rdma_read_resp r_rsp;
+		struct tid_rdma_resync resync;
 		struct tid_rdma_ack ack;
 	} tid_rdma;
 }  __packed;

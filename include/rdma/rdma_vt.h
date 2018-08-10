@@ -52,19 +52,17 @@
  * Structure that low level drivers will populate in order to register with the
  * rdmavt layer.
  */
-
+#include "compat.h"
 #include <linux/spinlock.h>
 #include <linux/list.h>
 #include <linux/hash.h>
+#include <linux/version.h>
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_mad.h>
 #include <rdma/rdmavt_mr.h>
 #include <rdma/rdmavt_qp.h>
 
 #define RVT_MAX_PKEY_VALUES 16
-
-/* For backport */
-#define IB_PORT_OPA_MASK_CHG (1<<4)
 
 #define RVT_MAX_TRAP_LEN 100 /* Limit pending trap list */
 #define RVT_MAX_TRAP_LISTS 5 /*((IB_NOTICE_TYPE_INFO & 0x0F) + 1)*/
@@ -94,7 +92,7 @@ struct rvt_ibport {
 	__be16 pma_counter_select[5];
 	u16 pma_tag;
 	u16 mkey_lease_period;
-	u16 sm_lid;
+	u32 sm_lid;
 	u8 sm_sl;
 	u8 mkeyprot;
 	u8 subnet_timeout;
@@ -163,7 +161,6 @@ struct rvt_driver_params {
 	 * For instance special module parameters. Goes here.
 	 */
 	unsigned int lkey_table_size;
-	unsigned int no_user_mr_percpu;
 	unsigned int qp_table_size;
 	int qpn_start;
 	int qpn_inc;
@@ -193,11 +190,19 @@ struct rvt_pd {
 /* Address handle */
 struct rvt_ah {
 	struct ib_ah ibah;
-	struct ib_ah_attr attr;
+	struct rdma_ah_attr attr;
 	atomic_t refcount;
 	u8 vl;
 	u8 log_pmtu;
 };
+
+
+#define HAVE_IB_QP_CREATE_USE_GFP_NOIO \
+	(LINUX_VERSION_CODE <= KERNEL_VERSION(4,13,0) || \
+	defined(IFS_RH73) || \
+	defined(IFS_RH74) || \
+	defined(IFS_SLES12SP2) || \
+	defined(IFS_SLES12SP3))
 
 struct rvt_dev_info;
 struct rvt_swqe;
@@ -264,14 +269,18 @@ struct rvt_driver_provided {
 	 * ERR_PTR(err).  The driver is free to return NULL or a valid
 	 * pointer.
 	 */
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 	void * (*qp_priv_alloc)(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 				gfp_t gfp);
+#else
+	void * (*qp_priv_alloc)(struct rvt_dev_info *rdi, struct rvt_qp *qp);
+#endif
 
 	/*
 	 * Init a struture allocated with qp_priv_alloc()
 	 */
 	int (*qp_priv_init)(struct rvt_dev_info *rdi, struct rvt_qp *qp,
-			    struct ib_qp_init_attr *init_attr, gfp_t gfp);
+			    struct ib_qp_init_attr *init_attr);
 
 	/*
 	 * Free the driver's private qp structure.
@@ -352,15 +361,19 @@ struct rvt_driver_provided {
 	unsigned (*free_all_qps)(struct rvt_dev_info *rdi);
 
 	/* Driver specific AH validation */
-	int (*check_ah)(struct ib_device *, struct ib_ah_attr *);
+	int (*check_ah)(struct ib_device *, struct rdma_ah_attr *);
 
 	/* Inform the driver a new AH has been created */
-	void (*notify_new_ah)(struct ib_device *, struct ib_ah_attr *,
+	void (*notify_new_ah)(struct ib_device *, struct rdma_ah_attr *,
 			      struct rvt_ah *);
 
 	/* Let the driver pick the next queue pair number*/
 	int (*alloc_qpn)(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
-			 enum ib_qp_type type, u8 port_num, gfp_t gfp);
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+			 enum ib_qp_type type, u8 port_num, gfp_t qfp);
+#else
+			 enum ib_qp_type type, u8 port_num);
+#endif
 
 	/* Determine if its safe or allowed to modify the qp */
 	int (*check_modify_qp)(struct rvt_qp *qp, struct ib_qp_attr *attr,
@@ -554,7 +567,7 @@ struct rvt_dev_info *rvt_alloc_device(size_t size, int nports);
 void rvt_dealloc_device(struct rvt_dev_info *rdi);
 int rvt_register_device(struct rvt_dev_info *rvd);
 void rvt_unregister_device(struct rvt_dev_info *rvd);
-int rvt_check_ah(struct ib_device *ibdev, struct ib_ah_attr *ah_attr);
+int rvt_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr);
 int rvt_init_port(struct rvt_dev_info *rdi, struct rvt_ibport *port,
 		  int port_index, u16 *pkey_table);
 int rvt_fast_reg_mr(struct rvt_qp *qp, struct ib_mr *ibmr, u32 key,

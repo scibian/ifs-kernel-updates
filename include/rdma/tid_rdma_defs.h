@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015 - 2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -93,15 +93,23 @@ struct tid_rdma_read_resp {
 	__be32 verbs_qp;
 } __packed;
 
+struct tid_rdma_resync {
+	__le32 kdeth0;
+	__le32 kdeth1;
+	__be32 reserved[6];
+	__be32 verbs_qp;
+} __packed;
+
 struct tid_rdma_ack {
 	__le32 kdeth0;
 	__le32 kdeth1;
 	__be32 aeth;
-	__be32 reserved[3];
+	__be32 reserved[2];
+	__be32 tid_flow_psn;
 	__be32 verbs_psn;
 	__be32 tid_flow_qp;
 	__be32 verbs_qp;
-};
+} __packed;
 
 /*
  * TID RDMA Opcodes
@@ -114,6 +122,7 @@ enum {
 	IB_OPCODE_WRITE_DATA_LAST = 0x3,
 	IB_OPCODE_READ_REQ        = 0x4,
 	IB_OPCODE_READ_RESP       = 0x5,
+	IB_OPCODE_RESYNC          = 0x6,
 	IB_OPCODE_ACK             = 0x7,
 
 	IB_OPCODE(TID_RDMA, WRITE_REQ),
@@ -122,6 +131,7 @@ enum {
 	IB_OPCODE(TID_RDMA, WRITE_DATA_LAST),
 	IB_OPCODE(TID_RDMA, READ_REQ),
 	IB_OPCODE(TID_RDMA, READ_RESP),
+	IB_OPCODE(TID_RDMA, RESYNC),
 	IB_OPCODE(TID_RDMA, ACK),
 };
 

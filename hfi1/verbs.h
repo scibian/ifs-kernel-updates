@@ -98,6 +98,7 @@ struct hfi1_packet;
 #define HFI1_VENDOR_IPG		cpu_to_be16(0xFFA0)
 
 #define IB_DEFAULT_GID_PREFIX	cpu_to_be64(0xfe80000000000000ULL)
+#define OPA_BTH_MIG_REQ		BIT(31)
 
 #define RC_OP(x) IB_OPCODE_RC_##x
 #define UC_OP(x) IB_OPCODE_UC_##x
@@ -106,6 +107,25 @@ struct hfi1_packet;
 enum {
 	HFI1_HAS_GRH = (1 << 0),
 };
+
+struct hfi1_16b_header {
+	u32 lrh[4];
+	union {
+		struct {
+			struct ib_grh grh;
+			struct ib_other_headers oth;
+		} l;
+		struct ib_other_headers oth;
+	} u;
+} __packed;
+
+struct hfi1_opa_header {
+	union {
+		struct ib_header ibh; /* 9B header */
+		struct hfi1_16b_header opah; /* 16B header */
+	};
+	u8 hdr_type; /* 9B or 16B */
+} __packed;
 
 struct hfi1_ahg_info {
 	u32 ahgdesc[2];
@@ -116,7 +136,7 @@ struct hfi1_ahg_info {
 
 struct hfi1_sdma_header {
 	__le64 pbc;
-	struct ib_header hdr;
+	struct hfi1_opa_header hdr;
 } __packed;
 
 /*
@@ -138,7 +158,8 @@ struct hfi1_qp_priv {
 	struct tid_flow_state flow_state;
 	struct tid_rdma_qp_params tid_rdma;
 	struct rvt_qp *owner;
-	struct rvt_sge_state tid_ss;       /* SGE state pointer for second SE */
+	u8 hdr_type; /* 9B or 16B */
+	struct rvt_sge_state tid_ss;       /* SGE state pointer for second leg */
 	atomic_t n_requests;                /* # of TID RDMA requests in the queue */
 	atomic_t n_tid_requests;            /* # of sent TID RDMA requests */
 	unsigned long tid_timer_timeout_jiffies;
@@ -168,33 +189,10 @@ struct hfi1_qp_priv {
 	bool sync_pt;		/* Set when QP reaches sync point */
 	u8 rnr_nak_state;	/* RNR NAK state */
 	u8 timeout_shift;       /* account for number of packets per segment */
+	u32 r_next_psn_ib;
+	u32 r_next_psn_kdeth;
+	bool resync;
 };
-
-#ifdef CONFIG_HFI1_TID_RDMA_COUNTERS
-struct tid_rdma_cntrs {
-	u64 z_w_req;
-	u64 z_w_resp;
-	u64 z_w_data;
-	u64 z_w_datalast;
-	u64 z_ack;
-	u64 z_r_req;
-	u64 z_r_resp;
-	u64 __percpu *w_req;
-	u64 __percpu *w_resp;
-	u64 __percpu *w_data;
-	u64 __percpu *w_datalast;
-	u64 __percpu *ack;
-	u64 __percpu *r_req;
-	u64 __percpu *r_resp;
-};
-
-struct hfi1_ibport_priv {
-	struct {
-		struct tid_rdma_cntrs tx;
-		struct tid_rdma_cntrs rx;
-	} trdma_cnts;
-};
-#endif
 
 /* Flags used by hfi1_swqe_priv->flags */
 #define HFI1_USE_TID_RDMA     BIT(0)  /* Request is suitable for TID RDMA */
@@ -218,7 +216,7 @@ struct hfi1_ack_priv {
  * This structure is used to hold commonly lookedup and computed values during
  * the send engine progress.
  */
-struct iowait_wait;
+struct iowait_work;
 struct hfi1_pkt_state {
 	struct hfi1_ibdev *dev;
 	struct hfi1_ibport *ibp;
@@ -229,6 +227,7 @@ struct hfi1_pkt_state {
 	unsigned long timeout;
 	unsigned long timeout_int;
 	int cpu;
+	u8 opcode;
 	bool in_thread;
 	bool pkts_sent;
 };
@@ -311,16 +310,11 @@ static inline struct rvt_qp *iowait_to_qp(struct iowait *s_iowait)
 	return priv->owner;
 }
 
-#ifdef TIDRDMA_DEBUG
-extern void __hfi1_trace_TIDRDMA(const char *, char *, ...);
-#define trace_func(fmt, ...) \
-	__hfi1_trace_TIDRDMA(__func__, fmt, ##__VA_ARGS__)
-#endif
 /*
  * This must be called with s_lock held.
  */
 void hfi1_bad_pkey(struct hfi1_ibport *ibp, u32 key, u32 sl,
-		   u32 qp1, u32 qp2, u16 lid1, u16 lid2);
+		   u32 qp1, u32 qp2, u32 lid1, u32 lid2);
 void hfi1_cap_mask_chg(struct rvt_dev_info *rdi, u8 port_num);
 void hfi1_sys_guid_chg(struct hfi1_ibport *ibp);
 void hfi1_node_desc_chg(struct hfi1_ibport *ibp);
@@ -340,13 +334,8 @@ int hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
  * necessarily be at least one bit less than
  * the container holding the PSN.
  */
-#ifndef CONFIG_HFI1_VERBS_31BIT_PSN
-#define PSN_MASK 0xFFFFFF
-#define PSN_SHIFT 8
-#else
 #define PSN_MASK 0x7FFFFFFF
 #define PSN_SHIFT 1
-#endif
 #define PSN_MODIFY_MASK 0xFFFFFF
 
 /*
@@ -394,7 +383,8 @@ static inline struct tid_rdma_request *ack_to_tid_req(struct rvt_ack_entry *e)
  */
 static inline u32 __full_flow_psn(struct flow_state *state, u32 psn)
 {
-	return mask_psn((state->generation << HFI1_KDETH_BTH_SEQ_SHIFT) | psn);
+	return mask_psn((state->generation << HFI1_KDETH_BTH_SEQ_SHIFT) |
+			(psn & HFI1_KDETH_BTH_SEQ_MASK));
 }
 
 static inline u32 full_flow_psn(struct tid_rdma_flow *flow, u32 psn)
@@ -470,11 +460,9 @@ void hfi1_rc_hdrerr(
 	struct hfi1_packet *packet,
 	struct rvt_qp *qp);
 
-u8 ah_to_sc(struct ib_device *ibdev, struct ib_ah_attr *ah_attr);
+u8 ah_to_sc(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr);
 
-struct ib_ah *hfi1_create_qp0_ah(struct hfi1_ibport *ibp, u16 dlid);
-
-void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr);
+void hfi1_rc_send_complete(struct rvt_qp *qp, struct hfi1_opa_header *opah);
 
 void hfi1_ud_rcv(struct hfi1_packet *packet);
 
@@ -496,39 +484,31 @@ int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
 extern const u32 rc_only_opcode;
 extern const u32 uc_only_opcode;
 
-static inline u8 get_opcode(struct ib_header *h)
-{
-	u16 lnh = be16_to_cpu(h->lrh[0]) & 3;
-
-	if (lnh == IB_LNH_IBA_LOCAL)
-		return be32_to_cpu(h->u.oth.bth[0]) >> 24;
-	else
-		return be32_to_cpu(h->u.l.oth.bth[0]) >> 24;
-}
-
 int hfi1_ruc_check_hdr(struct hfi1_ibport *ibp, struct hfi1_packet *packet);
 
 u32 hfi1_make_grh(struct hfi1_ibport *ibp, struct ib_grh *hdr,
-		  struct ib_global_route *grh, u32 hwords, u32 nwords);
+		  const struct ib_global_route *grh, u32 hwords, u32 nwords);
 
 void hfi1_make_ruc_header(struct rvt_qp *qp, struct ib_other_headers *ohdr,
 			  u32 bth0, u32 bth1, u32 bth2, int middle,
 			  struct hfi1_pkt_state *ps);
 
-void _hfi1_do_send(struct work_struct *work);
+bool hfi1_schedule_send_yield(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
+			      bool tid);
 
-void _hfi1_do_tid_send(struct work_struct *work);
+void _hfi1_do_send(struct work_struct *work);
 
 void hfi1_do_send_from_rvt(struct rvt_qp *qp);
 
 void hfi1_do_send(struct rvt_qp *qp, bool in_thread);
 
-void hfi1_do_tid_send(struct rvt_qp *qp);
+void hfi1_do_send_from_rvt(struct rvt_qp *qp);
 
 void hfi1_send_complete(struct rvt_qp *qp, struct rvt_swqe *wqe,
 			enum ib_wc_status status);
 
-void hfi1_send_rc_ack(struct hfi1_ctxtdata *, struct rvt_qp *qp, int is_fecn);
+void hfi1_send_rc_ack(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp,
+		      bool is_fecn);
 
 int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
 
@@ -548,6 +528,8 @@ void hfi1_kdeth_expected_rcv(struct hfi1_packet *packet);
 
 void hfi1_ib_rcv(struct hfi1_packet *packet);
 
+void hfi1_16B_rcv(struct hfi1_packet *packet);
+
 unsigned hfi1_get_npkeys(struct hfi1_devdata *);
 
 int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
@@ -558,11 +540,6 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 
 int hfi1_wss_init(void);
 void hfi1_wss_exit(void);
-
-#ifdef CONFIG_HFI1_TID_RDMA_COUNTERS
-int hfi1_ibport_priv_init(struct hfi1_ibport *ibp);
-void hfi1_ibport_priv_free(struct hfi1_ibport *ibp);
-#endif
 
 void hfi1_wait_kmem(struct rvt_qp *qp);
 

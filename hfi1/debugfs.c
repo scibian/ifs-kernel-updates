@@ -63,54 +63,6 @@
 
 static struct dentry *hfi1_dbg_root;
 
-extern struct srcu_struct debugfs_srcu;
-DEFINE_SRCU(debugfs_srcu);
-
-/**
- * debugfs_use_file_start - mark the beginning of file data access
- * @dentry: the dentry object whose data is being accessed.
- * @srcu_idx: a pointer to some memory to store a SRCU index in.
- *
- * Up to a matching call to debugfs_use_file_finish(), any
- * successive call into the file removing functions debugfs_remove()
- * and debugfs_remove_recursive() will block. Since associated private
- * file data may only get freed after a successful return of any of
- * the removal functions, you may safely access it after a successful
- * call to debugfs_use_file_start() without worrying about
- * lifetime issues.
- *
- * If -%EIO is returned, the file has already been removed and thus,
- * it is not safe to access any of its data. If, on the other hand,
- * it is allowed to access the file data, zero is returned.
- *
- * Regardless of the return code, any call to
- * debugfs_use_file_start() must be followed by a matching call
- * to debugfs_use_file_finish().
- */
-static int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
-        __acquires(&debugfs_srcu)
-{
-        *srcu_idx = srcu_read_lock(&debugfs_srcu);
-        barrier();
-        if (d_unlinked(dentry))
-                return -EIO;
-        return 0;
-}
-
-/**
- * debugfs_use_file_finish - mark the end of file data access
- * @srcu_idx: the SRCU index "created" by a former call to
- *            debugfs_use_file_start().
- *
- * Allow any ongoing concurrent call into debugfs_remove() or
- * debugfs_remove_recursive() blocked by a former call to
- * debugfs_use_file_start() to proceed and return to its caller.
- */
-static void debugfs_use_file_finish(int srcu_idx) __releases(&debugfs_srcu)
-{
-        srcu_read_unlock(&debugfs_srcu, srcu_idx);
-}
-
 /* wrappers to enforce srcu in seq file */
 static ssize_t hfi1_seq_read(
 	struct file *file,
@@ -220,12 +172,15 @@ static int _opcode_stats_seq_show(struct seq_file *s, void *v)
 	u64 n_packets = 0, n_bytes = 0;
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_ctxtdata *rcd;
 
-	for (j = 0; j < dd->first_user_ctxt; j++) {
-		if (!dd->rcd[j])
-			continue;
-		n_packets += dd->rcd[j]->opstats->stats[i].n_packets;
-		n_bytes += dd->rcd[j]->opstats->stats[i].n_bytes;
+	for (j = 0; j < dd->first_dyn_alloc_ctxt; j++) {
+		rcd = hfi1_rcd_get_by_index(dd, j);
+		if (rcd) {
+			n_packets += rcd->opstats->stats[i].n_packets;
+			n_bytes += rcd->opstats->stats[i].n_bytes;
+		}
+		hfi1_rcd_put(rcd);
 	}
 	if (!n_packets && !n_bytes)
 		return SEQ_SKIP;
@@ -247,7 +202,7 @@ static void *_ctx_stats_seq_start(struct seq_file *s, loff_t *pos)
 
 	if (!*pos)
 		return SEQ_START_TOKEN;
-	if (*pos >= dd->first_user_ctxt)
+	if (*pos >= dd->first_dyn_alloc_ctxt)
 		return NULL;
 	return pos;
 }
@@ -261,7 +216,7 @@ static void *_ctx_stats_seq_next(struct seq_file *s, void *v, loff_t *pos)
 		return pos;
 
 	++*pos;
-	if (*pos >= dd->first_user_ctxt)
+	if (*pos >= dd->first_dyn_alloc_ctxt)
 		return NULL;
 	return pos;
 }
@@ -278,6 +233,7 @@ static int _ctx_stats_seq_show(struct seq_file *s, void *v)
 	u64 n_packets = 0;
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_ctxtdata *rcd;
 
 	if (v == SEQ_START_TOKEN) {
 		seq_puts(s, "Ctx:npkts\n");
@@ -287,11 +243,14 @@ static int _ctx_stats_seq_show(struct seq_file *s, void *v)
 	spos = v;
 	i = *spos;
 
-	if (!dd->rcd[i])
+	rcd = hfi1_rcd_get_by_index_safe(dd, i);
+	if (!rcd)
 		return SEQ_SKIP;
 
-	for (j = 0; j < ARRAY_SIZE(dd->rcd[i]->opstats->stats); j++)
-		n_packets += dd->rcd[i]->opstats->stats[j].n_packets;
+	for (j = 0; j < ARRAY_SIZE(rcd->opstats->stats); j++)
+		n_packets += rcd->opstats->stats[j].n_packets;
+
+	hfi1_rcd_put(rcd);
 
 	if (!n_packets)
 		return SEQ_SKIP;
@@ -439,10 +398,14 @@ static int _rcds_seq_show(struct seq_file *s, void *v)
 {
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_ctxtdata *rcd;
 	loff_t *spos = v;
 	loff_t i = *spos;
 
-	seqfile_dump_rcd(s, dd->rcd[i]);
+	rcd = hfi1_rcd_get_by_index_safe(dd, i);
+	if (rcd)
+		seqfile_dump_rcd(s, rcd);
+	hfi1_rcd_put(rcd);
 	return 0;
 }
 
@@ -1191,12 +1154,15 @@ static int _fault_stats_seq_show(struct seq_file *s, void *v)
 	u64 n_packets = 0, n_bytes = 0;
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_ctxtdata *rcd;
 
-	for (j = 0; j < dd->first_user_ctxt; j++) {
-		if (!dd->rcd[j])
-			continue;
-		n_packets += dd->rcd[j]->opstats->stats[i].n_packets;
-		n_bytes += dd->rcd[j]->opstats->stats[i].n_bytes;
+	for (j = 0; j < dd->first_dyn_alloc_ctxt; j++) {
+		rcd = hfi1_rcd_get_by_index(dd, j);
+		if (rcd) {
+			n_packets += rcd->opstats->stats[i].n_packets;
+			n_bytes += rcd->opstats->stats[i].n_bytes;
+		}
+		hfi1_rcd_put(rcd);
 	}
 	if (!n_packets && !n_bytes)
 		return SEQ_SKIP;
@@ -1461,9 +1427,7 @@ void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd)
 	fault_exit_debugfs(ibd);
 #endif
 	debugfs_remove(ibd->hfi1_ibdev_link);
-	synchronize_srcu(&debugfs_srcu);
 	debugfs_remove_recursive(ibd->hfi1_ibdev_dbg);
-	synchronize_srcu(&debugfs_srcu);
 out:
 	ibd->hfi1_ibdev_dbg = NULL;
 }
@@ -1590,6 +1554,5 @@ void hfi1_dbg_init(void)
 void hfi1_dbg_exit(void)
 {
 	debugfs_remove_recursive(hfi1_dbg_root);
-	synchronize_srcu(&debugfs_srcu);
 	hfi1_dbg_root = NULL;
 }

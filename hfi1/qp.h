@@ -150,20 +150,16 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter);
 bool _hfi1_schedule_send(struct rvt_qp *qp);
 bool hfi1_schedule_send(struct rvt_qp *qp);
 
-bool _hfi1_schedule_tid_send(struct rvt_qp *qp);
-bool hfi1_schedule_tid_send(struct rvt_qp *qp);
-
 void hfi1_migrate_qp(struct rvt_qp *qp);
 
 /*
  * Functions provided by hfi1 driver for rdmavt to use
  */
-void *qp_ack_queue_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp,
-			 gfp_t gfp);
-void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp,
-		    gfp_t gfp);
-int qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
-		 struct ib_qp_init_attr *init_attr, gfp_t gfp);
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp);
+#else
+void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp);
+#endif
 void qp_priv_free(struct rvt_dev_info *rdi, struct rvt_qp *qp);
 unsigned free_all_qps(struct rvt_dev_info *rdi);
 void notify_qp_reset(struct rvt_qp *qp);

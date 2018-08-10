@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015-2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -48,61 +48,47 @@
 #include <linux/string.h>
 
 #include "user_exp_rcv.h"
+#ifdef NVIDIA_GPU_DIRECT
+#include "user_exp_rcv_gpu.h"
+#endif
 #include "trace.h"
-#include "mmu_rb.h"
 #include "hfi.h"
 
-struct tid_rb_node {
-	struct mmu_rb_node mmu;
-	unsigned long phys;
-	struct tid_group *grp;
-	u32 rcventry;
-	dma_addr_t dma_addr;
-	bool freed;
-	unsigned npages;
-	struct page *pages[0];
-};
-
-#define EXP_TID_SET_EMPTY(set) (set.count == 0 && list_empty(&set.list))
-
-#define num_user_pages(vaddr, len)				       \
-	(1 + (((((unsigned long)(vaddr) +			       \
-	 (unsigned long)(len) - 1) & PAGE_MASK) -	       \
-       ((unsigned long)vaddr & PAGE_MASK)) >> PAGE_SHIFT))
-
 static void unlock_exp_tids(struct hfi1_ctxtdata *uctxt,
-		    struct exp_tid_set *set,
-		    struct hfi1_filedata *fd);
-static int set_rcvarray_entry(struct hfi1_filedata *fd, unsigned long vaddr,
-		      u32 rcventry, struct tid_group *grp,
-		      struct page **pages, unsigned npages);
-static int tid_rb_insert(void *arg, struct mmu_rb_node *node);
+			    struct exp_tid_set *set,
+			    struct hfi1_filedata *fd);
+static int set_rcvarray_entry(struct hfi1_filedata *fd,
+			      struct tid_user_buf *tbuf,
+			      u32 rcventry, struct tid_group *grp,
+			      u16 pageidx, unsigned int npages);
 static void cacheless_tid_rb_remove(struct hfi1_filedata *fdata,
-			    struct tid_rb_node *tnode);
+				    struct tid_rb_node *tnode);
 static void tid_rb_remove(void *arg, struct mmu_rb_node *node);
 static int tid_rb_invalidate(void *arg, struct mmu_rb_node *mnode);
-static int program_rcvarray(struct hfi1_filedata *fd, unsigned long vaddr,
-		    struct tid_group *grp, struct tid_pageset *sets,
-		    unsigned start, u16 count, struct page **pages,
-		    u32 *tidlist, unsigned *tididx, unsigned *pmapped);
+static int program_rcvarray(struct hfi1_filedata *fd, struct tid_user_buf *,
+			    struct tid_group *grp,
+			    unsigned int start, u16 count,
+			    u32 *tidlist, unsigned int *tididx,
+			    unsigned int *pmapped);
 static int unprogram_rcvarray(struct hfi1_filedata *fd, u32 tidinfo,
-		      struct tid_group **grp);
+			      struct tid_group **grp);
 static void clear_tid_node(struct hfi1_filedata *fd, struct tid_rb_node *node);
+static u32 find_phys_blocks(struct page **pages, unsigned npages,
+			    struct tid_pageset *list);
 
 static struct mmu_rb_ops tid_rb_ops = {
-.insert = tid_rb_insert,
-.remove = tid_rb_remove,
-.invalidate = tid_rb_invalidate
+	.insert = tid_rb_insert,
+	.remove = tid_rb_remove,
+	.invalidate = tid_rb_invalidate
 };
 
 /*
-=======
-* Initialize context and file private data needed for Expected
-* receive caching. This needs to be done after the context has
-* been configured with the eager/expected RcvEntry counts.
-*/
+ * Initialize context and file private data needed for Expected
+ * receive caching. This needs to be done after the context has
+ * been configured with the eager/expected RcvEntry counts.
+ */
 int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
-                           struct hfi1_ctxtdata *uctxt)
+			   struct hfi1_ctxtdata *uctxt)
 {
 	struct hfi1_devdata *dd = uctxt->dd;
 	int ret = 0;
@@ -118,17 +104,26 @@ int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
 
 	if (!HFI1_CAP_UGET_MASK(uctxt->flags, TID_UNMAP)) {
 		fd->invalid_tid_idx = 0;
-		fd->invalid_tids = kzalloc(uctxt->expected_count *
-					   sizeof(u32), GFP_KERNEL);
-		/*
-		 * NOTE: If this is an error, shouldn't we cleanup enry_to_rb?
-		 */
+		fd->invalid_tids = kcalloc(uctxt->expected_count,
+					   sizeof(*fd->invalid_tids),
+					   GFP_KERNEL);
 		if (!fd->invalid_tids) {
 			kfree(fd->entry_to_rb);
 			fd->entry_to_rb = NULL;
 			return -ENOMEM;
 		}
 
+#ifdef NVIDIA_GPU_DIRECT
+		ret = hfi1_mmu_rb_register(fd, NULL, &tid_rb_ops,
+					   dd->pport->hfi1_wq,
+					   &fd->handler_gpu);
+		if (ret) {
+			dd_dev_info(dd,
+				    "Failed to allocate GPU buffer cache %d",
+				    ret);
+			return ret;
+		}
+#endif
 		/*
 		 * Register MMU notifier callbacks. If the registration
 		 * fails, continue without TID caching for this context.
@@ -141,6 +136,10 @@ int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
 				    "Failed MMU notifier registration %d\n",
 				    ret);
 			ret = 0;
+#ifdef NVIDIA_GPU_DIRECT
+			hfi1_mmu_rb_unregister(fd->handler_gpu);
+			fd->handler_gpu = NULL;
+#endif
 		}
 	}
 
@@ -174,16 +173,19 @@ int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
 
 void hfi1_user_exp_rcv_free(struct hfi1_filedata *fd)
 {
-struct hfi1_ctxtdata *uctxt = fd->uctxt;
+	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 
-/*
- * The notifier would have been removed when the process'es mm
- * was freed.
- */
-if (fd->handler) {
-	hfi1_mmu_rb_unregister(fd->handler);
-} else {
-	if (!EXP_TID_SET_EMPTY(uctxt->tid_full_list))
+	/*
+	 * The notifier would have been removed when the process'es mm
+	 * was freed.
+	 */
+	if (fd->handler) {
+		hfi1_mmu_rb_unregister(fd->handler);
+#ifdef NVIDIA_GPU_DIRECT
+		hfi1_mmu_rb_unregister(fd->handler_gpu);
+#endif
+	} else {
+		if (!EXP_TID_SET_EMPTY(uctxt->tid_full_list))
 			unlock_exp_tids(uctxt, &uctxt->tid_full_list, fd);
 		if (!EXP_TID_SET_EMPTY(uctxt->tid_used_list))
 			unlock_exp_tids(uctxt, &uctxt->tid_used_list, fd);
@@ -194,6 +196,100 @@ if (fd->handler) {
 
 	kfree(fd->entry_to_rb);
 	fd->entry_to_rb = NULL;
+}
+
+/**
+ * Release pinned receive buffer pages.
+ *
+ * @mapped - true if the pages have been DMA mapped. false otherwise.
+ * @idx - Index of the first page to unpin.
+ * @npages - No of pages to unpin.
+ *
+ * If the pages have been DMA mapped (indicated by mapped parameter), their
+ * info will be passed via a struct tid_rb_node. If they haven't been mapped,
+ * their info will be passed via a struct tid_user_buf.
+ */
+static void unpin_rcv_pages(struct hfi1_filedata *fd,
+			    struct tid_user_buf *tidbuf,
+			    struct tid_rb_node *node,
+			    unsigned int idx,
+			    unsigned int npages,
+			    bool mapped)
+{
+	struct page **pages;
+	struct hfi1_devdata *dd = fd->uctxt->dd;
+
+	if (mapped) {
+		pci_unmap_single(dd->pcidev, node->dma_addr,
+				 node->mmu.len, PCI_DMA_FROMDEVICE);
+		pages = &node->pages[idx];
+	} else {
+#ifdef NVIDIA_GPU_DIRECT
+		pages = &tidbuf->pages.host[idx];
+#else
+		pages = &tidbuf->pages[idx];
+#endif
+	}
+	hfi1_release_user_pages(fd->mm, pages, npages, mapped);
+	fd->tid_n_pinned -= npages;
+}
+
+/**
+ * Pin receive buffer pages.
+ */
+static int pin_rcv_pages(struct hfi1_filedata *fd, struct tid_user_buf *tidbuf)
+{
+	int pinned;
+	unsigned int npages;
+	unsigned long vaddr = tidbuf->vaddr;
+	struct page **pages = NULL;
+	struct hfi1_devdata *dd = fd->uctxt->dd;
+
+	/* Get the number of pages the user buffer spans */
+	npages = num_user_pages(vaddr, tidbuf->length);
+	if (!npages)
+		return -EINVAL;
+
+	if (npages > fd->uctxt->expected_count) {
+		dd_dev_err(dd, "Expected buffer too big\n");
+		return -EINVAL;
+	}
+
+	/* Verify that access is OK for the user buffer */
+	if (!access_ok(VERIFY_WRITE, (void __user *)vaddr,
+		       npages * PAGE_SIZE)) {
+		dd_dev_err(dd, "Fail vaddr %p, %u pages, !access_ok\n",
+			   (void *)vaddr, npages);
+		return -EFAULT;
+	}
+	/* Allocate the array of struct page pointers needed for pinning */
+	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
+
+	/*
+	 * Pin all the pages of the user buffer. If we can't pin all the
+	 * pages, accept the amount pinned so far and program only that.
+	 * User space knows how to deal with partially programmed buffers.
+	 */
+	if (!hfi1_can_pin_pages(dd, fd->mm, fd->tid_n_pinned, npages)) {
+		kfree(pages);
+		return -ENOMEM;
+	}
+
+	pinned = hfi1_acquire_user_pages(fd->mm, vaddr, npages, true, pages);
+	if (pinned <= 0) {
+		kfree(pages);
+		return pinned;
+	}
+#ifdef NVIDIA_GPU_DIRECT
+	tidbuf->pages.host = pages;
+#else
+	tidbuf->pages = pages;
+#endif
+	tidbuf->npages = npages;
+	fd->tid_n_pinned += pinned;
+	return pinned;
 }
 
 /*
@@ -246,67 +342,62 @@ if (fd->handler) {
  *          used, move it to tid_full_list.
  */
 int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
+#ifndef NVIDIA_GPU_DIRECT
 			    struct hfi1_tid_info *tinfo)
+#else
+			    struct hfi1_tid_info_v2 *tinfo)
+#endif
 {
 	int ret = 0, need_group = 0, pinned;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
-	unsigned npages, ngroups, pageidx = 0, pageset_count, npagesets,
+	unsigned int ngroups, pageidx = 0, pageset_count,
 		tididx = 0, mapped, mapped_pages = 0;
-	unsigned long vaddr = tinfo->vaddr;
-	struct page **pages = NULL;
 	u32 *tidlist = NULL;
-	struct tid_pageset *pagesets = NULL;
+	struct tid_user_buf *tidbuf;
 
-	/* Get the number of pages the user buffer spans */
-	npages = num_user_pages(vaddr, tinfo->length);
-	if (!npages)
-		return -EINVAL;
-
-	if (npages > uctxt->expected_count) {
-		dd_dev_err(dd, "Expected buffer too big\n");
-		return -EINVAL;
-	}
-
-	/* Verify that access is OK for the user buffer */
-	if (!access_ok(VERIFY_WRITE, (void __user *)vaddr,
-		       npages * PAGE_SIZE)) {
-		dd_dev_err(dd, "Fail vaddr %p, %u pages, !access_ok\n",
-			   (void *)vaddr, npages);
-		return -EFAULT;
-	}
-
-	pagesets = kcalloc(uctxt->expected_count, sizeof(*pagesets),
-			   GFP_KERNEL);
-	if (!pagesets)
+	tidbuf = kzalloc(sizeof(*tidbuf), GFP_KERNEL);
+	if (!tidbuf)
 		return -ENOMEM;
 
-	/* Allocate the array of struct page pointers needed for pinning */
-	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
-	if (!pages) {
-		ret = -ENOMEM;
-		goto bail;
+	tidbuf->vaddr = tinfo->vaddr;
+	tidbuf->length = tinfo->length;
+	tidbuf->psets = kcalloc(uctxt->expected_count, sizeof(*tidbuf->psets),
+				GFP_KERNEL);
+	if (!tidbuf->psets) {
+		kfree(tidbuf);
+		return -ENOMEM;
 	}
 
-	/*
-	 * Pin all the pages of the user buffer. If we can't pin all the
-	 * pages, accept the amount pinned so far and program only that.
-	 * User space knows how to deal with partially programmed buffers.
-	 */
-	if (!hfi1_can_pin_pages(dd, fd->mm, fd->tid_n_pinned, npages)) {
-		ret = -ENOMEM;
-		goto bail;
-	}
+#ifdef NVIDIA_GPU_DIRECT
+	tidbuf->ongpu = (bool)(tinfo->flags & HFI1_BUF_GPU_MEM);
+	if (tidbuf->ongpu)
+		tidbuf->handler = fd->handler_gpu;
+	else
+		tidbuf->handler = fd->handler;
 
-	pinned = hfi1_acquire_user_pages(fd->mm, vaddr, npages, true, pages);
+	if (tidbuf->ongpu)
+		pinned = pin_rcv_pages_gpu(fd, tidbuf);
+	else
+#endif
+		pinned = pin_rcv_pages(fd, tidbuf);
 	if (pinned <= 0) {
-		ret = pinned;
-		goto bail;
+		kfree(tidbuf->psets);
+		kfree(tidbuf);
+		return pinned;
 	}
-	fd->tid_n_pinned += npages;
 
 	/* Find sets of physically contiguous pages */
-	npagesets = find_phys_blocks(pages, pinned, pagesets);
+#ifdef NVIDIA_GPU_DIRECT
+	if (tidbuf->ongpu)
+		tidbuf->n_psets = find_phys_blocks_gpu(tidbuf);
+	else
+		tidbuf->n_psets = find_phys_blocks(tidbuf->pages.host, pinned,
+						   tidbuf->psets);
+#else
+		tidbuf->n_psets = find_phys_blocks(tidbuf->pages, pinned,
+						   tidbuf->psets);
+#endif
 
 	/*
 	 * We don't need to access this under a lock since tid_used is per
@@ -314,10 +405,10 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 	 * and hfi1_user_exp_rcv_setup() at the same time.
 	 */
 	spin_lock(&fd->tid_lock);
-	if (fd->tid_used + npagesets > fd->tid_limit)
+	if (fd->tid_used + tidbuf->n_psets > fd->tid_limit)
 		pageset_count = fd->tid_limit - fd->tid_used;
 	else
-		pageset_count = npagesets;
+		pageset_count = tidbuf->n_psets;
 	spin_unlock(&fd->tid_lock);
 
 	if (!pageset_count)
@@ -345,9 +436,9 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 		struct tid_group *grp =
 			tid_group_pop(&uctxt->tid_group_list);
 
-		ret = program_rcvarray(fd, vaddr, grp, pagesets,
+		ret = program_rcvarray(fd, tidbuf, grp,
 				       pageidx, dd->rcv_entries.group_size,
-				       pages, tidlist, &tididx, &mapped);
+				       tidlist, &tididx, &mapped);
 		/*
 		 * If there was a failure to program the RcvArray
 		 * entries for the entire group, reset the grp fields
@@ -391,8 +482,8 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 			unsigned use = min_t(unsigned, pageset_count - pageidx,
 					     grp->size - grp->used);
 
-			ret = program_rcvarray(fd, vaddr, grp, pagesets,
-					       pageidx, use, pages, tidlist,
+			ret = program_rcvarray(fd, tidbuf, grp,
+					       pageidx, use, tidlist,
 					       &tididx, &mapped);
 			if (ret < 0) {
 				hfi1_cdbg(TID,
@@ -432,7 +523,12 @@ nomem:
 		fd->tid_used += tididx;
 		spin_unlock(&fd->tid_lock);
 		tinfo->tidcnt = tididx;
-		tinfo->length = mapped_pages * PAGE_SIZE;
+#ifdef NVIDIA_GPU_DIRECT
+		if (tidbuf->ongpu)
+			tinfo->length = mapped_pages * NV_GPU_PAGE_SIZE;
+		else
+#endif
+			tinfo->length = mapped_pages * PAGE_SIZE;
 
 		if (copy_to_user((void __user *)(unsigned long)tinfo->tidlist,
 				 tidlist, sizeof(tidlist[0]) * tididx)) {
@@ -441,7 +537,8 @@ nomem:
 			 * everything done so far so we don't leak resources.
 			 */
 			tinfo->tidlist = (unsigned long)&tidlist;
-			hfi1_user_exp_rcv_clear(fd, tinfo);
+			hfi1_user_exp_rcv_clear(fd,
+						(struct hfi1_tid_info *)tinfo);
 			tinfo->tidlist = 0;
 			ret = -EFAULT;
 			goto bail;
@@ -451,17 +548,37 @@ nomem:
 	/*
 	 * If not everything was mapped (due to insufficient RcvArray entries,
 	 * for example), unpin all unmapped pages so we can pin them nex time.
+	 * In case of pages pinned on the GPU memory, we can't selectively
+	 * unpin some of the pinned pages. So don't unpin the unmapped pages.
 	 */
-	if (mapped_pages != pinned) {
-		hfi1_release_user_pages(fd->mm, &pages[mapped_pages],
-					pinned - mapped_pages,
-					false);
-		fd->tid_n_pinned -= pinned - mapped_pages;
-	}
+#ifdef NVIDIA_GPU_DIRECT
+	if (mapped_pages != pinned && !tidbuf->ongpu)
+#else
+	if (mapped_pages != pinned)
+#endif
+		unpin_rcv_pages(fd, tidbuf, NULL, mapped_pages,
+				(pinned - mapped_pages), false);
 bail:
-	kfree(pagesets);
-	kfree(pages);
+	kfree(tidbuf->psets);
 	kfree(tidlist);
+#ifndef NVIDIA_GPU_DIRECT
+	kfree(tidbuf->pages);
+	kfree(tidbuf);
+#else
+	if (!tidbuf->ongpu) {
+		kfree(tidbuf->pages.host);
+	} else if ((ret < 0) && tidbuf->pages.gpu) {
+		trace_free_recv_gpu_pages(tidbuf->vaddr);
+		put_gpu_pages(tidbuf->vaddr, tidbuf->pages.gpu);
+		fd->tid_n_gpu_pinned -= tidbuf->pages.gpu->entries;
+	}
+	/*
+	 * Free tidbuf in case of any error or if the pages are pinned to host
+	 * memory. There are references to tidbuf in case of GPU pinned buffer.
+	 */
+	if (!tidbuf->ongpu || ret < 0)
+		kfree(tidbuf);
+#endif
 	return ret > 0 ? 0 : ret;
 }
 
@@ -505,13 +622,9 @@ int hfi1_user_exp_rcv_invalid(struct hfi1_filedata *fd,
 {
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	unsigned long *ev = uctxt->dd->events +
-		(((uctxt->ctxt - uctxt->dd->first_user_ctxt) *
-		  HFI1_MAX_SHARED_CTXTS) + fd->subctxt);
+		(uctxt_offset(uctxt) + fd->subctxt);
 	u32 *array;
 	int ret = 0;
-
-	if (!fd->invalid_tids)
-		return -EINVAL;
 
 	/*
 	 * copy_to_user() can sleep, which will leave the invalid_lock
@@ -551,7 +664,7 @@ int hfi1_user_exp_rcv_invalid(struct hfi1_filedata *fd,
 	return ret;
 }
 
-u32 find_phys_blocks(struct page **pages, unsigned npages,
+u32 find_phys_blocks(struct page **pages, unsigned int npages,
 		     struct tid_pageset *list)
 {
 	unsigned pagecount, pageidx, setcount = 0, i;
@@ -618,13 +731,13 @@ u32 find_phys_blocks(struct page **pages, unsigned npages,
 /**
  * program_rcvarray() - program an RcvArray group with receive buffers
  * @fd: filedata pointer
- * @vaddr: starting user virtual address
+ * @tbuf: pointer to struct tid_user_buf that has the user buffer starting
+ *	  virtual address, buffer length, page pointers, pagesets (array of
+ *	  struct tid_pageset holding information on physically contiguous
+ *	  chunks from the user buffer), and other fields.
  * @grp: RcvArray group
- * @sets: array of struct tid_pageset holding information on physically
- *        contiguous chunks from the user buffer
  * @start: starting index into sets array
  * @count: number of struct tid_pageset's to program
- * @pages: an array of struct page * for the user buffer
  * @tidlist: the array of u32 elements when the information about the
  *           programmed RcvArray entries is to be encoded.
  * @tididx: starting offset into tidlist
@@ -642,11 +755,11 @@ u32 find_phys_blocks(struct page **pages, unsigned npages,
  * -ENOMEM or -EFAULT on error from set_rcvarray_entry(), or
  * number of RcvArray entries programmed.
  */
-static int program_rcvarray(struct hfi1_filedata *fd, unsigned long vaddr,
+static int program_rcvarray(struct hfi1_filedata *fd, struct tid_user_buf *tbuf,
 			    struct tid_group *grp,
-			    struct tid_pageset *sets,
-			    unsigned start, u16 count, struct page **pages,
-			    u32 *tidlist, unsigned *tididx, unsigned *pmapped)
+			    unsigned int start, u16 count,
+			    u32 *tidlist, unsigned int *tididx,
+			    unsigned int *pmapped)
 {
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
@@ -685,18 +798,35 @@ static int program_rcvarray(struct hfi1_filedata *fd, unsigned long vaddr,
 		}
 
 		rcventry = grp->base + useidx;
-		npages = sets[setidx].count;
-		pageidx = sets[setidx].idx;
+		npages = tbuf->psets[setidx].count;
+		pageidx = tbuf->psets[setidx].idx;
 
-		ret = set_rcvarray_entry(fd, vaddr + (pageidx * PAGE_SIZE),
-					 rcventry, grp, pages + pageidx,
-					 npages);
+#ifdef NVIDIA_GPU_DIRECT
+		if (tbuf->ongpu)
+			ret = set_rcvarray_entry_gpu(fd, tbuf,
+						     rcventry, grp, pageidx,
+						     npages);
+		else
+#endif
+			ret = set_rcvarray_entry(fd, tbuf,
+						 rcventry, grp, pageidx,
+						 npages);
 		if (ret)
 			return ret;
 		mapped += npages;
 
-		tidinfo = rcventry2tidinfo(rcventry - uctxt->expected_base) |
-			EXP_TID_SET(LEN, npages);
+#ifdef NVIDIA_GPU_DIRECT
+		/*
+		 * If the buffer is on the GPU, the tid entry length needs to be
+		 * computed in terms for host page size, not GPU page size.
+		 */
+		if (tbuf->ongpu)
+			tidinfo = rcventry2tidinfo(rcventry - uctxt->expected_base) |
+				EXP_TID_SET(LEN, npages * (NV_GPU_PAGE_SIZE / PAGE_SIZE));
+		else
+#endif
+			tidinfo = rcventry2tidinfo(rcventry - uctxt->expected_base) |
+				EXP_TID_SET(LEN, npages);
 		tidlist[(*tididx)++] = tidinfo;
 		grp->used++;
 		grp->map |= 1 << useidx++;
@@ -710,15 +840,21 @@ static int program_rcvarray(struct hfi1_filedata *fd, unsigned long vaddr,
 	return idx;
 }
 
-static int set_rcvarray_entry(struct hfi1_filedata *fd, unsigned long vaddr,
+static int set_rcvarray_entry(struct hfi1_filedata *fd,
+			      struct tid_user_buf *tbuf,
 			      u32 rcventry, struct tid_group *grp,
-			      struct page **pages, unsigned npages)
+			      u16 pageidx, unsigned int npages)
 {
 	int ret;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct tid_rb_node *node;
 	struct hfi1_devdata *dd = uctxt->dd;
 	dma_addr_t phys;
+#ifdef NVIDIA_GPU_DIRECT
+	struct page **pages = tbuf->pages.host + pageidx;
+#else
+	struct page **pages = tbuf->pages + pageidx;
+#endif
 
 	/*
 	 * Allocate the node first so we can handle a potential
@@ -739,7 +875,7 @@ static int set_rcvarray_entry(struct hfi1_filedata *fd, unsigned long vaddr,
 		return -EFAULT;
 	}
 
-	node->mmu.addr = vaddr;
+	node->mmu.addr = tbuf->vaddr + (pageidx * PAGE_SIZE);
 	node->mmu.len = npages * PAGE_SIZE;
 	node->phys = page_to_phys(pages[0]);
 	node->npages = npages;
@@ -748,6 +884,9 @@ static int set_rcvarray_entry(struct hfi1_filedata *fd, unsigned long vaddr,
 	node->grp = grp;
 	node->freed = false;
 	memcpy(node->pages, pages, sizeof(struct page *) * npages);
+#ifdef NVIDIA_GPU_DIRECT
+	node->ongpu = tbuf->ongpu;
+#endif
 
 	if (!fd->handler)
 		ret = tid_rb_insert(fd, &node->mmu);
@@ -798,8 +937,12 @@ static int unprogram_rcvarray(struct hfi1_filedata *fd, u32 tidinfo,
 	if (!fd->handler)
 		cacheless_tid_rb_remove(fd, node);
 	else
-		hfi1_mmu_rb_remove(fd->handler, &node->mmu);
-
+#ifdef NVIDIA_GPU_DIRECT
+		if (node->ongpu)
+			hfi1_mmu_rb_remove(fd->handler_gpu, &node->mmu);
+		else
+#endif
+			hfi1_mmu_rb_remove(fd->handler, &node->mmu);
 	return 0;
 }
 
@@ -818,10 +961,12 @@ static void clear_tid_node(struct hfi1_filedata *fd, struct tid_rb_node *node)
 	 */
 	hfi1_put_tid(dd, node->rcventry, PT_INVALID_FLUSH, 0, 0);
 
-	pci_unmap_single(dd->pcidev, node->dma_addr, node->mmu.len,
-			 PCI_DMA_FROMDEVICE);
-	hfi1_release_user_pages(fd->mm, node->pages, node->npages, true);
-	fd->tid_n_pinned -= node->npages;
+#ifdef NVIDIA_GPU_DIRECT
+	if (node->ongpu)
+		unpin_rcv_pages_gpu(fd, node);
+	else
+#endif
+		unpin_rcv_pages(fd, NULL, node, 0, node->npages, true);
 
 	node->grp->used--;
 	node->grp->map &= ~(1 << (node->rcventry - node->grp->base));
@@ -905,8 +1050,7 @@ static int tid_rb_invalidate(void *arg, struct mmu_rb_node *mnode)
 			 * process in question.
 			 */
 			ev = uctxt->dd->events +
-				(((uctxt->ctxt - uctxt->dd->first_user_ctxt) *
-				  HFI1_MAX_SHARED_CTXTS) + fdata->subctxt);
+				(uctxt_offset(uctxt) + fdata->subctxt);
 			set_bit(_HFI1_EVENT_TID_MMU_NOTIFY_BIT, ev);
 		}
 		fdata->invalid_tid_idx++;
@@ -915,7 +1059,7 @@ static int tid_rb_invalidate(void *arg, struct mmu_rb_node *mnode)
 	return 0;
 }
 
-static int tid_rb_insert(void *arg, struct mmu_rb_node *node)
+int tid_rb_insert(void *arg, struct mmu_rb_node *node)
 {
 	struct hfi1_filedata *fdata = arg;
 	struct tid_rb_node *tnode =

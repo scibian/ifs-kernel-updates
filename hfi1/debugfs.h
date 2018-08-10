@@ -102,18 +102,33 @@ static inline void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 {
 }
 
-void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd)
+static inline void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd)
 {
 }
 
-void hfi1_dbg_init(void)
+static inline void hfi1_dbg_init(void)
 {
 }
 
-void hfi1_dbg_exit(void)
+static inline void hfi1_dbg_exit(void)
 {
 }
 
+static inline bool hfi1_dbg_fault_packet(struct hfi1_packet *packet)
+{
+	return false;
+}
+
+static inline bool hfi1_dbg_fault_opcode(struct rvt_qp *qp,
+					 u32 opcode, bool rx)
+{
+	return false;
+}
+
+static inline bool hfi1_dbg_fault_suppress_err(struct hfi1_ibdev *ibd)
+{
+	return false;
+}
 #endif
 
 #endif                          /* _HFI1_DEBUGFS_H */

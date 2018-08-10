@@ -47,10 +47,9 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-
+#include "compat.h"
 #include <rdma/rdma_vt.h>
 #include <linux/pci.h>
-#include "dma.h"
 #include "pd.h"
 #include "qp.h"
 #include "ah.h"

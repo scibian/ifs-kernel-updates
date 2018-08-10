@@ -59,59 +59,22 @@
 #include "trace.h"
 #include "verbs_txreq.h"
 #include "user_exp_rcv.h"
+#include "tid_rdma.h"
 
 unsigned int hfi1_qp_table_size = 256;
 module_param_named(qp_table_size, hfi1_qp_table_size, uint, S_IRUGO);
 MODULE_PARM_DESC(qp_table_size, "QP table size");
 
-unsigned int hfi1_tid_rdma_seg_min_size = TID_RDMA_MIN_SEGMENT_SIZE;
-module_param_named(tid_rdma_seg_min_size, hfi1_tid_rdma_seg_min_size,
-		   uint, S_IRUGO);
-MODULE_PARM_DESC(tid_rdma_seg_min_size,
-		 "Min TID RDMA segment size, default: 64KiB");
-
-unsigned int hfi1_tid_rdma_seg_max_size = TID_RDMA_MAX_SEGMENT_SIZE;
-module_param_named(tid_rdma_seg_max_size, hfi1_tid_rdma_seg_max_size,
-		   uint, S_IRUGO);
-MODULE_PARM_DESC(tid_rdma_seg_max_size,
-		 "Max TID RDMA segment size, default: 256KiB");
-
-unsigned int hfi1_tid_rdma_max_read_segs = TID_RDMA_MAX_READ_SEGS_PER_REQ;
-module_param_named(tid_rdma_max_read_segs, hfi1_tid_rdma_max_read_segs,
-		   uint, S_IRUGO);
-MODULE_PARM_DESC(tid_rdma_max_read_segs,
-		 "Max TID RDMA READ segments per QP request, default: 6");
-
-unsigned int hfi1_tid_rdma_max_write_segs = TID_RDMA_MAX_WRITE_SEGS_PER_REQ;
-module_param_named(tid_rdma_max_write_segs, hfi1_tid_rdma_max_write_segs,
-		   uint, S_IRUGO);
-MODULE_PARM_DESC(tid_rdma_max_write_segs,
-		 "Max TID RDMA WRITE segments per QP request, default: 2");
-
-#define HFI1_TID_RDMA_PROTO_EN_WRITE BIT(0)
-#define HFI1_TID_RDMA_PROTO_EN_READ  BIT(1)
-
-unsigned int hfi1_tid_rdma_proto_enable =
-	(HFI1_TID_RDMA_PROTO_EN_WRITE | HFI1_TID_RDMA_PROTO_EN_READ);
-module_param_named(tid_rdma_proto_enable, hfi1_tid_rdma_proto_enable,
-		   uint, S_IRUGO | S_IWUSR);
-MODULE_PARM_DESC(tid_rdma_proto_enable,
-		 "[En|Dis]able TID RDMA READ and/or WRITE protocols.");
-
-static struct hfi1_ctxtdata *qp_to_rcd(
-	struct rvt_dev_info *rdi,
-	struct rvt_qp *qp);
 static void flush_tx_list(struct rvt_qp *qp);
 static int iowait_sleep(
 	struct sdma_engine *sde,
 	struct iowait_work *wait,
 	struct sdma_txreq *stx,
-	unsigned int seq,
+	uint seq,
 	bool pkts_sent);
 static void iowait_wakeup(struct iowait *wait, int reason);
 static void iowait_sdma_drained(struct iowait *wait);
 static void qp_pio_drain(struct rvt_qp *qp);
-static void setup_tid_rdma_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
 
 const struct rvt_operation_params hfi1_post_parms[RVT_OPERATION_MAX] = {
 [IB_WR_RDMA_WRITE] = {
@@ -175,6 +138,12 @@ const struct rvt_operation_params hfi1_post_parms[RVT_OPERATION_MAX] = {
 	.length = sizeof(struct ib_atomic_wr),
 	.qpt_support = BIT(IB_QPT_RC),
 	.flags = RVT_OPERATION_USE_RESERVE,
+},
+
+[IB_WR_TID_RDMA_WRITE] = {
+	.length = sizeof(struct ib_rdma_wr),
+	.qpt_support = BIT(IB_QPT_RC),
+	.flags = RVT_OPERATION_IGN_RNR_CNT,
 },
 
 };
@@ -283,17 +252,42 @@ int hfi1_check_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 	return 0;
 }
 
+/*
+ * qp_set_16b - Set the hdr_type based on whether the slid or the
+ * dlid in the connection is extended. Only applicable for RC and UC
+ * QPs. UD QPs determine this on the fly from the ah in the wqe
+ */
+static inline void qp_set_16b(struct rvt_qp *qp)
+{
+	struct hfi1_pportdata *ppd;
+	struct hfi1_ibport *ibp;
+	struct hfi1_qp_priv *priv = qp->priv;
+
+	/* Update ah_attr to account for extended LIDs */
+	hfi1_update_ah_attr(qp->ibqp.device, &qp->remote_ah_attr);
+
+	/* Create 32 bit LIDs */
+	hfi1_make_opa_lid(&qp->remote_ah_attr);
+
+	if (!(rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH))
+		return;
+
+	ibp = to_iport(qp->ibqp.device, qp->port_num);
+	ppd = ppd_from_ibp(ibp);
+	priv->hdr_type = hfi1_get_hdr_type(ppd->lid, &qp->remote_ah_attr);
+}
+
 void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 		    int attr_mask, struct ib_udata *udata)
 {
 	struct ib_qp *ibqp = &qp->ibqp;
 	struct hfi1_qp_priv *priv = qp->priv;
-	unsigned long flags;
 
 	if (attr_mask & IB_QP_AV) {
 		priv->s_sc = ah_to_sc(ibqp->device, &qp->remote_ah_attr);
 		priv->s_sde = qp_to_sdma_engine(qp, priv->s_sc);
 		priv->s_sendcontext = qp_to_send_context(qp, priv->s_sc);
+		qp_set_16b(qp);
 	}
 
 	if (attr_mask & IB_QP_PATH_MIG_STATE &&
@@ -303,59 +297,10 @@ void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 		priv->s_sc = ah_to_sc(ibqp->device, &qp->remote_ah_attr);
 		priv->s_sde = qp_to_sdma_engine(qp, priv->s_sc);
 		priv->s_sendcontext = qp_to_send_context(qp, priv->s_sc);
+		qp_set_16b(qp);
 	}
 
-	if (attr_mask & IB_QP_RETRY_CNT)
-		priv->s_retry = attr->retry_cnt;
-
-	spin_lock_irqsave(&priv->opfn.lock, flags);
-	if (ibqp->qp_type == IB_QPT_RC && HFI1_CAP_IS_KSET(TID_RDMA)) {
-		struct tid_rdma_params *local = &priv->tid_rdma.local;
-
-		if (attr_mask & IB_QP_TIMEOUT)
-			priv->tid_retry_timeout_jiffies =
-				HFI1_TID_RETRY_TO_FACTOR * qp->timeout_jiffies;
-		if (qp->pmtu == enum_to_mtu(OPA_MTU_4096) ||
-		    qp->pmtu == enum_to_mtu(OPA_MTU_8192)) {
-			local->qp =
-				TID_RDMA_LOCAL_KDETH_QP_BASE | priv->rcd->ctxt;
-			local->max_len = hfi1_tid_rdma_seg_max_size;
-			local->jkey = priv->rcd->jkey;
-			local->max_read = hfi1_tid_rdma_max_read_segs;
-			local->max_write = hfi1_tid_rdma_max_write_segs;
-			local->timeout = qp->timeout;
-
-			/*
-			 * We only want to set the OPFN requested bit when the
-			 * QP transitions to RTS.
-			 */
-			if (attr_mask & IB_QP_STATE &&
-			    attr->qp_state == IB_QPS_RTS) {
-				priv->opfn.requested |= OPFN_MASK(TID_RDMA);
-				/*
-				 * If the QP is transitioning to RTS and the
-				 * opfn.completed for TID RDMA has already been
-				 * set, the QP is being moved *back* into RTS.
-				 * We can now renegotiate the TID RDMA
-				 * parameters.
-				 */
-				if (priv->opfn.completed &
-				    OPFN_MASK(TID_RDMA)) {
-					priv->opfn.completed &=
-						~OPFN_MASK(TID_RDMA);
-					/*
-					 * Since the opfn.completed bit was
-					 * already set, it is safe to assume
-					 * that the opfn.extended is also set.
-					 */
-					opfn_schedule_conn_request(qp);
-				}
-			}
-		} else {
-			memset(local, 0, sizeof(*local));
-		}
-	}
-	spin_unlock_irqrestore(&priv->opfn.lock, flags);
+	opfn_init(qp, attr, attr_mask);
 }
 
 /**
@@ -380,7 +325,7 @@ int hfi1_setup_wqe(struct rvt_qp *qp,
 
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_RC:
-		setup_tid_rdma_wqe(qp, wqe);
+		hfi1_setup_tid_rdma_wqe(qp, wqe);
 	case IB_QPT_UC:
 		if (wqe->length > 0x80000000U)
 			return -EINVAL;
@@ -395,7 +340,7 @@ int hfi1_setup_wqe(struct rvt_qp *qp,
 		ah = ibah_to_rvtah(wqe->ud_wr.ah);
 		if (wqe->length > (1 << ah->log_pmtu))
 			return -EINVAL;
-		if (ibp->sl_to_sc[ah->attr.sl] == 0xf)
+		if (ibp->sl_to_sc[rdma_ah_get_sl(&ah->attr)] == 0xf)
 			return -EINVAL;
 	default:
 		break;
@@ -424,20 +369,6 @@ bool _hfi1_schedule_send(struct rvt_qp *qp)
 			       priv->s_sde ?
 			       priv->s_sde->cpu :
 			       cpumask_first(cpumask_of_node(dd->node)));
-}
-
-bool _hfi1_schedule_tid_send(struct rvt_qp *qp)
-{
-	struct hfi1_qp_priv *priv = qp->priv;
-	struct hfi1_ibport *ibp =
-		to_iport(qp->ibqp.device, qp->port_num);
-	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
-	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
-
-	return iowait_tid_schedule(&priv->s_iowait, ppd->hfi1_wq,
-				   priv->s_sde ?
-				   priv->s_sde->cpu :
-				   cpumask_first(cpumask_of_node(dd->node)));
 }
 
 static void qp_pio_drain(struct rvt_qp *qp)
@@ -479,39 +410,6 @@ bool hfi1_schedule_send(struct rvt_qp *qp)
 		iowait_set_flag(
 			&((struct hfi1_qp_priv *)qp->priv)->s_iowait,
 			IOWAIT_PENDING_IB);
-	return false;
-}
-
-/**
- * hfi1_schedule_tid_send - schedule progress on TID RDMA state machine
- * @qp: the QP
- *
- * This schedules qp progress on the TID RDMA state machine. Caller
- * should hold the s_lock.
- * Unlike hfi1_schedule_send(), this cannot use hfi1_send_ok() because
- * the two state machines can step on each other with respect to the
- * RVT_S_BUSY flag.
- * Therefore, a modified test is used.
- * @return true if the second leg is scheduled;
- *  false if the second leg is not scheduled.
- */
-bool hfi1_schedule_tid_send(struct rvt_qp *qp)
-{
-	lockdep_assert_held(&qp->s_lock);
-	if (hfi1_send_tid_ok(qp)) {
-		/*
-		 * The following call returns true if the qp is not on the
-		 * queue and false if the qp is already on the queue before
-		 * this call. Either way, the qp will be on the queue when the
-		 * call returns.
-		 */
-		_hfi1_schedule_tid_send(qp);
-		return true;
-	}
-	if (qp->s_flags & HFI1_S_ANY_WAIT_IO)
-		iowait_set_flag(
-			&((struct hfi1_qp_priv *)qp->priv)->s_iowait,
-			IOWAIT_PENDING_TID);
 	return false;
 }
 
@@ -720,42 +618,6 @@ static int qp_idle(struct rvt_qp *qp)
 		qp->s_tail == qp->s_head;
 }
 
-static void qp_tid_wqe_print(struct seq_file *s, const char *header,
-		      struct rvt_qp *qp, u32 i)
-{
-	struct rvt_swqe *wqe;
-	struct tid_rdma_request *req;
-
-	if (i != HFI1_QP_WQE_INVALID) {
-		wqe = rvt_get_swqe_ptr(qp, i);
-		req = wqe_to_tid_req(wqe);
-		seq_printf(s,
-			   "\t\t%s: op 0x%x psn 0x%x lpsn 0x%x s 0x%x %u %u %u %u / %u %u %u\n",
-			   header, wqe->wr.opcode, wqe->psn, wqe->lpsn,
-			   req->state, req->total_segs, req->cur_seg,
-			   req->comp_seg, req->ack_seg, req->setup_head,
-			   req->clear_tail, req->acked_tail);
-	}
-}
-
-static void qp_tid_ack_print(struct seq_file *s, const char *header,
-		      struct rvt_qp *qp, u32 i)
-{
-	struct rvt_ack_entry *e;
-	struct tid_rdma_request *req;
-
-	if (i != HFI1_QP_WQE_INVALID) {
-		e = &qp->s_ack_queue[i];
-		req = ack_to_tid_req(e);
-		seq_printf(s,
-			   "\t\t%s: op 0x%x psn 0x%x lpsn 0x%x s 0x%x %u %u %u %u / %u %u %u\n",
-			   header, e->opcode, e->psn, e->lpsn, req->state,
-			   req->total_segs, req->cur_seg, req->comp_seg,
-			   req->ack_seg, req->setup_head, req->clear_tail,
-			   req->acked_tail);
-	}
-}
-
 /**
  * qp_iter_print - print the qp information to seq_file
  * @s: the seq_file to emit the qp information on
@@ -776,7 +638,7 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 	if (qp->s_ack_queue)
 		e = &qp->s_ack_queue[qp->s_tail_ack_queue];
 	seq_printf(s,
-		   "N %d %s QP %x R %u %s %u %u W %x %u %x %x f=%x pf=%lx %u %u %u %u %u %u %u %u %u SPSN %x %x %x %x %x RPSN %x S(%u %u %u %u %u %u %u) R(%u %u %u %u) RQP %x LID %x SL %u MTU %u %u %u %u %u SDE %p,%u SC %p,%u SCQ %u %u PID %d OS %x %x E %x %x %x RCD %u %x %x\n",
+		   "N %d %s QP %x R %u %s %u %u W %x %u %x %x f=%x pf=%lx %u %u %u %u %u %u %u %u %u SPSN %x %x %x %x %x RPSN %x S(%u %u %u %u %u %u %u) R(%u %u %u) RQP %x LID %x SL %u MTU %u %u %u %u %u SDE %p,%u SC %p,%u SCQ %u %u PID %d OS %x %x E %x %x %x RCD %u\n",
 		   iter->n,
 		   qp_idle(qp) ? "I" : "B",
 		   qp->ibqp.qp_num,
@@ -814,13 +676,12 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 		   qp->s_tail, qp->s_head, qp->s_size,
 		   qp->s_avail,
 		   /* ack_queue ring pointers, size */
-		   qp->s_acked_ack_queue,qp->s_tail_ack_queue,
-		   qp->r_head_ack_queue,
-		   HFI1_MAX_RDMA_ATOMIC,
+		   qp->s_tail_ack_queue, qp->r_head_ack_queue,
+		   rvt_max_atomic(&to_idev(qp->ibqp.device)->rdi),
 		   /* remote QP info  */
 		   qp->remote_qpn,
-		   qp->remote_ah_attr.dlid,
-		   qp->remote_ah_attr.sl,
+		   rdma_ah_get_dlid(&qp->remote_ah_attr),
+		   rdma_ah_get_sl(&qp->remote_ah_attr),
 		   qp->pmtu,
 		   qp->s_retry,
 		   qp->s_retry_cnt,
@@ -839,35 +700,21 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 		   e ? e->opcode : 0,
 		   e ? e->psn : 0,
 		   e ? e->lpsn : 0,
-		   priv->rcd ? priv->rcd->ctxt : 0,
-		   qp->s_state,
-		   qp->s_ack_state);
+		   priv->rcd ? priv->rcd->ctxt : 0);
 
-	if (qp->ibqp.qp_type == IB_QPT_RC && HFI1_CAP_IS_KSET(TID_RDMA)) {
-		seq_printf(s,
-			   "\tTID RDMA f 0x%x 0x%x h %u c %u t %u h %u t %u a %u\n",
-			   priv->s_flags,
-			   priv->s_state,
-			   priv->s_tid_head,
-			   priv->s_tid_cur,
-			   priv->s_tid_tail,
-			   priv->r_tid_head,
-			   priv->r_tid_tail,
-			   priv->r_tid_ack);
-		qp_tid_wqe_print(s, "s_tid_head", qp, priv->s_tid_head);
-		qp_tid_wqe_print(s, "s_tid_cur", qp, priv->s_tid_cur);
-		qp_tid_wqe_print(s, "s_tid_tail", qp, priv->s_tid_tail);
-		qp_tid_ack_print(s, "r_tid_head", qp, priv->r_tid_head);
-		qp_tid_ack_print(s, "r_tid_tail", qp, priv->r_tid_tail);
-		qp_tid_ack_print(s, "r_tid_ack", qp, priv->r_tid_ack);
-	}
-
+	hfi1_qp_tid_print(s, qp);
 }
 
-void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp,
-		    gfp_t gfp)
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp)
+#else
+void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
+#endif
 {
 	struct hfi1_qp_priv *priv;
+#if !HAVE_IB_QP_CREATE_USE_GFP_NOIO
+	gfp_t gfp = GFP_KERNEL;
+#endif
 
 	priv = kzalloc_node(sizeof(*priv), gfp, rdi->dparms.node);
 	if (!priv)
@@ -896,107 +743,11 @@ void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 	return priv;
 }
 
-int qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
-		 struct ib_qp_init_attr *init_attr, gfp_t gfp)
-{
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	int i, ret;
-
-	qpriv->rcd = qp_to_rcd(rdi, qp);
-	spin_lock_init(&qpriv->opfn.lock);
-	INIT_WORK(&qpriv->opfn.opfn_work, opfn_send_conn_request);
-	INIT_WORK(&qpriv->tid_rdma.trigger_work, tid_rdma_trigger_resume);
-	qpriv->r_tid_tail = qp->s_tail_ack_queue;
-	qpriv->flow_state.psn = 0;
-	qpriv->flow_state.index = RXE_NUM_TID_FLOWS;
-	qpriv->flow_state.last_index = RXE_NUM_TID_FLOWS;
-	qpriv->flow_state.generation = 0;
-	qpriv->s_state = TID_OP(WRITE_RESP);
-	qpriv->s_tid_cur = HFI1_QP_WQE_INVALID;
-	qpriv->s_tid_tail = HFI1_QP_WQE_INVALID;
-	qpriv->r_tid_tail = HFI1_QP_WQE_INVALID;
-	qpriv->r_tid_ack = HFI1_QP_WQE_INVALID;
-	atomic_set(&qpriv->n_requests, 0);
-	atomic_set(&qpriv->n_tid_requests, 0);
-
-	if (init_attr->qp_type == IB_QPT_RC && HFI1_CAP_IS_KSET(TID_RDMA)) {
-		for (i = 0; i < qp->s_size; i++) {
-			struct hfi1_swqe_priv *priv;
-			struct rvt_swqe *wqe = rvt_get_swqe_ptr(qp, i);
-
-			priv = kzalloc(sizeof(*priv), gfp);
-			if (!priv)
-				return -ENOMEM;
-
-			ret = hfi1_kern_exp_rcv_alloc_flows(&priv->tid_req,
-							    gfp);
-			if (ret)
-				return ret;
-
-			/*
-			 * Initialize various TID RDMA request variables.
-			 * These variables are "static", which is why they
-			 * can be pre-initialized here before the WRs has
-			 * even been submitted.
-			 * However, non-NULL values for these variables do not
-			 * imply that this WQE has been enabled for TID RDMA.
-			 * Drivers should check the WQE's opcode to determine
-			 * if a request is a TID RDMA one or not.
-			 */
-			priv->tid_req.qp = qp;
-			priv->tid_req.rcd = qpriv->rcd;
-			priv->tid_req.e.swqe = wqe;
-			wqe->priv = priv;
-		}
-		for (i = 0; i < rvt_max_atomic(rdi); i++) {
-			struct hfi1_ack_priv *priv;
-
-			priv = kzalloc(sizeof(*priv), gfp);
-			if (!priv)
-				return -ENOMEM;
-
-			ret = hfi1_kern_exp_rcv_alloc_flows(&priv->tid_req,
-							    gfp);
-			if (ret)
-				return ret;
-
-			priv->tid_req.qp = qp;
-			priv->tid_req.rcd = qpriv->rcd;
-			priv->tid_req.e.ack = &qp->s_ack_queue[i];
-			qp->s_ack_queue[i].priv = priv;
-		}
-	}
-	return 0;
-}
-
 void qp_priv_free(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
-	struct rvt_swqe *wqe;
-	u32 i;
 
-	lockdep_assert_held(&qp->s_lock);
-	if (qp->ibqp.qp_type == IB_QPT_RC && HFI1_CAP_IS_KSET(TID_RDMA)) {
-		for (i = 0; i < qp->s_size; i++) {
-			struct hfi1_swqe_priv *priv;
-
-			wqe = rvt_get_swqe_ptr(qp, i);
-			priv = wqe->priv;
-			if (priv)
-				hfi1_kern_exp_rcv_free_flows(&priv->tid_req);
-			kfree(priv);
-			wqe->priv = NULL;
-		}
-		for (i = 0; i < rvt_max_atomic(rdi); i++) {
-			struct hfi1_ack_priv *priv = qp->s_ack_queue[i].priv;
-
-			if (priv)
-				hfi1_kern_exp_rcv_free_flows(&priv->tid_req);
-			kfree(priv);
-			qp->s_ack_queue[i].priv = NULL;
-		}
-	}
-	cancel_work_sync(&priv->opfn.opfn_work);
+	hfi1_qp_priv_tid_free(rdi, qp);
 	kfree(priv->s_ahg);
 	kfree(priv);
 }
@@ -1053,56 +804,9 @@ void quiesce_qp(struct rvt_qp *qp)
 	flush_tx_list(qp);
 }
 
-static void kern_exp_rcv_clear_all(struct rvt_qp *qp)
-{
-	int i, ret;
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct tid_flow_state *fs;
-
-	if (qp->ibqp.qp_type != IB_QPT_RC || !HFI1_CAP_IS_KSET(TID_RDMA))
-		return;
-
-	/*
-	 * First, clear the flow to help prevent any delayed packets from
-	 * being delivered.
-	 */
-	fs = &qpriv->flow_state;
-	if (fs->index != RXE_NUM_TID_FLOWS)
-		hfi1_kern_clear_hw_flow(qpriv->rcd, qp);
-
-	for (i = qp->s_acked; i != qp->s_head;) {
-		struct rvt_swqe *wqe = rvt_get_swqe_ptr(qp, i);
-
-		if (++i == qp->s_size)
-			i = 0;
-		/* Free only locally allocated TID entries */
-		if (wqe->wr.opcode != IB_WR_TID_RDMA_READ)
-			continue;
-		do {
-			struct hfi1_swqe_priv *priv = wqe->priv;
-
-			ret = hfi1_kern_exp_rcv_clear(&priv->tid_req);
-		} while (!ret);
-	}
-	for (i = qp->s_acked_ack_queue; i != qp->r_head_ack_queue;) {
-		struct rvt_ack_entry *e = &qp->s_ack_queue[i];
-
-		if (++i == rvt_max_atomic(ib_to_rvt(qp->ibqp.device)))
-			i = 0;
-		/* Free only locally allocated TID entries */
-		if (e->opcode != TID_OP(WRITE_REQ))
-			continue;
-		do {
-			struct hfi1_ack_priv *priv = e->priv;
-
-			ret = hfi1_kern_exp_rcv_clear(&priv->tid_req);
-		} while (!ret);
-	}
-}
-
 void notify_qp_reset(struct rvt_qp *qp)
 {
-	kern_exp_rcv_clear_all(qp);
+	hfi1_qp_kern_exp_rcv_clear_all(qp);
 	qp->r_adefered = 0;
 	clear_ahg(qp);
 
@@ -1122,11 +826,12 @@ void hfi1_migrate_qp(struct rvt_qp *qp)
 
 	qp->s_mig_state = IB_MIG_MIGRATED;
 	qp->remote_ah_attr = qp->alt_ah_attr;
-	qp->port_num = qp->alt_ah_attr.port_num;
+	qp->port_num = rdma_ah_get_port_num(&qp->alt_ah_attr);
 	qp->s_pkey_index = qp->s_alt_pkey_index;
 	qp->s_flags |= HFI1_S_AHG_CLEAR;
 	priv->s_sc = ah_to_sc(qp->ibqp.device, &qp->remote_ah_attr);
 	priv->s_sde = qp_to_sdma_engine(qp, priv->s_sc);
+	qp_set_16b(qp);
 
 	ev.device = qp->ibqp.device;
 	ev.element.qp = &qp->ibqp;
@@ -1152,7 +857,7 @@ u32 mtu_from_qp(struct rvt_dev_info *rdi, struct rvt_qp *qp, u32 pmtu)
 	u8 sc, vl;
 
 	ibp = &dd->pport[qp->port_num - 1].ibport_data;
-	sc = ibp->sl_to_sc[qp->remote_ah_attr.sl];
+	sc = ibp->sl_to_sc[rdma_ah_get_sl(&qp->remote_ah_attr)];
 	vl = sc_to_vlt(dd, sc);
 
 	mtu = verbs_mtu_enum_to_int(qp->ibqp.device, pmtu);
@@ -1228,7 +933,7 @@ static void hfi1_qp_iter_cb(struct rvt_qp *qp, u64 v)
 	if (qp->port_num != ppd->port ||
 	    (qp->ibqp.qp_type != IB_QPT_UC &&
 	     qp->ibqp.qp_type != IB_QPT_RC) ||
-	    qp->remote_ah_attr.sl != sl ||
+	    rdma_ah_get_sl(&qp->remote_ah_attr) != sl ||
 	    !(ib_rvt_state_ops[qp->state] & RVT_POST_SEND_OK))
 		return;
 
@@ -1262,137 +967,4 @@ void hfi1_error_port_qps(struct hfi1_ibport *ibp, u8 sl)
 	struct hfi1_ibdev *dev = &ppd->dd->verbs_dev;
 
 	rvt_qp_iter(&dev->rdi, sl, hfi1_qp_iter_cb);
-}
-
-/**
- * qp_to_rcd - determine the receive context used by a qp
- * @qp - the qp
- *
- * This routine returns the receive context associated
- * with a a qp's qpn.
- *
- * Returns the context on success, NULL otherwise.
- */
-static struct hfi1_ctxtdata *qp_to_rcd(
-	struct rvt_dev_info *rdi,
-	struct rvt_qp *qp)
-{
-	struct hfi1_ibdev *verbs_dev = container_of(rdi,
-						    struct hfi1_ibdev,
-						    rdi);
-	struct hfi1_devdata *dd = container_of(verbs_dev,
-					       struct hfi1_devdata,
-					       verbs_dev);
-	unsigned ctxt;
-
-	if (qp->ibqp.qp_num == 0) {
-		ctxt = 0;
-	} else {
-		ctxt = ((qp->ibqp.qp_num >> dd->qos_shift) %
-			(dd->n_krcv_queues - 1)) + 1;
-
-		if (ctxt > dd->num_rcv_contexts)
-			return NULL;
-	}
-
-	return dd->rcd[ctxt];
-}
-
-/* Does @sge meet the alignment requirements for tid rdma? */
-static inline bool hfi1_check_sge_align(struct rvt_sge *sge, int num_sge)
-{
-	int i;
-
-	for (i = 0; i < num_sge; i++, sge++)
-		if ((u64)sge->vaddr & ~PAGE_MASK ||
-		    sge->sge_length & ~PAGE_MASK)
-			return false;
-	return true;
-}
-
-static void setup_tid_rdma_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe)
-{
-	if (wqe->wr.opcode == IB_WR_RDMA_READ ||
-	    wqe->wr.opcode == IB_WR_RDMA_WRITE) {
-		struct hfi1_qp_priv *qpriv =
-			(struct hfi1_qp_priv *)qp->priv;
-		struct hfi1_swqe_priv *priv = wqe->priv;
-		struct tid_rdma_params *remote;
-		bool do_tid_rdma = false;
-
-		rcu_read_lock();
-		remote = rcu_dereference(qpriv->tid_rdma.remote);
-		/*
-		 * If TID RDMA is disabled by the negotiation, don't
-		 * use it.
-		 */
-		if (!remote)
-			goto exit;
-
-		if (wqe->wr.opcode == IB_WR_RDMA_READ &&
-		    (hfi1_tid_rdma_proto_enable &
-		     HFI1_TID_RDMA_PROTO_EN_READ)) {
-			if (wqe->length >= hfi1_tid_rdma_seg_min_size &&
-			    hfi1_check_sge_align(&wqe->sg_list[0],
-						 wqe->wr.num_sge) &&
-			    (qpriv->tid_rdma.n_read < remote->max_read)) {
-				wqe->wr.opcode = IB_WR_TID_RDMA_READ;
-				do_tid_rdma = true;
-				priv->tid_req.n_flows = remote->max_read;
-				qpriv->tid_r_reqs++;
-			}
-		} else if (wqe->wr.opcode == IB_WR_RDMA_WRITE &&
-			   (hfi1_tid_rdma_proto_enable &
-			    HFI1_TID_RDMA_PROTO_EN_WRITE)) {
-			/*
-			 * TID RDMA is enabled for this RDMA WRITE
-			 * request iff:
-			 *   1. The remote address is page-aligned,
-			 *   2. The length is larger than the minimum
-			 *      segment size,
-			 *   3. The length is page-multiple, and
-			 *   4. There are available TID RDMA WRITEs
-			 *      on the remote end.
-			 */
-			if (!(wqe->rdma_wr.remote_addr & ~PAGE_MASK) &&
-			    (wqe->length >= hfi1_tid_rdma_seg_min_size) &&
-			    !(wqe->length & ~PAGE_MASK) &&
-			    (qpriv->tid_rdma.n_write < remote->max_write)) {
-				wqe->wr.opcode = IB_WR_TID_RDMA_WRITE;
-				do_tid_rdma = true;
-			}
-		}
-
-		if (do_tid_rdma) {
-			priv->tid_req.seg_len =
-				min_t(u32, remote->max_len, wqe->length);
-			priv->tid_req.total_segs =
-				DIV_ROUND_UP(wqe->length,
-					     priv->tid_req.seg_len);
-			/* Compute the last PSN of the request */
-			wqe->lpsn = wqe->psn;
-			if (wqe->wr.opcode == IB_WR_TID_RDMA_READ) {
-				wqe->lpsn +=
-					rvt_div_round_up_mtu(qp, wqe->length)
-					- 1;
-			} else {
-				wqe->lpsn += priv->tid_req.total_segs - 1;
-				atomic_inc(&qpriv->n_requests);
-			}
-#if 0
-#ifdef TIDRDMA_DEBUG
-			hfi1_cdbg(TIDRDMA, "Setting up TID RDMA Request: psn 0x%x lpsn 0x%x seg_len %u total_segs %u",
-				  wqe->psn, wqe->lpsn, priv->tid_req.seg_len,
-				  priv->tid_req.total_segs);
-#endif
-#endif
-
-			priv->tid_req.cur_seg = 0;
-			priv->tid_req.comp_seg = 0;
-			priv->tid_req.ack_seg = 0;
-			priv->tid_req.state = TID_REQUEST_INACTIVE;
-		}
-exit:
-		rcu_read_unlock();
-	}
 }

@@ -91,8 +91,9 @@
  * RVT_S_WAIT_ACK - waiting for an ACK packet before sending more requests
  * RVT_S_SEND_ONE - send one packet, request ACK, then wait for ACK
  * RVT_S_ECN - a BECN was queued to the send engine
+ * RVT_S_WAIT_TID_RESP - waiting for a TID RDMA WRITE response
  * RVT_S_WAIT_TID_SPACE - a QP is waiting for TID resource
- * RVT_S_WAIT_TID_INTERLCK - a QP is waiting on TID RDMA interlock completion
+ * RVT_S_WAIT_HALT - halt the first leg send engine
  */
 #define RVT_S_SIGNAL_REQ_WR	0x0001
 #define RVT_S_BUSY		0x0002
@@ -115,6 +116,7 @@
 #define RVT_S_ECN		0x40000
 #define RVT_S_WAIT_TID_RESP     0x80000
 #define RVT_S_WAIT_TID_SPACE	0x100000
+#define RVT_S_WAIT_HALT         0x200000
 
 /*
  * Drivers should use s_flags starting with bit 31
@@ -247,6 +249,7 @@ struct rvt_ack_entry {
 #define RVT_OPERATION_ATOMIC_SGE  0x00000004
 #define RVT_OPERATION_LOCAL       0x00000008
 #define RVT_OPERATION_USE_RESERVE 0x00000010
+#define RVT_OPERATION_IGN_RNR_CNT 0x00000020
 
 #define RVT_OPERATION_MAX (IB_WR_RESERVED10 + 1)
 
@@ -276,8 +279,8 @@ struct rvt_qp {
 	struct ib_qp ibqp;
 	void *priv; /* Driver private data */
 	/* read mostly fields above and below */
-	struct ib_ah_attr remote_ah_attr;
-	struct ib_ah_attr alt_ah_attr;
+	struct rdma_ah_attr remote_ah_attr;
+	struct rdma_ah_attr alt_ah_attr;
 	struct rvt_qp __rcu *next;           /* link list for QPN hash table */
 	struct rvt_swqe *s_wq;  /* send work queue */
 	struct rvt_mmap_info *ip;
@@ -289,7 +292,6 @@ struct rvt_qp {
 	u32 remote_qpn;
 	u32 qkey;               /* QKEY for this QP (for UD or RD) */
 	u32 s_size;             /* send work queue size */
-	u32 s_ahgpsn;           /* set to the psn in the copy of the header */
 
 	u16 pmtu;		/* decoded from path_mtu */
 	u8 log_pmtu;		/* shift for pmtu */
@@ -351,7 +353,6 @@ struct rvt_qp {
 	struct rvt_swqe *s_wqe;
 	struct rvt_sge_state s_sge;     /* current send request data */
 	struct rvt_mregion *s_rdma_mr;
-	u32 s_cur_size;         /* size of send packet in bytes */
 	u32 s_len;              /* total length of s_sge */
 	u32 s_rdma_read_len;    /* total length of s_rdma_read_sge */
 	u32 s_last_psn;         /* last response PSN processed */
@@ -365,8 +366,10 @@ struct rvt_qp {
 	u32 s_acked;            /* last un-ACK'ed entry */
 	u32 s_last;             /* last completed entry */
 	u32 s_lsn;              /* limit sequence number (credit) */
-	u16 s_hdrwords;         /* size of s_hdr in 32 bit words */
+	u32 s_ahgpsn;           /* set to the psn in the copy of the header */
+	u16 s_cur_size;         /* size of send packet in bytes */
 	u16 s_rdma_ack_cnt;
+	u8 s_hdrwords;         /* size of s_hdr in 32 bit words */
 	s8 s_ahgidx;
 	u8 s_state;             /* opcode of last packet sent */
 	u8 s_ack_state;         /* opcode of packet to ACK */

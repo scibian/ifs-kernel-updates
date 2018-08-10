@@ -85,6 +85,7 @@ DEFINE_EVENT(rvt_qphash_template, rvt_qpremove,
 	TP_PROTO(struct rvt_qp *qp, u32 bucket),
 	TP_ARGS(qp, bucket));
 
+
 #endif /* __RVT_TRACE_QP_H */
 
 #undef TRACE_INCLUDE_PATH

@@ -91,11 +91,12 @@ struct sdma_desc {
 #define SDMA_TXREQ_F_URGENT       0x0001
 #define SDMA_TXREQ_F_AHG_COPY     0x0002
 #define SDMA_TXREQ_F_USE_AHG      0x0004
+#define SDMA_TXREQ_F_SGE_CORRUPT  0x0008
 
 struct sdma_txreq;
 typedef void (*callback_t)(struct sdma_txreq *, int);
 
-struct iowait_wait;
+struct iowait;
 struct sdma_txreq {
 	struct list_head list;
 	/* private: */

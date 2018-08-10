@@ -49,6 +49,7 @@
 
 #include <linux/list.h>
 #include <linux/workqueue.h>
+#include <linux/wait.h>
 #include <linux/sched.h>
 
 #include "sdma_txreq.h"

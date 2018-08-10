@@ -56,12 +56,6 @@ module_param_named(lkey_table_size, qib_lkey_table_size, uint,
 MODULE_PARM_DESC(lkey_table_size,
 		 "LKEY table size in bits (2^n, 1 <= n <= 23)");
 
-static unsigned int qib_no_user_mr_percpu;
-module_param_named(no_user_mr_percpu, qib_no_user_mr_percpu, uint,
-		   S_IRUGO);
-MODULE_PARM_DESC(no_user_mr_percpu,
-		 "Avoid percpu refcount for user MRs (default 0)");
-
 static unsigned int ib_qib_max_pds = 0xFFFF;
 module_param_named(max_pds, ib_qib_max_pds, uint, S_IRUGO);
 MODULE_PARM_DESC(max_pds,
@@ -1239,6 +1233,7 @@ static int qib_query_port(struct rvt_dev_info *rdi, u8 port_num,
 	enum ib_mtu mtu;
 	u16 lid = ppd->lid;
 
+	/* props being zeroed by the caller, avoid zeroing it here */
 	props->lid = lid ? lid : be16_to_cpu(IB_LID_PERMISSIVE);
 	props->lmc = ppd->lmc;
 	props->state = dd->f_iblink_state(ppd->lastibcstat);
@@ -1289,7 +1284,8 @@ static int qib_modify_device(struct ib_device *device,
 	}
 
 	if (device_modify_mask & IB_DEVICE_MODIFY_NODE_DESC) {
-		memcpy(device->node_desc, device_modify->node_desc, 64);
+		memcpy(device->node_desc, device_modify->node_desc,
+		       IB_DEVICE_NODE_DESC_MAX);
 		for (i = 0; i < dd->num_pports; i++) {
 			struct qib_ibport *ibp = &dd->pport[i].ibport_data;
 
@@ -1340,16 +1336,25 @@ static int qib_get_guid_be(struct rvt_dev_info *rdi, struct rvt_ibport *rvp,
 	return 0;
 }
 
-int qib_check_ah(struct ib_device *ibdev, struct ib_ah_attr *ah_attr)
+int qib_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr)
 {
-	if (ah_attr->sl > 15)
+	if (rdma_ah_get_sl(ah_attr) > 15)
+		return -EINVAL;
+
+	if (rdma_ah_get_dlid(ah_attr) == 0)
+		return -EINVAL;
+	if (rdma_ah_get_dlid(ah_attr) >=
+		be16_to_cpu(IB_MULTICAST_LID_BASE) &&
+	    rdma_ah_get_dlid(ah_attr) !=
+		be16_to_cpu(IB_LID_PERMISSIVE) &&
+	    !(rdma_ah_get_ah_flags(ah_attr) & IB_AH_GRH))
 		return -EINVAL;
 
 	return 0;
 }
 
 static void qib_notify_new_ah(struct ib_device *ibdev,
-			      struct ib_ah_attr *ah_attr,
+			      struct rdma_ah_attr *ah_attr,
 			      struct rvt_ah *ah)
 {
 	struct qib_ibport *ibp;
@@ -1360,25 +1365,33 @@ static void qib_notify_new_ah(struct ib_device *ibdev,
 	 * done being setup. We can however modify things which we need to set.
 	 */
 
-	ibp = to_iport(ibdev, ah_attr->port_num);
+	ibp = to_iport(ibdev, rdma_ah_get_port_num(ah_attr));
 	ppd = ppd_from_ibp(ibp);
-	ah->vl = ibp->sl_to_vl[ah->attr.sl];
+	ah->vl = ibp->sl_to_vl[rdma_ah_get_sl(&ah->attr)];
 	ah->log_pmtu = ilog2(ppd->ibmtu);
 }
 
 struct ib_ah *qib_create_qp0_ah(struct qib_ibport *ibp, u16 dlid)
 {
-	struct ib_ah_attr attr;
+	struct rdma_ah_attr attr;
 	struct ib_ah *ah = ERR_PTR(-EINVAL);
 	struct rvt_qp *qp0;
+	struct qib_pportdata *ppd = ppd_from_ibp(ibp);
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+	struct qib_devdata *dd = dd_from_ppd(ppd);
+#endif
+	u8 port_num = ppd->port;
 
 	memset(&attr, 0, sizeof(attr));
-	attr.dlid = dlid;
-	attr.port_num = ppd_from_ibp(ibp)->port;
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+	attr.type = rdma_ah_find_type(&dd->verbs_dev.rdi.ibdev, port_num);
+#endif
+	rdma_ah_set_dlid(&attr, dlid);
+	rdma_ah_set_port_num(&attr, port_num);
 	rcu_read_lock();
 	qp0 = rcu_dereference(ibp->rvp.qp[0]);
 	if (qp0)
-		ah = ib_create_ah(qp0->ibqp.pd, &attr);
+		ah = rdma_create_ah(qp0->ibqp.pd, &attr);
 	rcu_read_unlock();
 	return ah;
 }
@@ -1567,7 +1580,11 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	ibdev->owner = THIS_MODULE;
 	ibdev->node_guid = ppd->guid;
 	ibdev->phys_port_cnt = dd->num_pports;
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+	ibdev->dev.parent = &dd->pcidev->dev;
+#else
 	ibdev->dma_device = &dd->pcidev->dev;
+#endif
 	ibdev->modify_device = qib_modify_device;
 	ibdev->process_mad = qib_process_mad;
 
@@ -1610,7 +1627,6 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	dd->verbs_dev.rdi.dparms.max_rdma_atomic = QIB_MAX_RDMA_ATOMIC;
 	dd->verbs_dev.rdi.driver_f.get_guid_be = qib_get_guid_be;
 	dd->verbs_dev.rdi.dparms.lkey_table_size = qib_lkey_table_size;
-	dd->verbs_dev.rdi.dparms.no_user_mr_percpu = qib_no_user_mr_percpu;
 	dd->verbs_dev.rdi.dparms.qp_table_size = ib_qib_qp_table_size;
 	dd->verbs_dev.rdi.dparms.qpn_start = 1;
 	dd->verbs_dev.rdi.dparms.qpn_res_start = QIB_KD_QP;

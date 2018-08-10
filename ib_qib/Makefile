@@ -7,7 +7,9 @@
 ifneq ($(KERNELRELEASE),)
 #kbuild part of makefile
 
-NOSTDINC_FLAGS := -I${M}/include
+EXTRA_CFLAGS +=-D QIB_DRIVER
+
+NOSTDINC_FLAGS := -I${M}/include -I${M}/compat
 
 obj-$(CONFIG_INFINIBAND_QIB) += ib_qib.o
 

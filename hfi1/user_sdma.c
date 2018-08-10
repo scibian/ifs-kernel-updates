@@ -68,181 +68,18 @@
 #include "verbs.h"  /* for the headers */
 #include "common.h" /* for struct hfi1_tid_info */
 #include "trace.h"
-#include "mmu_rb.h"
+#ifdef NVIDIA_GPU_DIRECT
+#include "user_sdma_gpu.h"
+#endif
 
 static uint hfi1_sdma_comp_ring_size = 128;
 module_param_named(sdma_comp_size, hfi1_sdma_comp_ring_size, uint, S_IRUGO);
 MODULE_PARM_DESC(sdma_comp_size, "Size of User SDMA completion ring. Default: 128");
 
-/* The maximum number of Data io vectors per message/request */
-#define MAX_VECTORS_PER_REQ 8
-/*
- * Maximum number of packet to send from each message/request
- * before moving to the next one.
- */
-#define MAX_PKTS_PER_QUEUE 16
-
-#define num_pages(x) (1 + ((((x) - 1) & PAGE_MASK) >> PAGE_SHIFT))
-
-#define req_opcode(x) \
-	(((x) >> HFI1_SDMA_REQ_OPCODE_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
-#define req_version(x) \
-	(((x) >> HFI1_SDMA_REQ_VERSION_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
-#define req_iovcnt(x) \
-	(((x) >> HFI1_SDMA_REQ_IOVCNT_SHIFT) & HFI1_SDMA_REQ_IOVCNT_MASK)
-
-/* Number of BTH.PSN bits used for sequence number in expected rcvs */
-#define BTH_SEQ_MASK 0x7ffull
-
-#define PBC2LRH(x) ((((x) & 0xfff) << 2) - 4)
-#define LRH2PBC(x) ((((x) >> 2) + 1) & 0xfff)
-
-#define AHG_HEADER_SET(arr, idx, dw, bit, width, value)			\
-	do {								\
-		if ((idx) < ARRAY_SIZE((arr)))				\
-			(arr)[(idx++)] = sdma_build_ahg_descriptor(	\
-				(__force u16)(value), (dw), (bit),	\
-							(width));	\
-		else							\
-			return -ERANGE;					\
-	} while (0)
-
-/* Tx request flag bits */
-#define TXREQ_FLAGS_REQ_ACK   BIT(0)      /* Set the ACK bit in the header */
-#define TXREQ_FLAGS_REQ_DISABLE_SH BIT(1) /* Disable header suppression */
-
-#define SDMA_PKT_Q_INACTIVE BIT(0)
-#define SDMA_PKT_Q_ACTIVE   BIT(1)
-#define SDMA_PKT_Q_DEFERRED BIT(2)
-
-/*
- * Maximum retry attempts to submit a TX request
- * before putting the process to sleep.
- */
-#define MAX_DEFER_RETRY_COUNT 1
-
 static unsigned initial_pkt_count = 8;
-
-#define SDMA_IOWAIT_TIMEOUT 1000 /* in milliseconds */
-
-struct sdma_mmu_node;
-
-struct user_sdma_iovec {
-	struct list_head list;
-	struct iovec iov;
-	/* number of pages in this vector */
-	unsigned npages;
-	/* array of pinned pages for this vector */
-	struct page **pages;
-	/*
-	 * offset into the virtual address space of the vector at
-	 * which we last left off.
-	 */
-	u64 offset;
-	struct sdma_mmu_node *node;
-};
-
-struct sdma_mmu_node {
-	struct mmu_rb_node rb;
-	struct hfi1_user_sdma_pkt_q *pq;
-	atomic_t refcount;
-	struct page **pages;
-	unsigned npages;
-};
-
-/* evict operation argument */
-struct evict_data {
-	u32 cleared;	/* count evicted so far */
-	u32 target;	/* target count to evict */
-};
-
-struct user_sdma_request {
-	/* This is the original header from user space */
-	struct hfi1_pkt_header hdr;
-
-	/* Read mostly fields */
-	struct hfi1_user_sdma_pkt_q *pq ____cacheline_aligned_in_smp;
-	struct hfi1_user_sdma_comp_q *cq;
-	/*
-	 * Pointer to the SDMA engine for this request.
-	 * Since different request could be on different VLs,
-	 * each request will need it's own engine pointer.
-	 */
-	struct sdma_engine *sde;
-	struct sdma_req_info info;
-	/* TID array values copied from the tid_iov vector */
-	u32 *tids;
-	/* total length of the data in the request */
-	u32 data_len;
-	/* number of elements copied to the tids array */
-	u16 n_tids;
-	/*
-	 * We copy the iovs for this request (based on
-	 * info.iovcnt). These are only the data vectors
-	 */
-	u8 data_iovs;
-	s8 ahg_idx;
-
-	/* Writeable fields shared with interrupt */
-	u64 seqcomp ____cacheline_aligned_in_smp;
-	u64 seqsubmitted;
-	/* status of the last txreq completed */
-	int status;
-
-	/* Send side fields */
-	struct list_head txps ____cacheline_aligned_in_smp;
-	u64 seqnum;
-	/*
-	 * KDETH.OFFSET (TID) field
-	 * The offset can cover multiple packets, depending on the
-	 * size of the TID entry.
-	 */
-	u32 tidoffset;
-	/*
-	 * KDETH.Offset (Eager) field
-	 * We need to remember the initial value so the headers
-	 * can be updated properly.
-	 */
-	u32 koffset;
-	u32 sent;
-	/* TID index copied from the tid_iov vector */
-	u16 tididx;
-	/* progress index moving along the iovs array */
-	u8 iov_idx;
-	u8 done;
-	u8 has_error;
-
-	struct user_sdma_iovec iovs[MAX_VECTORS_PER_REQ];
-} ____cacheline_aligned_in_smp;
-
-/*
- * A single txreq could span up to 3 physical pages when the MTU
- * is sufficiently large (> 4K). Each of the IOV pointers also
- * needs it's own set of flags so the vector has been handled
- * independently of each other.
- */
-struct user_sdma_txreq {
-	/* Packet header for the txreq */
-	struct hfi1_pkt_header hdr;
-	struct sdma_txreq txreq;
-	struct list_head list;
-	struct user_sdma_request *req;
-	u16 flags;
-	unsigned busycount;
-	u64 seqnum;
-};
-
-#define SDMA_DBG(req, fmt, ...)				     \
-	hfi1_cdbg(SDMA, "[%u:%u:%u:%u] " fmt, (req)->pq->dd->unit, \
-		 (req)->pq->ctxt, (req)->pq->subctxt, (req)->info.comp_idx, \
-		 ##__VA_ARGS__)
-#define SDMA_Q_DBG(pq, fmt, ...)			 \
-	hfi1_cdbg(SDMA, "[%u:%u:%u] " fmt, (pq)->dd->unit, (pq)->ctxt, \
-		 (pq)->subctxt, ##__VA_ARGS__)
 
 static int user_sdma_send_pkts(struct user_sdma_request *req,
 			       unsigned maxpkts);
-static int num_user_pages(const struct iovec *iov);
 static void user_sdma_txreq_cb(struct sdma_txreq *txreq, int status);
 static inline void pq_update(struct hfi1_user_sdma_pkt_q *pq);
 static void user_sdma_free_request(struct user_sdma_request *req, bool unpin);
@@ -266,7 +103,7 @@ static inline u32 get_lrh_len(struct hfi1_pkt_header, u32 len);
 
 static int defer_packet_queue(
 	struct sdma_engine *sde,
-	struct iowait_work *wait,
+	struct iowait_work *,
 	struct sdma_txreq *txreq,
 	uint seq,
 	bool pkts_sent);
@@ -327,18 +164,10 @@ static void activate_packet_queue(struct iowait *wait, int reason)
 	wake_up(&wait->wait_dma);
 };
 
-static void sdma_kmem_cache_ctor(void *obj)
-{
-	struct user_sdma_txreq *tx = obj;
-
-	memset(tx, 0, sizeof(*tx));
-}
-
 int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 				struct hfi1_filedata *fd)
 {
 	int ret = -ENOMEM;
-	unsigned memsize;
 	char buf[64];
 	struct hfi1_devdata *dd;
 	struct hfi1_user_sdma_comp_q *cq;
@@ -364,6 +193,9 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 	atomic_set(&pq->n_reqs, 0);
 	init_waitqueue_head(&pq->wait);
 	atomic_set(&pq->n_locked, 0);
+#ifdef NVIDIA_GPU_DIRECT
+	atomic_set(&pq->n_gpu_locked, 0);
+#endif
 	pq->mm = fd->mm;
 
 	iowait_init(&pq->busy, 0, NULL, NULL, defer_packet_queue,
@@ -388,7 +220,7 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 					    sizeof(struct user_sdma_txreq),
 					    L1_CACHE_BYTES,
 					    SLAB_HWCACHE_ALIGN,
-					    sdma_kmem_cache_ctor);
+					    NULL);
 	if (!pq->txreq_cache) {
 		dd_dev_err(dd, "[%u] Failed to allocate TxReq cache\n",
 			   uctxt->ctxt);
@@ -399,17 +231,29 @@ int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,
 	if (!cq)
 		goto cq_nomem;
 
-	memsize = PAGE_ALIGN(sizeof(*cq->comps) * hfi1_sdma_comp_ring_size);
-	cq->comps = vmalloc_user(memsize);
+	cq->comps = vmalloc_user(PAGE_ALIGN(sizeof(*cq->comps)
+				 * hfi1_sdma_comp_ring_size));
 	if (!cq->comps)
 		goto cq_comps_nomem;
 
 	cq->nentries = hfi1_sdma_comp_ring_size;
+#ifdef NVIDIA_GPU_DIRECT
+	ret = hfi1_mmu_rb_register(pq, NULL, &sdma_rb_ops, dd->pport->hfi1_wq,
+				   &pq->handler_gpu);
+	if (ret) {
+		dd_dev_err(dd, "Failed to allocate SDMA GPU buffer cache %d",
+			   ret);
+		goto pq_mmu_fail;
+	}
+#endif
 
 	ret = hfi1_mmu_rb_register(pq, pq->mm, &sdma_rb_ops, dd->pport->hfi1_wq,
 				   &pq->handler);
 	if (ret) {
 		dd_dev_err(dd, "Failed to register with MMU %d", ret);
+#ifdef NVIDIA_GPU_DIRECT
+		hfi1_mmu_rb_unregister(pq->handler_gpu);
+#endif
 		goto pq_mmu_fail;
 	}
 
@@ -439,12 +283,16 @@ int hfi1_user_sdma_free_queues(struct hfi1_filedata *fd,
 {
 	struct hfi1_user_sdma_pkt_q *pq;
 
-	hfi1_cdbg(SDMA, "[%u:%u:%u] Freeing user SDMA queues", uctxt->dd->unit,
-		  uctxt->ctxt, fd->subctxt);
+	trace_hfi1_sdma_user_free_queues(uctxt->dd, uctxt->ctxt, fd->subctxt);
+
 	pq = fd->pq;
 	if (pq) {
 		if (pq->handler)
 			hfi1_mmu_rb_unregister(pq->handler);
+#ifdef NVIDIA_GPU_DIRECT
+		if (pq->handler_gpu)
+			hfi1_mmu_rb_unregister(pq->handler_gpu);
+#endif
 		iowait_sdma_drain(&pq->busy);
 		/* Wait until all requests have been freed. */
 		wait_event_interruptible(
@@ -499,19 +347,39 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	struct sdma_req_info info;
 	struct user_sdma_request *req;
 	u8 opcode, sc, vl;
+	u16 pkey;
+	u32 slid;
 	int req_queued = 0;
 	u16 dlid;
 	u32 selector;
+	unsigned long size_info = sizeof(info);
 
-	if (iovec[idx].iov_len < sizeof(info) + sizeof(req->hdr)) {
+#ifdef NVIDIA_GPU_DIRECT
+	ret = copy_from_user(&info.ctrl, iovec[idx].iov_base,
+			     sizeof(info.ctrl));
+	if (ret) {
+		hfi1_cdbg(SDMA, "[%u:%u:%u] Failed to copy info ctrl (%d)",
+			  dd->unit, uctxt->ctxt, fd->subctxt, ret);
+		return -EFAULT;
+	}
+	/*
+	 * Version 2 indicates presence of flags field.
+	 */
+	if (req_version(info.ctrl) == 2)
+		size_info = sizeof(struct sdma_req_info);
+	else
+		size_info = offsetof(struct sdma_req_info, flags);
+#endif
+
+	if (iovec[idx].iov_len < size_info + sizeof(req->hdr)) {
 		hfi1_cdbg(
 		   SDMA,
 		   "[%u:%u:%u] First vector not big enough for header %lu/%lu",
 		   dd->unit, uctxt->ctxt, fd->subctxt,
-		   iovec[idx].iov_len, sizeof(info) + sizeof(req->hdr));
+		   iovec[idx].iov_len, size_info + sizeof(req->hdr));
 		return -EINVAL;
 	}
-	ret = copy_from_user(&info, iovec[idx].iov_base, sizeof(info));
+	ret = copy_from_user(&info, iovec[idx].iov_base, size_info);
 	if (ret) {
 		hfi1_cdbg(SDMA, "[%u:%u:%u] Failed to copy info QW (%d)",
 			  dd->unit, uctxt->ctxt, fd->subctxt, ret);
@@ -520,7 +388,6 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 
 	trace_hfi1_sdma_user_reqinfo(dd, uctxt->ctxt, fd->subctxt,
 				     (u16 *)&info);
-
 	if (info.comp_idx >= hfi1_sdma_comp_ring_size) {
 		hfi1_cdbg(SDMA,
 			  "[%u:%u:%u:%u] Invalid comp index",
@@ -557,8 +424,8 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	/*
 	 * All safety checks have been done and this request has been claimed.
 	 */
-	hfi1_cdbg(SDMA, "[%u:%u:%u] Using req/comp entry %u\n", dd->unit,
-		  uctxt->ctxt, fd->subctxt, info.comp_idx);
+	trace_hfi1_sdma_user_process_request(dd, uctxt->ctxt, fd->subctxt,
+					     info.comp_idx);
 	req = pq->reqs + info.comp_idx;
 	req->data_iovs = req_iovcnt(info.ctrl) - 1; /* subtract header vector */
 	req->data_len  = 0;
@@ -576,7 +443,11 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	req->has_error = 0;
 	INIT_LIST_HEAD(&req->txps);
 
-	memcpy(&req->info, &info, sizeof(info));
+#ifdef NVIDIA_GPU_DIRECT
+	req->info.flags = 0;
+#endif
+
+	memcpy(&req->info, &info, size_info);
 
 	if (req_opcode(info.ctrl) == EXPECTED) {
 		/* expected must have a TID info and at least one data vector */
@@ -596,7 +467,7 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 		goto free_req;
 	}
 	/* Copy the header from the user buffer */
-	ret = copy_from_user(&req->hdr, iovec[idx].iov_base + sizeof(info),
+	ret = copy_from_user(&req->hdr, iovec[idx].iov_base + size_info,
 			     sizeof(req->hdr));
 	if (ret) {
 		SDMA_DBG(req, "Failed to copy header template (%d)", ret);
@@ -632,8 +503,9 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	}
 
 	/* Checking P_KEY for requests from user-space */
-	if (egress_pkey_check(dd->pport, req->hdr.lrh, req->hdr.bth, sc,
-			      PKEY_CHECK_INVALID)) {
+	pkey = (u16)be32_to_cpu(req->hdr.bth[0]);
+	slid = be16_to_cpu(req->hdr.lrh[3]);
+	if (egress_pkey_check(dd->pport, slid, pkey, sc, PKEY_CHECK_INVALID)) {
 		ret = -EINVAL;
 		goto free_req;
 	}
@@ -657,14 +529,17 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 	req->tidoffset = KDETH_GET(req->hdr.kdeth.ver_tid_offset, OFFSET) *
 		(KDETH_GET(req->hdr.kdeth.ver_tid_offset, OM) ?
 		 KDETH_OM_LARGE : KDETH_OM_SMALL);
-	SDMA_DBG(req, "Initial TID offset %u", req->tidoffset);
+	trace_hfi1_sdma_user_initial_tidoffset(dd, uctxt->ctxt, fd->subctxt,
+					       info.comp_idx, req->tidoffset);
 	idx++;
 
 	/* Save all the IO vector structures */
 	for (i = 0; i < req->data_iovs; i++) {
 		req->iovs[i].offset = 0;
 		INIT_LIST_HEAD(&req->iovs[i].list);
-		memcpy(&req->iovs[i].iov, iovec + idx++, sizeof(struct iovec));
+		memcpy(&req->iovs[i].iov,
+		       iovec + idx++,
+		       sizeof(req->iovs[i].iov));
 		ret = pin_vector_pages(req, &req->iovs[i]);
 		if (ret) {
 			req->data_iovs = i;
@@ -673,8 +548,8 @@ int hfi1_user_sdma_process_request(struct hfi1_filedata *fd,
 		}
 		req->data_len += req->iovs[i].iov.iov_len;
 	}
-	SDMA_DBG(req, "total data length %u", req->data_len);
-
+	trace_hfi1_sdma_user_data_length(dd, uctxt->ctxt, fd->subctxt,
+					 info.comp_idx, req->data_len);
 	if (pcount > req->info.npkts)
 		pcount = req->info.npkts;
 	/*
@@ -829,7 +704,11 @@ static inline u32 compute_data_length(struct user_sdma_request *req,
 	} else {
 		len = min(req->data_len - req->sent, (u32)req->info.fragsize);
 	}
-	SDMA_DBG(req, "Data Length = %u", len);
+	trace_hfi1_sdma_user_compute_length(req->pq->dd,
+					    req->pq->ctxt,
+					    req->pq->subctxt,
+					    req->info.comp_idx,
+					    len);
 	return len;
 }
 
@@ -844,6 +723,88 @@ static inline u32 get_lrh_len(struct hfi1_pkt_header hdr, u32 len)
 {
 	/* (Size of complete header - size of PBC) + 4B ICRC + data length */
 	return ((sizeof(hdr) - sizeof(hdr.pbc)) + 4 + len);
+}
+
+static int user_sdma_txadd_ahg(struct user_sdma_request *req,
+			       struct user_sdma_txreq *tx,
+			       u32 datalen)
+{
+	int ret;
+	u16 pbclen = le16_to_cpu(req->hdr.pbc[0]);
+	u32 lrhlen = get_lrh_len(req->hdr, pad_len(datalen));
+	struct hfi1_user_sdma_pkt_q *pq = req->pq;
+
+	/*
+	 * Copy the request header into the tx header
+	 * because the HW needs a cacheline-aligned
+	 * address.
+	 * This copy can be optimized out if the hdr
+	 * member of user_sdma_request were also
+	 * cacheline aligned.
+	 */
+	memcpy(&tx->hdr, &req->hdr, sizeof(tx->hdr));
+	if (PBC2LRH(pbclen) != lrhlen) {
+		pbclen = (pbclen & 0xf000) | LRH2PBC(lrhlen);
+		tx->hdr.pbc[0] = cpu_to_le16(pbclen);
+	}
+	ret = check_header_template(req, &tx->hdr, lrhlen, datalen);
+	if (ret)
+		return ret;
+	ret = sdma_txinit_ahg(&tx->txreq, SDMA_TXREQ_F_AHG_COPY,
+			      sizeof(tx->hdr) + datalen, req->ahg_idx,
+			      0, NULL, 0, user_sdma_txreq_cb);
+	if (ret)
+		return ret;
+	ret = sdma_txadd_kvaddr(pq->dd, &tx->txreq, &tx->hdr, sizeof(tx->hdr));
+	if (ret)
+		sdma_txclean(pq->dd, &tx->txreq);
+	return ret;
+}
+
+static int user_sdma_txadd(struct user_sdma_request *req,
+			   struct user_sdma_txreq *tx,
+			   struct user_sdma_iovec *iovec, u32 datalen,
+			   u32 *queued_ptr, u32 *data_sent_ptr,
+			   u64 *iov_offset_ptr)
+{
+	int ret;
+	unsigned int pageidx, len;
+	unsigned long base, offset;
+	u64 iov_offset = *iov_offset_ptr;
+	u32 queued = *queued_ptr, data_sent = *data_sent_ptr;
+	struct hfi1_user_sdma_pkt_q *pq = req->pq;
+
+	base = (unsigned long)iovec->iov.iov_base;
+	offset = offset_in_page(base + iovec->offset + iov_offset);
+	pageidx = (((iovec->offset + iov_offset + base) - (base & PAGE_MASK)) >>
+		   PAGE_SHIFT);
+	len = offset + req->info.fragsize > PAGE_SIZE ?
+		PAGE_SIZE - offset : req->info.fragsize;
+	len = min((datalen - queued), len);
+#ifdef NVIDIA_GPU_DIRECT
+	ret = sdma_txadd_page(pq->dd, &tx->txreq, iovec->pages.host[pageidx],
+#else
+	ret = sdma_txadd_page(pq->dd, &tx->txreq, iovec->pages[pageidx],
+#endif
+			      offset, len);
+	if (ret) {
+		SDMA_DBG(req, "SDMA txreq add page failed %d\n", ret);
+		return ret;
+	}
+	iov_offset += len;
+	queued += len;
+	data_sent += len;
+	if (unlikely(queued < datalen && pageidx == iovec->npages &&
+		     req->iov_idx < req->data_iovs - 1)) {
+		iovec->offset += iov_offset;
+		iovec = &req->iovs[++req->iov_idx];
+		iov_offset = 0;
+	}
+
+	*queued_ptr = queued;
+	*data_sent_ptr = data_sent;
+	*iov_offset_ptr = iov_offset;
+	return ret;
 }
 
 static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
@@ -942,39 +903,9 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
 
 		if (req->ahg_idx >= 0) {
 			if (!req->seqnum) {
-				u16 pbclen = le16_to_cpu(req->hdr.pbc[0]);
-				u32 lrhlen = get_lrh_len(req->hdr,
-							 pad_len(datalen));
-				/*
-				 * Copy the request header into the tx header
-				 * because the HW needs a cacheline-aligned
-				 * address.
-				 * This copy can be optimized out if the hdr
-				 * member of user_sdma_request were also
-				 * cacheline aligned.
-				 */
-				memcpy(&tx->hdr, &req->hdr, sizeof(tx->hdr));
-				if (PBC2LRH(pbclen) != lrhlen) {
-					pbclen = (pbclen & 0xf000) |
-						LRH2PBC(lrhlen);
-					tx->hdr.pbc[0] = cpu_to_le16(pbclen);
-				}
-				ret = check_header_template(req, &tx->hdr,
-							    lrhlen, datalen);
+				ret = user_sdma_txadd_ahg(req, tx, datalen);
 				if (ret)
 					goto free_tx;
-				ret = sdma_txinit_ahg(&tx->txreq,
-						      SDMA_TXREQ_F_AHG_COPY,
-						      sizeof(tx->hdr) + datalen,
-						      req->ahg_idx, 0, NULL, 0,
-						      user_sdma_txreq_cb);
-				if (ret)
-					goto free_tx;
-				ret = sdma_txadd_kvaddr(pq->dd, &tx->txreq,
-							&tx->hdr,
-							sizeof(tx->hdr));
-				if (ret)
-					goto free_txreq;
 			} else {
 				int changes;
 
@@ -1005,35 +936,19 @@ static int user_sdma_send_pkts(struct user_sdma_request *req, unsigned maxpkts)
 		 */
 		while (queued < datalen &&
 		       (req->sent + data_sent) < req->data_len) {
-			unsigned long base, offset;
-			unsigned pageidx, len;
-
-			base = (unsigned long)iovec->iov.iov_base;
-			offset = offset_in_page(base + iovec->offset +
-						iov_offset);
-			pageidx = (((iovec->offset + iov_offset +
-				     base) - (base & PAGE_MASK)) >> PAGE_SHIFT);
-			len = offset + req->info.fragsize > PAGE_SIZE ?
-				PAGE_SIZE - offset : req->info.fragsize;
-			len = min((datalen - queued), len);
-			ret = sdma_txadd_page(pq->dd, &tx->txreq,
-					      iovec->pages[pageidx],
-					      offset, len);
-			if (ret) {
-				SDMA_DBG(req, "SDMA txreq add page failed %d\n",
-					 ret);
+#ifdef NVIDIA_GPU_DIRECT
+			if (req->info.flags & HFI1_BUF_GPU_MEM)
+				ret = user_sdma_txadd_gpu(req, tx, iovec,
+							  datalen, &queued,
+							  &data_sent,
+							  &iov_offset);
+			else
+#endif
+				ret = user_sdma_txadd(req, tx, iovec, datalen,
+						      &queued, &data_sent,
+						      &iov_offset);
+			if (ret)
 				goto free_txreq;
-			}
-			iov_offset += len;
-			queued += len;
-			data_sent += len;
-			if (unlikely(queued < datalen &&
-				     pageidx == iovec->npages &&
-				     req->iov_idx < req->data_iovs - 1)) {
-				iovec->offset += iov_offset;
-				iovec = &req->iovs[++req->iov_idx];
-				iov_offset = 0;
-			}
 		}
 		/*
 		 * The txreq was submitted successfully so we can update
@@ -1079,19 +994,6 @@ free_tx:
 	return ret;
 }
 
-/*
- * How many pages in this iovec element?
- */
-static inline int num_user_pages(const struct iovec *iov)
-{
-	const unsigned long addr  = (unsigned long)iov->iov_base;
-	const unsigned long len   = iov->iov_len;
-	const unsigned long spage = addr & PAGE_MASK;
-	const unsigned long epage = (addr + len - 1) & PAGE_MASK;
-
-	return 1 + ((epage - spage) >> PAGE_SHIFT);
-}
-
 static u32 sdma_cache_evict(struct hfi1_user_sdma_pkt_q *pq, u32 npages)
 {
 	struct evict_data evict_data;
@@ -1102,26 +1004,117 @@ static u32 sdma_cache_evict(struct hfi1_user_sdma_pkt_q *pq, u32 npages)
 	return evict_data.cleared;
 }
 
+static int pin_sdma_pages(struct user_sdma_request *req,
+			  struct user_sdma_iovec *iovec,
+			  struct sdma_mmu_node *node,
+			  int npages)
+{
+	int pinned, cleared;
+	struct page **pages;
+	struct hfi1_user_sdma_pkt_q *pq = req->pq;
+
+	pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
+#ifdef NVIDIA_GPU_DIRECT
+	memcpy(pages, node->pages.host, node->npages * sizeof(*pages));
+#else
+	memcpy(pages, node->pages, node->npages * sizeof(*pages));
+#endif
+
+	npages -= node->npages;
+retry:
+	if (!hfi1_can_pin_pages(pq->dd, pq->mm,
+				atomic_read(&pq->n_locked), npages)) {
+		cleared = sdma_cache_evict(pq, npages);
+		if (cleared >= npages)
+			goto retry;
+	}
+	pinned = hfi1_acquire_user_pages(pq->mm,
+					 ((unsigned long)iovec->iov.iov_base +
+					 (node->npages * PAGE_SIZE)), npages, 0,
+					 pages + node->npages);
+	if (pinned < 0) {
+		kfree(pages);
+		return pinned;
+	}
+	if (pinned != npages) {
+		unpin_vector_pages(pq->mm, pages, node->npages, pinned);
+		return -EFAULT;
+	}
+#ifdef NVIDIA_GPU_DIRECT
+	kfree(node->pages.host);
+	node->pages.host = pages;
+#else
+	kfree(node->pages);
+	node->pages = pages;
+#endif
+	node->rb.len = iovec->iov.iov_len;
+	atomic_add(pinned, &pq->n_locked);
+	return pinned;
+}
+
+static void unpin_sdma_pages(struct sdma_mmu_node *node)
+{
+	if (node->npages) {
+#ifdef NVIDIA_GPU_DIRECT
+		unpin_vector_pages(node->pq->mm, node->pages.host, 0, node->npages);
+#else
+		unpin_vector_pages(node->pq->mm, node->pages, 0, node->npages);
+#endif
+		atomic_sub(node->npages, &node->pq->n_locked);
+	}
+}
+
 static int pin_vector_pages(struct user_sdma_request *req,
 			    struct user_sdma_iovec *iovec)
 {
-	int ret = 0, pinned, npages, cleared;
-	struct page **pages;
+	int ret = 0, pinned, npages;
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
 	struct sdma_mmu_node *node = NULL;
 	struct mmu_rb_node *rb_node;
-	bool extracted;
+	struct iovec *iov = &iovec->iov;
+	bool extracted, ongpu;
+	unsigned long addr, size;
+	struct mmu_rb_handler *handler;
 
-	extracted =
-		hfi1_mmu_rb_remove_unless_exact(pq->handler,
-						(unsigned long)
-						iovec->iov.iov_base,
-						iovec->iov.iov_len, &rb_node);
+#ifdef NVIDIA_GPU_DIRECT
+	if (req->info.flags & HFI1_BUF_GPU_MEM) {
+		/*
+		 * We have to increase the pin size to account for any
+		 * potential offset from the beginning of the GPU page.
+		 * This is needed because, unlike the kernel API, the
+		 * NVidia API takes pin length instead of number of
+		 * pages AND it requires the starting address be GPU
+		 * page aligned.
+		 */
+		size = iov->iov_len +
+			((unsigned long)iov->iov_base & ~NV_GPU_PAGE_MASK);
+		addr = (unsigned long)iov->iov_base & NV_GPU_PAGE_MASK;
+		ongpu = true;
+		handler = pq->handler_gpu;
+	} else
+#endif
+	{
+		size = iovec->iov.iov_len;
+		addr = (unsigned long)iovec->iov.iov_base;
+		ongpu = false;
+		handler = pq->handler;
+	}
+	extracted = hfi1_mmu_rb_remove_unless_exact(handler, addr,
+						    size, &rb_node);
 	if (rb_node) {
 		node = container_of(rb_node, struct sdma_mmu_node, rb);
 		if (!extracted) {
 			atomic_inc(&node->refcount);
+#ifdef NVIDIA_GPU_DIRECT
+			if (ongpu)
+				iovec->pages.gpu = node->pages.gpu;
+			else
+				iovec->pages.host = node->pages.host;
+#else
 			iovec->pages = node->pages;
+#endif
 			iovec->npages = node->npages;
 			iovec->node = node;
 			return 0;
@@ -1133,66 +1126,59 @@ static int pin_vector_pages(struct user_sdma_request *req,
 		if (!node)
 			return -ENOMEM;
 
-		node->rb.addr = (unsigned long)iovec->iov.iov_base;
+		node->rb.addr = addr;
 		node->pq = pq;
 		atomic_set(&node->refcount, 0);
 	}
 
-	npages = num_user_pages(&iovec->iov);
+#ifdef NVIDIA_GPU_DIRECT
+	if (ongpu)
+		npages = num_user_pages_gpu((unsigned long)iov->iov_base,
+					    iov->iov_len);
+	else
+#endif
+		npages = num_user_pages((unsigned long)iov->iov_base,
+					iov->iov_len);
 	if (node->npages < npages) {
-		pages = kcalloc(npages, sizeof(*pages), GFP_KERNEL);
-		if (!pages) {
-			SDMA_DBG(req, "Failed page array alloc");
-			ret = -ENOMEM;
-			goto bail;
-		}
-		memcpy(pages, node->pages, node->npages * sizeof(*pages));
-
-		npages -= node->npages;
-
-retry:
-		if (!hfi1_can_pin_pages(pq->dd, pq->mm,
-					atomic_read(&pq->n_locked), npages)) {
-			cleared = sdma_cache_evict(pq, npages);
-			if (cleared >= npages)
-				goto retry;
-		}
-		pinned = hfi1_acquire_user_pages(pq->mm,
-			((unsigned long)iovec->iov.iov_base +
-			 (node->npages * PAGE_SIZE)), npages, 0,
-			pages + node->npages);
+#ifdef NVIDIA_GPU_DIRECT
+		node->ongpu = ongpu;
+		if (ongpu)
+			pinned = pin_sdma_pages_gpu(iovec, node, req, npages,
+						    size, addr);
+		else
+#endif
+			pinned = pin_sdma_pages(req, iovec, node, npages);
 		if (pinned < 0) {
-			kfree(pages);
 			ret = pinned;
 			goto bail;
 		}
-		if (pinned != npages) {
-			unpin_vector_pages(pq->mm, pages, node->npages,
-					   pinned);
-			ret = -EFAULT;
-			goto bail;
-		}
-		kfree(node->pages);
-		node->rb.len = iovec->iov.iov_len;
-		node->pages = pages;
 		node->npages += pinned;
 		npages = node->npages;
-		atomic_add(pinned, &pq->n_locked);
 	}
+#ifdef NVIDIA_GPU_DIRECT
+	if (ongpu)
+		iovec->pages.gpu = node->pages.gpu;
+	else
+		iovec->pages.host = node->pages.host;
+#else
 	iovec->pages = node->pages;
+#endif
 	iovec->npages = npages;
 	iovec->node = node;
 
-	ret = hfi1_mmu_rb_insert(req->pq->handler, &node->rb);
+	ret = hfi1_mmu_rb_insert(handler, &node->rb);
 	if (ret) {
-		atomic_sub(node->npages, &pq->n_locked);
 		iovec->node = NULL;
 		goto bail;
 	}
 	return 0;
 bail:
-	if (rb_node)
-		unpin_vector_pages(pq->mm, node->pages, 0, node->npages);
+#ifdef NVIDIA_GPU_DIRECT
+	if (ongpu)
+		unpin_sdma_pages_gpu(node);
+	else
+#endif
+		unpin_sdma_pages(node);
 	kfree(node);
 	return ret;
 }
@@ -1373,9 +1359,10 @@ static int set_txreq_header(struct user_sdma_request *req,
 		 * Set the KDETH.OFFSET and KDETH.OM based on size of
 		 * transfer.
 		 */
-		SDMA_DBG(req, "TID offset %ubytes %uunits om%u",
-			 req->tidoffset, req->tidoffset >> omfactor,
-			 omfactor != KDETH_OM_SMALL_SHIFT);
+		trace_hfi1_sdma_user_tid_info(
+			pq->dd, pq->ctxt, pq->subctxt, req->info.comp_idx,
+			req->tidoffset, req->tidoffset >> omfactor,
+			omfactor != KDETH_OM_SMALL_SHIFT);
 		KDETH_SET(hdr->kdeth.ver_tid_offset, OFFSET,
 			  req->tidoffset >> omfactor);
 		KDETH_SET(hdr->kdeth.ver_tid_offset, OM,
@@ -1391,20 +1378,25 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 				struct user_sdma_txreq *tx, u32 datalen)
 {
 	u32 ahg[AHG_KDETH_ARRAY_SIZE];
-	int diff = 0;
+	int idx = 0;
 	u8 omfactor; /* KDETH.OM */
 	struct hfi1_user_sdma_pkt_q *pq = req->pq;
 	struct hfi1_pkt_header *hdr = &req->hdr;
 	u16 pbclen = le16_to_cpu(hdr->pbc[0]);
 	u32 val32, tidval = 0, lrhlen = get_lrh_len(*hdr, pad_len(datalen));
+	size_t array_size = ARRAY_SIZE(ahg);
 
 	if (PBC2LRH(pbclen) != lrhlen) {
 		/* PBC.PbcLengthDWs */
-		AHG_HEADER_SET(ahg, diff, 0, 0, 12,
-			       cpu_to_le16(LRH2PBC(lrhlen)));
+		idx = ahg_header_set(ahg, idx, array_size, 0, 0, 12,
+				     (__force u16)cpu_to_le16(LRH2PBC(lrhlen)));
+		if (idx < 0)
+			return idx;
 		/* LRH.PktLen (we need the full 16 bits due to byte swap) */
-		AHG_HEADER_SET(ahg, diff, 3, 0, 16,
-			       cpu_to_be16(lrhlen >> 2));
+		idx = ahg_header_set(ahg, idx, array_size, 3, 0, 16,
+				     (__force u16)cpu_to_be16(lrhlen >> 2));
+		if (idx < 0)
+			return idx;
 	}
 
 	/*
@@ -1415,12 +1407,23 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 		(HFI1_CAP_IS_KSET(EXTENDED_PSN) ? 0x7fffffff : 0xffffff);
 	if (unlikely(tx->flags & TXREQ_FLAGS_REQ_ACK))
 		val32 |= 1UL << 31;
-	AHG_HEADER_SET(ahg, diff, 6, 0, 16, cpu_to_be16(val32 >> 16));
-	AHG_HEADER_SET(ahg, diff, 6, 16, 16, cpu_to_be16(val32 & 0xffff));
+	idx = ahg_header_set(ahg, idx, array_size, 6, 0, 16,
+			     (__force u16)cpu_to_be16(val32 >> 16));
+	if (idx < 0)
+		return idx;
+	idx = ahg_header_set(ahg, idx, array_size, 6, 16, 16,
+			     (__force u16)cpu_to_be16(val32 & 0xffff));
+	if (idx < 0)
+		return idx;
 	/* KDETH.Offset */
-	AHG_HEADER_SET(ahg, diff, 15, 0, 16,
-		       cpu_to_le16(req->koffset & 0xffff));
-	AHG_HEADER_SET(ahg, diff, 15, 16, 16, cpu_to_le16(req->koffset >> 16));
+	idx = ahg_header_set(ahg, idx, array_size, 15, 0, 16,
+			     (__force u16)cpu_to_le16(req->koffset & 0xffff));
+	if (idx < 0)
+		return idx;
+	idx = ahg_header_set(ahg, idx, array_size, 15, 16, 16,
+			     (__force u16)cpu_to_le16(req->koffset >> 16));
+	if (idx < 0)
+		return idx;
 	if (req_opcode(req->info.ctrl) == EXPECTED) {
 		__le16 val;
 
@@ -1447,10 +1450,13 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 				 KDETH_OM_MAX_SIZE) ? KDETH_OM_LARGE_SHIFT :
 				 KDETH_OM_SMALL_SHIFT;
 		/* KDETH.OM and KDETH.OFFSET (TID) */
-		AHG_HEADER_SET(ahg, diff, 7, 0, 16,
-			       ((!!(omfactor - KDETH_OM_SMALL_SHIFT)) << 15 |
+		idx = ahg_header_set(
+				ahg, idx, array_size, 7, 0, 16,
+				((!!(omfactor - KDETH_OM_SMALL_SHIFT)) << 15 |
 				((req->tidoffset >> omfactor)
-				 & 0x7fff)));
+				& 0x7fff)));
+		if (idx < 0)
+			return idx;
 		/* KDETH.TIDCtrl, KDETH.TID, KDETH.Intr, KDETH.SH */
 		val = cpu_to_le16(((EXP_TID_GET(tidval, CTRL) & 0x3) << 10) |
 				   (EXP_TID_GET(tidval, IDX) & 0x3ff));
@@ -1467,21 +1473,22 @@ static int set_txreq_header_ahg(struct user_sdma_request *req,
 					     AHG_KDETH_INTR_SHIFT));
 		}
 
-		AHG_HEADER_SET(ahg, diff, 7, 16, 14, val);
+		idx = ahg_header_set(ahg, idx, array_size,
+				     7, 16, 14, (__force u16)val);
+		if (idx < 0)
+			return idx;
 	}
-	if (diff < 0)
-		return diff;
 
 	trace_hfi1_sdma_user_header_ahg(pq->dd, pq->ctxt, pq->subctxt,
 					req->info.comp_idx, req->sde->this_idx,
-					req->ahg_idx, ahg, diff, tidval);
+					req->ahg_idx, ahg, idx, tidval);
 	sdma_txinit_ahg(&tx->txreq,
 			SDMA_TXREQ_F_USE_AHG,
-			datalen, req->ahg_idx, diff,
+			datalen, req->ahg_idx, idx,
 			ahg, sizeof(req->hdr),
 			user_sdma_txreq_cb);
 
-	return diff;
+	return idx;
 }
 
 /*
@@ -1568,8 +1575,14 @@ static void user_sdma_free_request(struct user_sdma_request *req, bool unpin)
 				continue;
 
 			if (unpin)
-				hfi1_mmu_rb_remove(req->pq->handler,
-						   &node->rb);
+#ifdef NVIDIA_GPU_DIRECT
+				if (node->ongpu)
+					hfi1_mmu_rb_remove(req->pq->handler_gpu,
+							   &node->rb);
+				else
+#endif
+					hfi1_mmu_rb_remove(req->pq->handler,
+							   &node->rb);
 			else
 				atomic_dec(&node->refcount);
 		}
@@ -1583,8 +1596,6 @@ static inline void set_comp_state(struct hfi1_user_sdma_pkt_q *pq,
 				  u16 idx, enum hfi1_sdma_comp_state state,
 				  int ret)
 {
-	hfi1_cdbg(SDMA, "[%u:%u:%u:%u] Setting completion status %u %d",
-		  pq->dd->unit, pq->ctxt, pq->subctxt, idx, state, ret);
 	if (state == ERROR)
 		cq->comps[idx].errcode = -ret;
 	smp_wmb(); /* make sure errcode is visible first */
@@ -1639,10 +1650,12 @@ static void sdma_rb_remove(void *arg, struct mmu_rb_node *mnode)
 	struct sdma_mmu_node *node =
 		container_of(mnode, struct sdma_mmu_node, rb);
 
-	atomic_sub(node->npages, &node->pq->n_locked);
-
-	unpin_vector_pages(node->pq->mm, node->pages, 0, node->npages);
-
+#ifdef NVIDIA_GPU_DIRECT
+	if (node->ongpu)
+		unpin_sdma_pages_gpu(node);
+	else
+#endif
+		unpin_sdma_pages(node);
 	kfree(node);
 }
 

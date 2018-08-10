@@ -107,7 +107,7 @@ void rvt_cq_enter(struct rvt_cq *cq, struct ib_wc *entry, bool solicited)
 		wc->uqueue[head].src_qp = entry->src_qp;
 		wc->uqueue[head].wc_flags = entry->wc_flags;
 		wc->uqueue[head].pkey_index = entry->pkey_index;
-		wc->uqueue[head].slid = entry->slid;
+		wc->uqueue[head].slid = ib_lid_cpu16(entry->slid);
 		wc->uqueue[head].sl = entry->sl;
 		wc->uqueue[head].dlid_path_bits = entry->dlid_path_bits;
 		wc->uqueue[head].port_num = entry->port_num;
@@ -129,7 +129,7 @@ void rvt_cq_enter(struct rvt_cq *cq, struct ib_wc *entry, bool solicited)
 		if (likely(cq->rdi->worker)) {
 			cq->notify = RVT_CQ_NONE;
 			cq->triggered++;
-			queue_kthread_work(cq->rdi->worker, &cq->comptask);
+			kthread_queue_work(cq->rdi->worker, &cq->comptask);
 		}
 		spin_unlock(&cq->rdi->n_cqs_lock);
 	}
@@ -266,7 +266,7 @@ struct ib_cq *rvt_create_cq(struct ib_device *ibdev,
 	cq->ibcq.cqe = entries;
 	cq->notify = RVT_CQ_NONE;
 	spin_lock_init(&cq->lock);
-	init_kthread_work(&cq->comptask, send_complete);
+	kthread_init_work(&cq->comptask, send_complete);
 	cq->queue = wc;
 
 	ret = &cq->ibcq;
@@ -296,7 +296,7 @@ int rvt_destroy_cq(struct ib_cq *ibcq)
 	struct rvt_cq *cq = ibcq_to_rvtcq(ibcq);
 	struct rvt_dev_info *rdi = cq->rdi;
 
-	flush_kthread_work(&cq->comptask);
+	kthread_flush_work(&cq->comptask);
 	spin_lock_irq(&rdi->n_cqs_lock);
 	rdi->n_cqs_allocated--;
 	spin_unlock_irq(&rdi->n_cqs_lock);
@@ -506,33 +506,23 @@ int rvt_poll_cq(struct ib_cq *ibcq, int num_entries, struct ib_wc *entry)
  */
 int rvt_driver_cq_init(struct rvt_dev_info *rdi)
 {
-	int ret = 0;
 	int cpu;
-	struct task_struct *task;
+	struct kthread_worker *worker;
 
 	if (rdi->worker)
 		return 0;
-	spin_lock_init(&rdi->n_cqs_lock);
-	rdi->worker = kzalloc(sizeof(*rdi->worker), GFP_KERNEL);
-	if (!rdi->worker)
-		return -ENOMEM;
-	init_kthread_worker(rdi->worker);
-	task = kthread_create_on_node(
-		kthread_worker_fn,
-		rdi->worker,
-		rdi->dparms.node,
-		"%s", rdi->dparms.cq_name);
-	if (IS_ERR(task)) {
-		kfree(rdi->worker);
-		rdi->worker = NULL;
-		return PTR_ERR(task);
-	}
 
-	set_user_nice(task, -20);
+	spin_lock_init(&rdi->n_cqs_lock);
+
 	cpu = cpumask_first(cpumask_of_node(rdi->dparms.node));
-	kthread_bind(task, cpu);
-	wake_up_process(task);
-	return ret;
+	worker = kthread_create_worker_on_cpu(cpu, 0,
+					      "%s", rdi->dparms.cq_name);
+	if (IS_ERR(worker))
+		return PTR_ERR(worker);
+
+	set_user_nice(worker->task, MIN_NICE);
+	rdi->worker = worker;
+	return 0;
 }
 
 /**
@@ -552,8 +542,6 @@ void rvt_cq_exit(struct rvt_dev_info *rdi)
 	}
 	rdi->worker = NULL;
 	spin_unlock_irq(&rdi->n_cqs_lock);
-	flush_kthread_worker(worker);
 
-	kthread_stop(worker->task);
-	kfree(worker);
+	kthread_destroy_worker(worker);
 }

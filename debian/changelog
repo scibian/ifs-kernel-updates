@@ -1,3 +1,9 @@
+ifs-kernel-updates (1:3.10.0-693-1514-1ifs+deb9sci9+opa10.7) scibian9+opa10.7; urgency=medium
+
+  * Scibian9 release with opa10.7
+
+ -- Nicolas Meaux <nicolas-externe.meaux@edf.fr>  Fri, 10 Aug 2018 14:10:51 +0200
+
 ifs-kernel-updates (1:3.10.0-693-1514-1ifs+deb9) UNRELEASED; urgency=medium
 
     * Import ifs-kernel-updates 3.10.0_693 1514 from

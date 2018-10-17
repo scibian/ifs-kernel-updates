@@ -852,7 +852,7 @@ DEFINE_EVENT(
 	TP_ARGS(qp, flag)
 );
 
-DEFINE_EVENT(
+DEFINE_EVENT(/* expired time slice */
 	hfi1_do_send_template, hfi1_rc_expired_time_slice,
 	TP_PROTO(struct rvt_qp *qp, bool flag),
 	TP_ARGS(qp, flag)

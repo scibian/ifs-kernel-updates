@@ -1,3 +1,5 @@
+#ifndef _HFI1_FAULT_H
+#define _HFI1_FAULT_H
 /*
  * Copyright(c) 2018 Intel Corporation.
  *
@@ -44,67 +46,64 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-#if !defined(RH75_COMPAT_H)
-#define RH75_COMPAT_H
+#include <linux/fault-inject.h>
+#include <linux/dcache.h>
+#include <linux/bitops.h>
+#include <linux/kernel.h>
+#include <rdma/rdma_vt.h>
 
-#include "compat_common.h"
+#include "hfi.h"
 
-#define __GFP_RECLAIM	(__GFP_WAIT)
+struct hfi1_ibdev;
 
-#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
+#if defined(CONFIG_FAULT_INJECTION) && defined(CONFIG_FAULT_INJECTION_DEBUG_FS)
+struct fault {
+	struct fault_attr attr;
+	struct dentry *dir;
+	u64 n_rxfaults[(1U << BITS_PER_BYTE)];
+	u64 n_txfaults[(1U << BITS_PER_BYTE)];
+	u64 fault_skip;
+	u64 skip;
+	u64 fault_skip_usec;
+	unsigned long skip_usec;
+	unsigned long opcodes[(1U << BITS_PER_BYTE) / BITS_PER_LONG];
+	bool enable;
+	bool suppress_err;
+	bool opcode;
+	u8 direction;
+};
 
+int hfi1_fault_init_debugfs(struct hfi1_ibdev *ibd);
+bool hfi1_dbg_should_fault_tx(struct rvt_qp *qp, u32 opcode);
+bool hfi1_dbg_should_fault_rx(struct hfi1_packet *packet);
+bool hfi1_dbg_fault_suppress_err(struct hfi1_ibdev *ibd);
+void hfi1_fault_exit_debugfs(struct hfi1_ibdev *ibd);
 
-#define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
-#define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
+#else
 
-struct hfi1_msix_entry;
-struct hfi1_devdata;
-
-void pcie_flr(struct pci_dev *dev);
-
-void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
-		struct hfi1_msix_entry *hfi1_msix_entry);
-int bitmap_print_to_pagebuf(bool list, char *buf,
-			    const unsigned long *maskp, int nmaskbits);
-int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
-__acquires(&debugfs_srcu);
-
-void debugfs_use_file_finish(int srcu_idx) __releases(&debugfs_srcu);
-struct ib_umem *ib_umem_get_hfi(struct ib_ucontext *context, unsigned long addr,
-				size_t size, int access, int dmasync);
-
-static inline long compat_get_user_pages(unsigned long start,
-					 unsigned long nr_pages,
-					 unsigned int gup_flags,
-					 struct page **pages,
-					 struct vm_area_struct **vmas)
+static inline int hfi1_fault_init_debugfs(struct hfi1_ibdev *ibd)
 {
-	return get_user_pages(current, current->mm, start,
-			      nr_pages, 1, 1, pages, vmas);
+	return 0;
 }
 
-#define get_user_pages(start, nr_pages, gup_flags, pages, vmas) \
-	compat_get_user_pages(start, nr_pages, gup_flags, pages, vmas)
-
-static inline int simple_positive(struct dentry *dentry)
+static inline bool hfi1_dbg_should_fault_rx(struct hfi1_packet *packet)
 {
-	return !d_unhashed(dentry) && dentry->d_inode;
+	return false;
 }
 
-static inline void hfi1_enable_intx(struct pci_dev *pdev)
+static inline bool hfi1_dbg_should_fault_tx(struct rvt_qp *qp,
+					    u32 opcode)
 {
-	/* first, turn on INTx */
-	pci_intx(pdev, 1);
-	/* then turn off MSI-X */
-	pci_disable_msix(pdev);
+	return false;
 }
 
-/* Helpers to hide struct msi_desc implementation details */
-#define msi_desc_to_dev(desc)           ((desc)->dev)
-#define dev_to_msi_list(dev)            (&(dev)->msi_list)
-#define first_msi_entry(dev)            \
-	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
-#define for_each_msi_entry(desc, dev)   \
-	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
+static inline bool hfi1_dbg_fault_suppress_err(struct hfi1_ibdev *ibd)
+{
+	return false;
+}
 
-#endif //RH75_COMPAT
+static inline void hfi1_fault_exit_debugfs(struct hfi1_ibdev *ibd)
+{
+}
+#endif
+#endif /* _HFI1_FAULT_H */

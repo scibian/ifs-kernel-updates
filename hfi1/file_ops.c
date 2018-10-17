@@ -48,7 +48,7 @@
 #include <linux/cdev.h>
 #include <linux/vmalloc.h>
 #include <linux/io.h>
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 #include <linux/sched/mm.h>
 #else
 #include <linux/aio.h>
@@ -57,11 +57,16 @@
 #include <linux/bitmap.h>
 #include <rdma/ib.h>
 
+#ifdef IFS_RH75
+#include <linux/module.h>
+#endif
+
 #include "hfi.h"
 #include "pio.h"
 #include "device.h"
 #include "common.h"
 #include "trace.h"
+#include "mmu_rb.h"
 #include "user_sdma.h"
 #ifdef NVIDIA_GPU_DIRECT
 #include "user_sdma_gpu.h"
@@ -74,12 +79,24 @@
 
 #define SEND_CTXT_HALT_TIMEOUT 1000 /* msecs */
 
+unsigned int selinux_mode = 0;
+unsigned int print_se_banner = 1;
+
+/*
+ * We only intend to allow this to be enabled on RHEL 7.5 for right now. SELinux code
+ * should be a no-o for any distro other than RHEL 7.5 that sets this mod parm
+ */
+#ifdef IFS_RH75
+module_param_named(ifs_sel_mode, selinux_mode, uint, S_IRUGO);
+MODULE_PARM_DESC(ifs_sel_mode, "Use SELinux for PSM");
+#endif
+
 /*
  * File operation functions
  */
 static int hfi1_file_open(struct inode *inode, struct file *fp);
 static int hfi1_file_close(struct inode *inode, struct file *fp);
-#if !defined(IFS_RH73) && !defined(IFS_RH74)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from);
 #else
 static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
@@ -125,7 +142,7 @@ static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg);
 static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
 static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		       unsigned long arg);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 static int vma_fault(struct vm_fault *vmf);
 #else
 static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
@@ -135,7 +152,7 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 
 static const struct file_operations hfi1_file_ops = {
 	.owner = THIS_MODULE,
-#if !defined(IFS_RH73) && !defined(IFS_RH74)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
 	.write_iter = hfi1_write_iter,
 #else
 	.aio_write = hfi1_aio_write,
@@ -233,6 +250,7 @@ static int hfi1_file_open(struct inode *inode, struct file *fp)
 		fd->dd = dd;
 		fp->private_data = fd;
 	} else {
+		kobject_put(&dd->kobj);
 		fp->private_data = NULL;
 
 		if (atomic_dec_and_test(&dd->user_refcount))
@@ -332,7 +350,7 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 	return ret;
 }
 
-#if !defined(IFS_RH73) && !defined(IFS_RH74)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 {
 	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
@@ -581,7 +599,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 			ret = -EINVAL;
 			goto done;
 		}
-		if (flags & VM_WRITE) {
+		if ((flags & VM_WRITE) || !uctxt->rcvhdrtail_kvaddr) {
 			ret = -EPERM;
 			goto done;
 		}
@@ -667,7 +685,7 @@ done:
  * Local (non-chip) user memory is not mapped right away but as it is
  * accessed by the user-level code.
  */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 static int vma_fault(struct vm_fault *vmf)
 #else
 static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
@@ -764,6 +782,8 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 		     HFI1_RCVCTRL_NO_EGR_DROP_DIS, uctxt);
 	/* Clear the context's J_KEY */
 	hfi1_clear_ctxt_jkey(dd, uctxt);
+	if (uctxt->security)
+		security_ib_free_security(uctxt->security);
 	/*
 	 * If a send context is allocated, reset context integrity
 	 * checks to default and disable the send context.
@@ -1075,6 +1095,12 @@ static int allocate_ctxt(struct hfi1_filedata *fd, struct hfi1_devdata *dd,
 	init_waitqueue_head(&uctxt->wait);
 	strlcpy(uctxt->comm, current->comm, sizeof(uctxt->comm));
 	memcpy(uctxt->uuid, uinfo->uuid, sizeof(uctxt->uuid));
+
+	/*
+	 * This JKey value is to ensure the user context matches what it should
+	 * be for the user that is trying to use it. It is not necessarily the
+	 * packet JKey, but rather the JKey without any Security information.
+	 */
 	uctxt->jkey = generate_jkey(current_uid());
 	hfi1_stats.sps_ctxts++;
 	/*
@@ -1170,8 +1196,13 @@ static void user_init(struct hfi1_ctxtdata *uctxt)
 	if (uctxt->rcvhdrtail_kvaddr)
 		clear_rcvhdrtail(uctxt);
 
-	/* Setup J_KEY before enabling the context */
-	hfi1_set_ctxt_jkey(uctxt->dd, uctxt, uctxt->jkey);
+	if (uctxt->security)
+		/*
+		 * This prevents user access before the PKey has been set
+		 */
+		hfi1_set_ctxt_jkey(uctxt->dd, uctxt, 0xFF00);
+	else
+		hfi1_set_ctxt_jkey(uctxt->dd, uctxt, uctxt->jkey);
 
 	rcvctrl_ops = HFI1_RCVCTRL_CTXT_ENB;
 	if (HFI1_CAP_UGET_MASK(uctxt->flags, HDRSUPP))
@@ -1269,6 +1300,24 @@ static int setup_base_ctxt(struct hfi1_filedata *fd,
 
 	hfi1_init_ctxt(uctxt->sc);
 
+	/*
+	 * If SELinux support for IB is enabled this will allocate the security
+	 * context, if it's not the guard in security.h just returns 0. No need
+	 * to check it here.
+	 */
+	if (selinux_mode == 1) {
+		if (unlikely(print_se_banner)) {
+			print_se_banner = 0;
+			printk(KERN_CRIT "-----------------------------------\n");
+			printk(KERN_CRIT "Experimental SELinux mode activated\n");
+			printk(KERN_CRIT "-----------------------------------\n");
+		}
+		if (security_ib_alloc_security(&uctxt->security)) {
+			ret = -ENOMEM;
+			goto done;
+		}
+	}
+
 	/* Now allocate the RcvHdr queue and eager buffers. */
 	ret = hfi1_create_rcvhdrq(dd, uctxt);
 	if (ret)
@@ -1334,6 +1383,7 @@ static int get_base_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	binfo.hw_version = dd->revision;
 	binfo.sw_version = HFI1_KERN_SWVERSION;
 	binfo.bthqp = kdeth_qp;
+	hfi1_cdbg(SEL, "Handing the user the JKey 0x%x", uctxt->jkey);
 	binfo.jkey = uctxt->jkey;
 	/*
 	 * If more than 64 contexts are enabled the allocated credit
@@ -1683,12 +1733,35 @@ static int user_event_ack(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 	return 0;
 }
 
+static void set_secure_jkey(struct hfi1_ctxtdata *uctxt, u16 pkey_idx)
+{
+	/*
+	 * Whatever we do to encode the JKey here for HW checks needs to be done
+	 * in software for SDMA. See hfi1_user_sdma_process_request and ensure
+	 * it matches what we do here.
+	 */
+	uctxt->jkey &= JKEY_SEC_MASK; /* mask off the upper 16 bits */
+	uctxt->jkey = (pkey_idx << JKEY_SEC_SPLIT) | uctxt->jkey;
+	hfi1_cdbg(SEL, "PKey index %u JKey 0x%x", pkey_idx, uctxt->jkey);
+	hfi1_set_ctxt_jkey(uctxt->dd, uctxt, uctxt->jkey);
+}
+
 static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg)
 {
 	int i;
 	struct hfi1_pportdata *ppd = uctxt->ppd;
 	struct hfi1_devdata *dd = uctxt->dd;
 	u16 pkey;
+	int ret;
+	u64 subnet_prefix;
+
+	/*
+	 * PSM will always use 1 port per hfi. Like with verbs this will be 1
+	 * rather than 0 based.
+	 */
+	if (uctxt->security)
+		if (hfi1_get_verbs_subnet_prefix(dd, 1, &subnet_prefix))
+			return -EINVAL;
 
 	if (!HFI1_CAP_IS_USET(PKEY_CHECK))
 		return -EPERM;
@@ -1696,12 +1769,66 @@ static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg)
 	if (get_user(pkey, (u16 __user *)arg))
 		return -EFAULT;
 
+	hfi1_cdbg(SEL, "User wants to set PKEY: 0x%x", pkey);
+
+	/*
+	 * Enforce that the PKey is a full member Pkey. There is no need for an
+	 * application using this interface to not be a full member of the
+	 * partition. To support the case where one end is a full member and the
+	 * other is not would add more complexity to the code than its worth and
+	 * would shrink the size of the numer of PKeys we could support.
+	 */
+	if (uctxt->security)
+		if (!(pkey & PKEY_MEMBER_MASK))
+			return -EINVAL;
+
+	/*
+	 * Next make sure the PKEY the user wants to set is valid. It can not
+	 * be a mgmt pkey and it can't be something not even in the pkey table.
+	 * After we ensure its a valid PKey check to ensure user has security
+	 * access for the PKey.
+	 */
 	if (pkey == LIM_MGMT_P_KEY || pkey == FULL_MGMT_P_KEY)
 		return -EINVAL;
 
-	for (i = 0; i < ARRAY_SIZE(ppd->pkeys); i++)
-		if (pkey == ppd->pkeys[i])
-			return hfi1_set_ctxt_pkey(dd, uctxt, pkey);
+	for (i = 0; i < ARRAY_SIZE(ppd->pkeys); i++) {
+		hfi1_cdbg(SEL, "Pkey[%d].... 0x%x", i, ppd->pkeys[i]);
+		if (pkey == ppd->pkeys[i]) {
+			/*
+			 * If CONFIG_SECURITY_INFINIBAND is not on this will
+			 * just return 0.
+			 */
+			if (uctxt->security) {
+				ret = security_ib_pkey_access(uctxt->security,
+						     	      subnet_prefix,
+							      pkey);
+				if (ret) {
+					hfi1_cdbg(SEL, "SELinux is blocking pkey");
+					return -EPERM;
+				}
+				hfi1_cdbg(SEL, "Found PKEY and user has access");
+			}
+			/*
+			 * For SELinux we aren't interested in PKey checking in
+			 * HW because for SDMA we can't rely on it nor can we
+			 * use it for receive side checking. Instead we are
+			 * using JKey as our security field. However the HW
+			 * enablement may be requested when SELinux is not in
+			 * use and it doesn't hurt so we can do it
+			 * unconditionally
+			 */
+			ret = hfi1_set_ctxt_pkey(dd, uctxt, pkey);
+			if (ret)
+				return ret;
+
+			/*
+			 * Set the JKey and encode in it the PKey
+			 */
+			if (uctxt->security)
+				set_secure_jkey(uctxt, i);
+			return 0;
+		}
+	}
 
 	return -ENOENT;
 }

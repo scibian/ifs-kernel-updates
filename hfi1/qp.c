@@ -70,7 +70,7 @@ static int iowait_sleep(
 	struct sdma_engine *sde,
 	struct iowait_work *wait,
 	struct sdma_txreq *stx,
-	uint seq,
+	unsigned int seq,
 	bool pkts_sent);
 static void iowait_wakeup(struct iowait *wait, int reason);
 static void iowait_sdma_drained(struct iowait *wait);
@@ -396,8 +396,8 @@ static void qp_pio_drain(struct rvt_qp *qp)
  *
  * This schedules qp progress and caller should hold
  * the s_lock.
- * @return true if the second leg is scheduled;
- * false if the second leg is not scheduled.
+ * @return true if the first leg is scheduled;
+ * false if the first leg is not scheduled.
  */
 bool hfi1_schedule_send(struct rvt_qp *qp)
 {
@@ -407,13 +407,12 @@ bool hfi1_schedule_send(struct rvt_qp *qp)
 		return true;
 	}
 	if (qp->s_flags & HFI1_S_ANY_WAIT_IO)
-		iowait_set_flag(
-			&((struct hfi1_qp_priv *)qp->priv)->s_iowait,
-			IOWAIT_PENDING_IB);
+		iowait_set_flag(&((struct hfi1_qp_priv *)qp->priv)->s_iowait,
+				IOWAIT_PENDING_IB);
 	return false;
 }
 
-void hfi1_qp_schedule(struct rvt_qp *qp)
+static void hfi1_qp_schedule(struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 	bool ret;
@@ -631,6 +630,8 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 	struct sdma_engine *sde;
 	struct send_context *send_context;
 	struct rvt_ack_entry *e = NULL;
+	struct rvt_srq *srq = qp->ibqp.srq ?
+		ibsrq_to_rvtsrq(qp->ibqp.srq) : NULL;
 
 	sde = qp_to_sdma_engine(qp, priv->s_sc);
 	wqe = rvt_get_swqe_ptr(qp, qp->s_last);
@@ -638,14 +639,13 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 	if (qp->s_ack_queue)
 		e = &qp->s_ack_queue[qp->s_tail_ack_queue];
 	seq_printf(s,
-		   "N %d %s QP %x R %u %s %u %u W %x %u %x %x f=%x pf=%lx %u %u %u %u %u %u %u %u %u SPSN %x %x %x %x %x RPSN %x S(%u %u %u %u %u %u %u) R(%u %u %u) RQP %x LID %x SL %u MTU %u %u %u %u %u SDE %p,%u SC %p,%u SCQ %u %u PID %d OS %x %x E %x %x %x RCD %u\n",
+		   "N %d %s QP %x R %u %s %u W %x %u %x %x f=%x pf=%lx %u %u %u %u %u %u %u %u %u SPSN %x %x %x %x %x RPSN %x S(%u %u %u %u %u %u %u) R(%u %u %u) RQP %x LID %x SL %u MTU %u %u %u %u %u SDE %p,%u SC %p,%u SCQ %u %u PID %d OS %x %x E %x %x %x RNR %d %s %d RCD %u\n",
 		   iter->n,
 		   qp_idle(qp) ? "I" : "B",
 		   qp->ibqp.qp_num,
 		   atomic_read(&qp->refcount),
 		   qp_type_str[qp->ibqp.qp_type],
 		   qp->state,
-		   qp->s_hdrwords,
 		   /* current wqe fields */
 		   wqe ? wqe->wr.opcode : 0,
 		   wqe ? wqe->ssn : 0,
@@ -700,7 +700,11 @@ void qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 		   e ? e->opcode : 0,
 		   e ? e->psn : 0,
 		   e ? e->lpsn : 0,
-		   priv->rcd ? priv->rcd->ctxt : 0);
+		   qp->r_min_rnr_timer,
+		   srq ? "SRQ" : "RQ",
+		   srq ? srq->rq.size : qp->r_rq.size,
+		   priv->rcd ? priv->rcd->ctxt : 0
+		);
 
 	hfi1_qp_tid_print(s, qp);
 }
@@ -736,10 +740,6 @@ void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 		iowait_sleep,
 		iowait_wakeup,
 		iowait_sdma_drained);
-	setup_timer(&priv->s_tid_timer, hfi1_tid_timeout, (unsigned long)qp);
-	setup_timer(&priv->s_tid_retry_timer, hfi1_tid_retry_timeout,
-		    (unsigned long)qp);
-	INIT_LIST_HEAD(&priv->tid_wait);
 	return priv;
 }
 
@@ -905,6 +905,7 @@ void notify_error_qp(struct rvt_qp *qp)
 	}
 
 	if (!(qp->s_flags & RVT_S_BUSY) && !(priv->s_flags & RVT_S_BUSY)) {
+		qp->s_hdrwords = 0;
 		if (qp->s_rdma_mr) {
 			rvt_put_mr(qp->s_rdma_mr);
 			qp->s_rdma_mr = NULL;

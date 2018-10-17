@@ -2,12 +2,12 @@ Description: Add get_link_layer support to rdmavt
  Assign function pointer for ib_device get_link_layer.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2018-06-29>
+Last-Update: <2018-10-27>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/rdmavt/vt.c
 +++ b/rdmavt/vt.c
-@@ -345,6 +345,12 @@
+@@ -343,6 +343,12 @@
  	return 0;
  }
  
@@ -20,7 +20,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  enum {
  	MISC,
  	QUERY_DEVICE,
-@@ -390,6 +396,7 @@
+@@ -388,6 +394,7 @@
  	RESIZE_CQ,
  	ALLOC_PD,
  	DEALLOC_PD,
@@ -28,7 +28,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	_VERB_IDX_MAX /* Must always be last! */
  };
  
-@@ -714,6 +721,12 @@
+@@ -711,6 +718,12 @@
  				      rvt_dealloc_pd);
  		break;
  

@@ -91,9 +91,7 @@
  * RVT_S_WAIT_ACK - waiting for an ACK packet before sending more requests
  * RVT_S_SEND_ONE - send one packet, request ACK, then wait for ACK
  * RVT_S_ECN - a BECN was queued to the send engine
- * RVT_S_WAIT_TID_RESP - waiting for a TID RDMA WRITE response
- * RVT_S_WAIT_TID_SPACE - a QP is waiting for TID resource
- * RVT_S_WAIT_HALT - halt the first leg send engine
+ * RVT_S_MAX_BIT_MASK - The max bit that can be used by rdmavt
  */
 #define RVT_S_SIGNAL_REQ_WR	0x0001
 #define RVT_S_BUSY		0x0002
@@ -114,9 +112,7 @@
 #define RVT_S_SEND_ONE		0x10000
 #define RVT_S_UNLIMITED_CREDIT	0x20000
 #define RVT_S_ECN		0x40000
-#define RVT_S_WAIT_TID_RESP     0x80000
-#define RVT_S_WAIT_TID_SPACE	0x100000
-#define RVT_S_WAIT_HALT         0x200000
+#define RVT_S_MAX_BIT_MASK	0x800000
 
 /*
  * Drivers should use s_flags starting with bit 31
@@ -126,8 +122,8 @@
  * Wait flags that would prevent any packet type from being sent.
  */
 #define RVT_S_ANY_WAIT_IO \
-	(RVT_S_WAIT_PIO | RVT_S_WAIT_TX | RVT_S_WAIT_DMA_DESC | \
-	 RVT_S_WAIT_KMEM)
+	(RVT_S_WAIT_PIO | RVT_S_WAIT_TX | \
+	 RVT_S_WAIT_DMA_DESC | RVT_S_WAIT_KMEM)
 
 /*
  * Wait flags that would prevent send work requests from making progress.

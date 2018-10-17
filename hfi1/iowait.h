@@ -162,19 +162,16 @@ void iowait_set_flag(struct iowait *wait, u32 flag);
 bool iowait_flag_set(struct iowait *wait, u32 flag);
 void iowait_clear_flag(struct iowait *wait, u32 flag);
 
-void iowait_init(
-	struct iowait *wait,
-	u32 tx_limit,
-	void (*func)(struct work_struct *work),
-	void (*tidfunc)(struct work_struct *work),
-	int (*sleep)(
-		struct sdma_engine *sde,
-		struct iowait_work *wait,
-		struct sdma_txreq *tx,
-		uint seq,
-		bool pkts_sent),
-	void (*wakeup)(struct iowait *wait, int reason),
-	void (*sdma_drained)(struct iowait *wait));
+void iowait_init(struct iowait *wait, u32 tx_limit,
+		 void (*func)(struct work_struct *work),
+		 void (*tidfunc)(struct work_struct *work),
+		 int (*sleep)(struct sdma_engine *sde,
+			      struct iowait_work *wait,
+			      struct sdma_txreq *tx,
+			      uint seq,
+			      bool pkts_sent),
+		 void (*wakeup)(struct iowait *wait, int reason),
+		 void (*sdma_drained)(struct iowait *wait));
 
 /**
  * iowait_schedule() - schedule the default send engine work
@@ -182,10 +179,8 @@ void iowait_init(
  * @wq: workqueue for schedule
  * @cpu: cpu
  */
-static inline bool iowait_schedule(
-	struct iowait *wait,
-	struct workqueue_struct *wq,
-	int cpu)
+static inline bool iowait_schedule(struct iowait *wait,
+				   struct workqueue_struct *wq, int cpu)
 {
 	return !!queue_work_on(cpu, wq, &wait->wait[IOWAIT_IB_SE].iowork);
 }
@@ -196,10 +191,8 @@ static inline bool iowait_schedule(
  * @wq: the work queue
  * @cpu: the cpu
  */
-static inline bool iowait_tid_schedule(
-	struct iowait *wait,
-	struct workqueue_struct *wq,
-	int cpu)
+static inline bool iowait_tid_schedule(struct iowait *wait,
+				       struct workqueue_struct *wq, int cpu)
 {
 	return !!queue_work_on(cpu, wq, &wait->wait[IOWAIT_TID_SE].iowork);
 }
@@ -340,10 +333,8 @@ static inline u16 iowait_get_desc(struct iowait_work *w)
 	struct sdma_txreq *tx = NULL;
 
 	if (!list_empty(&w->tx_head)) {
-		tx = list_first_entry(
-			&w->tx_head,
-			struct sdma_txreq,
-			list);
+		tx = list_first_entry(&w->tx_head, struct sdma_txreq,
+				      list);
 		num_desc = tx->num_desc;
 	}
 	return num_desc;

@@ -225,19 +225,8 @@ int hfi1_ruc_check_hdr(struct hfi1_ibport *ibp, struct hfi1_packet *packet)
 	u32 dlid = packet->dlid;
 	u32 slid = packet->slid;
 	u32 sl = packet->sl;
-	int migrated;
-	u32 bth0, bth1;
-	u16 pkey;
-
-	bth0 = be32_to_cpu(packet->ohdr->bth[0]);
-	bth1 = be32_to_cpu(packet->ohdr->bth[1]);
-	if (packet->etype == RHF_RCV_TYPE_BYPASS) {
-		pkey = hfi1_16B_get_pkey(packet->hdr);
-		migrated = bth1 & OPA_BTH_MIG_REQ;
-	} else {
-		pkey = ib_bth_get_pkey(packet->ohdr);
-		migrated = bth0 & IB_BTH_MIG_REQ;
-	}
+	bool migrated = packet->migrated;
+	u16 pkey = packet->pkey;
 
 	if (qp->s_mig_state == IB_MIG_ARMED && migrated) {
 		if (!packet->grh) {
@@ -560,7 +549,7 @@ do_write:
 	wc.byte_len = wqe->length;
 	wc.qp = &qp->ibqp;
 	wc.src_qp = qp->remote_qpn;
-	wc.slid = rdma_ah_get_dlid(&qp->remote_ah_attr);
+	wc.slid = rdma_ah_get_dlid(&qp->remote_ah_attr) & U16_MAX;
 	wc.sl = rdma_ah_get_sl(&qp->remote_ah_attr);
 	wc.port_num = 1;
 	/* Signal completion event if the solicited bit is set. */
@@ -744,6 +733,20 @@ static inline void hfi1_make_ruc_bth(struct rvt_qp *qp,
 	ohdr->bth[2] = cpu_to_be32(bth2);
 }
 
+/**
+ * hfi1_make_ruc_header_16B - build a 16B header
+ * @qp: the queue pair
+ * @ohdr: a pointer to the destination header memory
+ * @bth0: bth0 passed in from the RC/UC builder
+ * @bth2: bth2 passed in from the RC/UC builder
+ * @middle: non zero implies indicates ahg "could" be used
+ * @ps: the current packet state
+ *
+ * This routine may disarm ahg under these situations:
+ * - packet needs a GRH
+ * - BECN needed
+ * - migration state not IB_MIG_MIGRATED
+ */
 static inline void hfi1_make_ruc_header_16B(struct rvt_qp *qp,
 					    struct ib_other_headers *ohdr,
 					    u32 bth0, u32 bth1, u32 bth2,
@@ -756,19 +759,18 @@ static inline void hfi1_make_ruc_header_16B(struct rvt_qp *qp,
 	u32 slid;
 	u16 pkey = hfi1_get_pkey(ibp, qp->s_pkey_index);
 	u8 l4 = OPA_16B_L4_IB_LOCAL;
-	u8 extra_bytes = hfi1_get_16b_padding((qp->s_hdrwords << 2),
-				   ps->s_txreq->s_cur_size);
+	u8 extra_bytes = hfi1_get_16b_padding(
+				(ps->s_txreq->hdr_dwords << 2),
+				ps->s_txreq->s_cur_size);
 	u32 nwords = SIZE_OF_CRC + ((ps->s_txreq->s_cur_size +
 				 extra_bytes + SIZE_OF_LT) >> 2);
-	u8 becn = 0;
+	bool becn = false;
 
 	if (unlikely(rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH) &&
 	    hfi1_check_mcast(rdma_ah_get_dlid(&qp->remote_ah_attr))) {
 		struct ib_grh *grh;
 		struct ib_global_route *grd =
 			rdma_ah_retrieve_grh(&qp->remote_ah_attr);
-		int hdrwords;
-
 		/*
 		 * Ensure OPA GIDs are transformed to IB gids
 		 * before creating the GRH.
@@ -777,9 +779,10 @@ static inline void hfi1_make_ruc_header_16B(struct rvt_qp *qp,
 			grd->sgid_index = 0;
 		grh = &ps->s_txreq->phdr.hdr.opah.u.l.grh;
 		l4 = OPA_16B_L4_IB_GLOBAL;
-		hdrwords = ps->s_txreq->hdr_dwords - 4;
-		ps->s_txreq->hdr_dwords += hfi1_make_grh(ibp, grh, grd,
-						hdrwords, nwords);
+		ps->s_txreq->hdr_dwords +=
+			hfi1_make_grh(ibp, grh, grd,
+				      ps->s_txreq->hdr_dwords - LRH_16B_DWORDS,
+				      nwords);
 		middle = 0;
 	}
 
@@ -788,6 +791,12 @@ static inline void hfi1_make_ruc_header_16B(struct rvt_qp *qp,
 	else
 		middle = 0;
 
+	if (qp->s_flags & RVT_S_ECN) {
+		qp->s_flags &= ~RVT_S_ECN;
+		/* we recently received a FECN, so return a BECN */
+		becn = true;
+		middle = 0;
+	}
 	if (middle)
 		build_ahg(qp, bth2);
 	else
@@ -795,11 +804,6 @@ static inline void hfi1_make_ruc_header_16B(struct rvt_qp *qp,
 
 	bth0 |= pkey;
 	bth0 |= extra_bytes << 20;
-	if (qp->s_flags & RVT_S_ECN) {
-		qp->s_flags &= ~RVT_S_ECN;
-		/* we recently received a FECN, so return a BECN */
-		becn = 1;
-	}
 	hfi1_make_ruc_bth(qp, ohdr, bth0, bth1, bth2);
 
 	if (!ppd->lid)
@@ -817,6 +821,20 @@ static inline void hfi1_make_ruc_header_16B(struct rvt_qp *qp,
 			  pkey, becn, 0, l4, priv->s_sc);
 }
 
+/**
+ * hfi1_make_ruc_header_9B - build a 9B header
+ * @qp: the queue pair
+ * @ohdr: a pointer to the destination header memory
+ * @bth0: bth0 passed in from the RC/UC builder
+ * @bth2: bth2 passed in from the RC/UC builder
+ * @middle: non zero implies indicates ahg "could" be used
+ * @ps: the current packet state
+ *
+ * This routine may disarm ahg under these situations:
+ * - packet needs a GRH
+ * - BECN needed
+ * - migration state not IB_MIG_MIGRATED
+ */
 static inline void hfi1_make_ruc_header_9B(struct rvt_qp *qp,
 					   struct ib_other_headers *ohdr,
 					   u32 bth0, u32 bth1, u32 bth2,
@@ -835,12 +853,13 @@ static inline void hfi1_make_ruc_header_9B(struct rvt_qp *qp,
 
 	if (unlikely(rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH)) {
 		struct ib_grh *grh = &ps->s_txreq->phdr.hdr.ibh.u.l.grh;
-		int hdrwords = ps->s_txreq->hdr_dwords - 2;
+
 		lrh0 = HFI1_LRH_GRH;
 		ps->s_txreq->hdr_dwords +=
 			hfi1_make_grh(ibp, grh,
 				      rdma_ah_read_grh(&qp->remote_ah_attr),
-				      hdrwords, nwords);
+				      ps->s_txreq->hdr_dwords - LRH_9B_DWORDS,
+				      nwords);
 		middle = 0;
 	}
 	lrh0 |= (priv->s_sc & 0xf) << 12 |
@@ -851,6 +870,12 @@ static inline void hfi1_make_ruc_header_9B(struct rvt_qp *qp,
 	else
 		middle = 0;
 
+	if (qp->s_flags & RVT_S_ECN) {
+		qp->s_flags &= ~RVT_S_ECN;
+		/* we recently received a FECN, so return a BECN */
+		bth1 |= (IB_BECN_MASK << IB_BECN_SHIFT);
+		middle = 0;
+	}
 	if (middle)
 		build_ahg(qp, bth2);
 	else
@@ -858,11 +883,6 @@ static inline void hfi1_make_ruc_header_9B(struct rvt_qp *qp,
 
 	bth0 |= pkey;
 	bth0 |= extra_bytes << 20;
-	if (qp->s_flags & RVT_S_ECN) {
-		qp->s_flags &= ~RVT_S_ECN;
-		/* we recently received a FECN, so return a BECN */
-		bth1 |= (IB_BECN_MASK << IB_BECN_SHIFT);
-	}
 	hfi1_make_ruc_bth(qp, ohdr, bth0, bth1, bth2);
 
 	if (!ppd->lid)
@@ -875,7 +895,8 @@ static inline void hfi1_make_ruc_header_9B(struct rvt_qp *qp,
 			 lrh0,
 			 ps->s_txreq->hdr_dwords + nwords,
 			 opa_get_lid(rdma_ah_get_dlid(&qp->remote_ah_attr), 9B),
-			 slid);
+			 ppd_from_ibp(ibp)->lid |
+				rdma_ah_get_path_bits(&qp->remote_ah_attr));
 }
 
 typedef void (*hfi1_make_ruc_hdr)(struct rvt_qp *qp,
@@ -1006,7 +1027,6 @@ void hfi1_do_send(struct rvt_qp *qp, bool in_thread)
 	ps.ppd = ppd_from_ibp(ps.ibp);
 	ps.in_thread = in_thread;
 	ps.wait = iowait_get_ib_work(&priv->s_iowait);
-	ps.in_thread = in_thread;
 
 	trace_hfi1_rc_do_send(qp, in_thread);
 

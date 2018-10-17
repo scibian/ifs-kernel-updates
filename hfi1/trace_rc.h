@@ -109,18 +109,18 @@ DEFINE_EVENT(hfi1_rc_template, hfi1_rcv_error,
 	     TP_ARGS(qp, psn)
 );
 
-DEFINE_EVENT(
+DEFINE_EVENT(/* event */
 	hfi1_rc_template, hfi1_rc_completion,
 	TP_PROTO(struct rvt_qp *qp, u32 psn),
 	TP_ARGS(qp, psn)
 );
 
-DECLARE_EVENT_CLASS(
+DECLARE_EVENT_CLASS(/* rc_ack */
 	hfi1_rc_ack_template,
 	TP_PROTO(struct rvt_qp *qp, u32 aeth, u32 psn,
 		 struct rvt_swqe *wqe),
 	TP_ARGS(qp, aeth, psn, wqe),
-	TP_STRUCT__entry(
+	TP_STRUCT__entry(/* entry */
 		DD_DEV_ENTRY(dd_from_ibdev(qp->ibqp.device))
 		__field(u32, qpn)
 		__field(u32, aeth)
@@ -129,7 +129,7 @@ DECLARE_EVENT_CLASS(
 		__field(u32, spsn)
 		__field(u32, lpsn)
 	),
-	TP_fast_assign(
+	TP_fast_assign(/* assign */
 		DD_DEV_ASSIGN(dd_from_ibdev(qp->ibqp.device))
 		__entry->qpn = qp->ibqp.qp_num;
 		__entry->aeth = aeth;
@@ -138,7 +138,7 @@ DECLARE_EVENT_CLASS(
 		__entry->spsn = wqe->psn;
 		__entry->lpsn = wqe->lpsn;
 	),
-	TP_printk(
+	TP_printk(/* print */
 		"[%s] qpn 0x%x aeth 0x%x psn 0x%x opcode 0x%x spsn 0x%x lpsn 0x%x",
 		__get_str(dev),
 		__entry->qpn,
@@ -150,7 +150,7 @@ DECLARE_EVENT_CLASS(
 	)
 );
 
-DEFINE_EVENT(
+DEFINE_EVENT(/* do_rc_ack */
 	hfi1_rc_ack_template, hfi1_rc_ack_do,
 	TP_PROTO(struct rvt_qp *qp, u32 aeth, u32 psn,
 		 struct rvt_swqe *wqe),

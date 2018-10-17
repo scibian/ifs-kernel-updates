@@ -56,7 +56,9 @@
 #include <linux/uaccess.h>
 #include <linux/pci.h>
 #include "../hfi1/hfi.h"
+#if !defined (IFS_SLES15)
 #include "compat.h"
+#endif
 
 DEFINE_SRCU(debugfs_srcu);
 
@@ -91,7 +93,7 @@ void hfi1_vnic_cleanup(struct hfi1_devdata *dd)
 {
 }
 EXPORT_SYMBOL(hfi1_vnic_cleanup);
-
+#if !defined(IFS_SLES15)
 /*
  * pci_request_irq - allocate an interrupt line for a PCI device
  * @dev:       PCI device to operate on
@@ -149,7 +151,8 @@ void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id)
 	free_irq(pci_irq_vector(dev, nr), dev_id);
 }
 EXPORT_SYMBOL(pci_free_irq);
-
+#endif
+#if !defined(IFS_RH75) && !defined(IFS_SLES15)
 /**
  * cdev_set_parent() - set the parent kobject for a char device
  * @p: the cdev structure
@@ -166,47 +169,4 @@ void cdev_set_parent(struct cdev *p, struct kobject *kobj)
 }
 EXPORT_SYMBOL(cdev_set_parent);
 
-/*
- * We should only need to wait 100ms after FLR, but some devices take longer.
- * Wait for up to 1000ms for config space to return something other than -1.
- * Intel IGD requires this when an LCD panel is attached.  We read the 2nd
- * dword because VFs don't implement the 1st dword.
- */
-static void pci_flr_wait(struct pci_dev *dev)
-{
-	int i = 0;
-	u32 id;
-
-	do {
-		msleep(100);
-		pci_read_config_dword(dev, PCI_COMMAND, &id);
-	} while (i++ < 10 && id == ~0);
-
-	if (id == ~0)
-		dev_warn(&dev->dev, "Failed to return from FLR\n");
-	else if (i > 1)
-		dev_info(&dev->dev, "Required additional %dms to return from FLR\n",
-			 (i - 1) * 100);
-}
-
-/**
- * pcie_flr - initiate a PCIe function level reset
- *  @dev:        device to reset
- *
- * Initiate a function level reset on @dev.  The caller should ensure the
- * device supports FLR before calling this function, e.g. by using the
- * pcie_has_flr() helper.
- */
-void pcie_flr(struct pci_dev *dev)
-{
-	if (!pci_wait_for_pending_transaction(dev))
-		dev_err(&dev->dev,
-			"timed out waiting for pending transaction; performing function level reset anyway\n");
-
-		pcie_capability_set_word(dev,
-					 PCI_EXP_DEVCTL,
-					 PCI_EXP_DEVCTL_BCR_FLR);
-	pci_flr_wait(dev);
-}
-EXPORT_SYMBOL_GPL(pcie_flr);
-
+#endif

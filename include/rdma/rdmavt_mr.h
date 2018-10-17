@@ -88,12 +88,6 @@ struct rvt_mregion {
 	struct rvt_segarray *map[0];    /* the segments */
 };
 
-struct rvt_mr {
-	struct ib_mr ibmr;
-	struct ib_umem *umem;
-	struct rvt_mregion mr;  /* must be last */
-};
-
 #define RVT_MAX_LKEY_TABLE_BITS 23
 
 struct rvt_lkey_table {

@@ -55,6 +55,7 @@
 #include <linux/mm.h>
 #include <linux/vmalloc.h>
 #include <rdma/opa_addr.h>
+#include <rdma/ib_cache.h>
 
 #include "hfi.h"
 #include "common.h"
@@ -65,6 +66,10 @@
 #include "debugfs.h"
 #include "vnic.h"
 #include "tid_rdma.h"
+#include "fault.h"
+#include "affinity.h"
+
+extern unsigned int selinux_mode;
 
 unsigned int hfi1_lkey_table_size = 16;
 module_param_named(lkey_table_size, hfi1_lkey_table_size, uint,
@@ -315,9 +320,6 @@ const enum ib_wc_opcode ib_hfi1_wc_opcode[] = {
 	[IB_WR_SEND_WITH_IMM] = IB_WC_SEND,
 	[IB_WR_RDMA_READ] = IB_WC_RDMA_READ,
 	[IB_WR_TID_RDMA_READ] = IB_WC_RDMA_READ,
-	[IB_WR_SEND] = IB_WC_SEND,
-	[IB_WR_SEND_WITH_IMM] = IB_WC_SEND,
-	[IB_WR_RDMA_READ] = IB_WC_RDMA_READ,
 	[IB_WR_ATOMIC_CMP_AND_SWP] = IB_WC_COMP_SWAP,
 	[IB_WR_ATOMIC_FETCH_AND_ADD] = IB_WC_FETCH_ADD,
 	[IB_WR_SEND_WITH_INV] = IB_WC_SEND,
@@ -631,8 +633,6 @@ void hfi1_kdeth_eager_rcv(struct hfi1_packet *packet)
 	packet->qp = rvt_lookup_qpn(rdi, &ibp->rvp, qp_num);
 	if (!packet->qp)
 		goto drop_rcu;
-	if (unlikely(hfi1_dbg_fault_opcode(packet->qp, opcode, true)))
-		goto drop_rcu;
 	spin_lock_irqsave(&packet->qp->r_lock, flags);
 	opcode_handler = tid_qp_ok(opcode, packet);
 	if (likely(opcode_handler))
@@ -686,8 +686,6 @@ void hfi1_kdeth_expected_rcv(struct hfi1_packet *packet)
 	rcu_read_lock();
 	packet->qp = rvt_lookup_qpn(rdi, &ibp->rvp, qp_num);
 	if (!packet->qp)
-		goto drop_rcu;
-	if (unlikely(hfi1_dbg_fault_opcode(packet->qp, opcode, true)))
 		goto drop_rcu;
 	spin_lock_irqsave(&packet->qp->r_lock, flags);
 	opcode_handler = tid_qp_ok(opcode, packet);
@@ -776,10 +774,6 @@ static inline void hfi1_handle_packet(struct hfi1_packet *packet,
 			goto unlock_drop;
 
 		if (hfi1_do_pkey_check(packet))
-			goto unlock_drop;
-
-		if (unlikely(hfi1_dbg_fault_opcode(packet->qp, packet->opcode,
-						   true)))
 			goto unlock_drop;
 
 		spin_lock_irqsave(&packet->qp->r_lock, flags);
@@ -892,7 +886,6 @@ void hfi1_wait_kmem(struct rvt_qp *qp)
 		trace_hfi1_qpsleep(qp, RVT_S_WAIT_KMEM);
 		rvt_get_qp(qp);
 	}
-
 }
 
 static int wait_kmem(struct hfi1_ibdev *dev,
@@ -917,9 +910,8 @@ static int wait_kmem(struct hfi1_ibdev *dev,
 	return ret;
 }
 
-static noinline int handle_corrupted_sge(
-	struct sdma_engine *sde,
-	struct verbs_txreq *tx)
+static noinline int handle_corrupted_sge(struct sdma_engine *sde,
+					 struct verbs_txreq *tx)
 {
 	tx->txreq.flags |= SDMA_TXREQ_F_SGE_CORRUPT;
 	return -EINVAL;
@@ -930,10 +922,9 @@ static noinline int handle_corrupted_sge(
  *
  * Add failures will revert the sge cursor
  */
-static noinline int build_verbs_ulp_payload(
-	struct sdma_engine *sde,
-	u32 length,
-	struct verbs_txreq *tx)
+static noinline int build_verbs_ulp_payload(struct sdma_engine *sde,
+					    u32 length,
+					    struct verbs_txreq *tx)
 {
 	struct rvt_sge *sg_list = tx->ss->sg_list;
 	struct rvt_sge sge = tx->ss->sge;
@@ -970,6 +961,27 @@ bail_txadd:
 	return ret;
 }
 
+/**
+ * update_tx_opstats - record stats by opcode
+ * @qp; the qp
+ * @ps: transmit packet state
+ * @plen: the plen in dwords
+ *
+ * This is a routine to record the tx opstats after a
+ * packet has been presented to the egress mechanism.
+ */
+static void update_tx_opstats(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
+			      u32 plen)
+{
+#ifdef CONFIG_DEBUG_FS
+	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+	struct hfi1_opcode_stats_perctx *s = get_cpu_ptr(dd->tx_opstats);
+
+	inc_opstats(plen * 4, &s->stats[ps->opcode]);
+	put_cpu_ptr(s);
+#endif
+}
+
 /*
  * Build the number of DMA descriptors needed to send length bytes of data.
  *
@@ -988,8 +1000,8 @@ static int build_verbs_tx_desc(
 {
 	int ret = 0;
 	struct hfi1_sdma_header *phdr = &tx->phdr;
+	u16 hdrbytes = (tx->hdr_dwords + sizeof(pbc) / 4) << 2;
 	u32 *hdr;
-	u16 hdrbytes = (tx->hdr_dwords + 2) << 2;
 	u8 extra_bytes = 0;
 
 	if (tx->phdr.hdr.hdr_type) {
@@ -1078,7 +1090,7 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	} else {
 		dwords = (len + 3) >> 2;
 	}
-	plen = hdrwords + dwords + 2;
+	plen = hdrwords + dwords + sizeof(pbc) / 4;
 
 	tx = ps->s_txreq;
 	if (!sdma_txreq_built(&tx->txreq)) {
@@ -1093,6 +1105,8 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			else
 				pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
 
+			if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
+				pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
 			pbc = create_pbc(ppd,
 					 pbc,
 					 qp->srate_mbps,
@@ -1106,9 +1120,6 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 				pbc |= (u64)PBC_IHCRC_LKDETH <<
 					PBC_INSERT_HCRC_SHIFT;
 			}
-			if (unlikely(hfi1_dbg_fault_opcode(qp, ps->opcode,
-							   false)))
-				pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
 		}
 		tx->wqe = qp->s_wqe;
 		ret = build_verbs_tx_desc(tx->sde, len, tx, ahg_info, pbc);
@@ -1121,6 +1132,8 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			goto bail_ecomm;
 		return ret;
 	}
+
+	update_tx_opstats(qp, ps, plen);
 	trace_sdma_output_ibhdr(dd_from_ibdev(qp->ibqp.device),
 				&ps->s_txreq->phdr.hdr, ib_is_sc5(sc5));
 	return ret;
@@ -1234,7 +1247,7 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		dwords = (len + 3) >> 2;
 		hdr = (u32 *)&ps->s_txreq->phdr.hdr.ibh;
 	}
-	plen = hdrwords + dwords + 2;
+	plen = hdrwords + dwords + sizeof(pbc) / 4;
 
 	/* only RC/UC use complete */
 	switch (qp->ibqp.qp_type) {
@@ -1259,6 +1272,8 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		else
 			pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
 
+		if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
+			pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
 		pbc = create_pbc(ppd, pbc, qp->srate_mbps, vl, plen);
 
 		/* Update HCRC based on packet opcode */
@@ -1266,8 +1281,6 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			pbc &= ~PBC_INSERT_HCRC_SMASK;
 			pbc |= (u64)PBC_IHCRC_LKDETH << PBC_INSERT_HCRC_SHIFT;
 		}
-		if (unlikely(hfi1_dbg_fault_opcode(qp, ps->opcode, false)))
-			pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
 	}
 	if (cb)
 		iowait_pio_inc(&priv->s_iowait);
@@ -1327,6 +1340,7 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		seg_pio_copy_end(pbuf);
 	}
 
+	update_tx_opstats(qp, ps, plen);
 	trace_pio_output_ibhdr(dd_from_ibdev(qp->ibqp.device),
 			       &ps->s_txreq->phdr.hdr, ib_is_sc5(sc5));
 
@@ -1393,9 +1407,17 @@ int egress_pkey_check(struct hfi1_pportdata *ppd, u32 slid, u16 pkey,
 	int i;
 	int is_user_ctxt_mechanism = (s_pkey_index < 0);
 
-	if (!(ppd->part_enforce & HFI1_PART_ENFORCE_OUT))
-		return 0;
-
+	/*
+	 * If partition checking is not enabled we might bail out.
+	 * Bail out only if it's a kernel context, or it is ia user
+	 * context but we are not doing SELinux mode. 
+	 */
+	if (!(ppd->part_enforce & HFI1_PART_ENFORCE_OUT)) {
+		if (!is_user_ctxt_mechanism)
+			return 0;
+		else if (!selinux_mode)
+			return 0;
+	}
 	/* If SC15, pkey[0:14] must be 0x7fff */
 	if ((sc5 == 0xf) && ((pkey & PKEY_LOW_15_MASK) != PKEY_LOW_15_MASK))
 		goto bad;
@@ -1467,7 +1489,8 @@ static inline send_routine get_send_routine(struct rvt_qp *qp,
 		 */
 		if (piothreshold &&
 		    tx->s_cur_size <= min(piothreshold, qp->pmtu) &&
-		    ((BIT(ps->opcode & OPMASK) & pio_opmask[ps->opcode >> 5])) &&
+		    ((BIT(ps->opcode & OPMASK) &
+		      pio_opmask[ps->opcode >> 5])) &&
 		    iowait_sdma_pending(&priv->s_iowait) == 0 &&
 		    !sdma_txreq_built(&tx->txreq))
 			return dd->process_pio_send;
@@ -1669,7 +1692,7 @@ static int query_port(struct rvt_dev_info *rdi, u8 port_num,
 	props->max_mtu = mtu_to_enum((!valid_ib_mtu(hfi1_max_mtu) ?
 				      4096 : hfi1_max_mtu), IB_MTU_4096);
 	props->active_mtu = !valid_ib_mtu(ppd->ibmtu) ? props->max_mtu :
-		mtu_to_enum(ppd->ibmtu, IB_MTU_2048);
+		mtu_to_enum(ppd->ibmtu, IB_MTU_4096);
 
 	/*
 	 * sm_lid of 0xFFFF needs special handling so that it can
@@ -2046,7 +2069,6 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	struct hfi1_ibport *ibp = &ppd->ibport_data;
 	unsigned i;
 	int ret;
-	size_t lcpysz = IB_DEVICE_NAME_MAX;
 
 	for (i = 0; i < dd->num_pports; i++)
 		init_ibport(ppd + i);
@@ -2074,8 +2096,6 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	 */
 	if (!ib_hfi1_sys_image_guid)
 		ib_hfi1_sys_image_guid = ibdev->node_guid;
-	lcpysz = strlcpy(ibdev->name, class_name(), lcpysz);
-	strlcpy(ibdev->name + lcpysz, "_%d", IB_DEVICE_NAME_MAX - lcpysz);
 	ibdev->owner = THIS_MODULE;
 	ibdev->phys_port_cnt = dd->num_pports;
 #if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
@@ -2088,7 +2108,7 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	ibdev->alloc_hw_stats = alloc_hw_stats;
 	ibdev->get_hw_stats = get_hw_stats;
 #endif
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_SLES15)
 	ibdev->alloc_rdma_netdev = hfi1_vnic_alloc_rn;
 #endif
 	/* keep process mad in the driver */
@@ -2103,7 +2123,6 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	 * Fill in rvt info object.
 	 */
 	dd->verbs_dev.rdi.driver_f.port_callback = hfi1_create_port_files;
-	dd->verbs_dev.rdi.driver_f.get_card_name = get_card_name;
 	dd->verbs_dev.rdi.driver_f.get_pci_dev = get_pci_dev;
 	dd->verbs_dev.rdi.driver_f.check_ah = hfi1_check_ah;
 	dd->verbs_dev.rdi.driver_f.notify_new_ah = hfi1_notify_new_ah;
@@ -2152,11 +2171,11 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	dd->verbs_dev.rdi.driver_f.modify_qp = hfi1_modify_qp;
 	dd->verbs_dev.rdi.driver_f.notify_restart_rc = hfi1_restart_rc;
 	dd->verbs_dev.rdi.driver_f.setup_wqe = hfi1_setup_wqe;
+	dd->verbs_dev.rdi.driver_f.comp_vect_cpu_lookup =
+						hfi1_comp_vect_mappings_lookup;
 
 	/* completeion queue */
-	snprintf(dd->verbs_dev.rdi.dparms.cq_name,
-		 sizeof(dd->verbs_dev.rdi.dparms.cq_name),
-		 "hfi1_cq%d", dd->unit);
+	dd->verbs_dev.rdi.ibdev.num_comp_vectors = dd->comp_vect_possible_cpus;
 	dd->verbs_dev.rdi.dparms.node = dd->node;
 
 	/* misc settings */
@@ -2258,3 +2277,9 @@ void hfi1_cnp_rcv(struct hfi1_packet *packet)
 
 	process_becn(ppd, sl, rlid, lqpn, rqpn, svc_type);
 }
+
+int hfi1_get_verbs_subnet_prefix(struct hfi1_devdata *dd, int port, u64 *subn)
+{
+	return ib_get_cached_subnet_prefix(&dd->verbs_dev.rdi.ibdev, 1, subn);
+}
+

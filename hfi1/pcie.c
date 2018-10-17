@@ -79,6 +79,8 @@ static void tune_pcie_caps(struct hfi1_devdata *);
 int hfi1_pcie_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 {
 	int ret;
+	int aer;
+	u32 data;
 
 	ret = pci_enable_device(pdev);
 	if (ret) {
@@ -130,6 +132,19 @@ int hfi1_pcie_init(struct pci_dev *pdev, const struct pci_device_id *ent)
 	}
 
 	pci_set_master(pdev);
+
+	aer = pci_find_ext_capability(pdev, PCI_EXT_CAP_ID_ERR);
+	if (!aer)
+		goto done;
+	pci_read_config_dword(pdev, aer + PCI_ERR_UNCOR_MASK, &data);
+	if (!(data & PCI_ERR_UNC_UNSUP)) {
+		data |= PCI_ERR_UNC_UNSUP;
+		if (!pci_write_config_dword(pdev, aer + PCI_ERR_UNCOR_MASK,
+					    data))
+			hfi1_early_err(&pdev->dev,
+				       "Masking Unsupported Request error\n");
+	}
+
 	(void)pci_enable_pcie_error_reporting(pdev);
 	goto done;
 
@@ -163,9 +178,6 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 	resource_size_t addr;
 	int ret = 0;
 
-	dd->pcidev = pdev;
-	pci_set_drvdata(pdev, dd);
-
 	addr = pci_resource_start(pdev, 0);
 	len = pci_resource_len(pdev, 0);
 
@@ -186,6 +198,14 @@ int hfi1_pcie_ddinit(struct hfi1_devdata *dd, struct pci_dev *pdev)
 		return -ENOMEM;
 	}
 	dd_dev_info(dd, "UC base1: %p for %x\n", dd->kregbase1, RCV_ARRAY);
+
+	/* verify that reads actually work, save revision for reset check */
+	dd->revision = readq(dd->kregbase1 + CCE_REVISION);
+	if (dd->revision == ~(u64)0) {
+		dd_dev_err(dd, "Cannot read chip CSRs\n");
+		goto nomem;
+	}
+
 	dd->chip_rcv_array_count = readq(dd->kregbase1 + RCV_ARRAY_CNT);
 	dd_dev_info(dd, "RcvArray count: %u\n", dd->chip_rcv_array_count);
 	dd->base2_start  = RCV_ARRAY + dd->chip_rcv_array_count * 8;
@@ -1033,6 +1053,7 @@ int do_pcie_gen3_transition(struct hfi1_devdata *dd)
 	int do_retry, retry_count = 0;
 	int intnum = 0;
 	uint default_pset;
+	uint pset = pcie_pset;
 	u16 target_vector, target_speed;
 	u16 lnkctl2, vendor;
 	u8 div;
@@ -1040,6 +1061,7 @@ int do_pcie_gen3_transition(struct hfi1_devdata *dd)
 	const u8 (*ctle_tunings)[4];
 	uint static_ctle_mode;
 	int return_error = 0;
+	u32 target_width;
 
 	/* PCIe Gen3 is for the ASIC only */
 	if (dd->icode != ICODE_RTL_SILICON)
@@ -1078,6 +1100,9 @@ int do_pcie_gen3_transition(struct hfi1_devdata *dd)
 			    __func__);
 		return 0;
 	}
+
+	/* Previous Gen1/Gen2 bus width */
+	target_width = dd->lbus_width;
 
 	/*
 	 * Do the Gen3 transition.  Steps are those of the PCIe Gen3
@@ -1200,16 +1225,16 @@ retry:
 	 *
 	 * Set Gen3EqPsetReqVec, leave other fields 0.
 	 */
-	if (pcie_pset == UNSET_PSET)
-		pcie_pset = default_pset;
-	if (pcie_pset > 10) {	/* valid range is 0-10, inclusive */
+	if (pset == UNSET_PSET)
+		pset = default_pset;
+	if (pset > 10) {	/* valid range is 0-10, inclusive */
 		dd_dev_err(dd, "%s: Invalid Eq Pset %u, setting to %d\n",
-			   __func__, pcie_pset, default_pset);
-		pcie_pset = default_pset;
+			   __func__, pset, default_pset);
+		pset = default_pset;
 	}
-	dd_dev_info(dd, "%s: using EQ Pset %u\n", __func__, pcie_pset);
+	dd_dev_info(dd, "%s: using EQ Pset %u\n", __func__, pset);
 	pci_write_config_dword(dd->pcidev, PCIE_CFG_REG_PL106,
-			       ((1 << pcie_pset) <<
+			       ((1 << pset) <<
 			PCIE_CFG_REG_PL106_GEN3_EQ_PSET_REQ_VEC_SHIFT) |
 			PCIE_CFG_REG_PL106_GEN3_EQ_EVAL2MS_DISABLE_SMASK |
 			PCIE_CFG_REG_PL106_GEN3_EQ_PHASE23_EXIT_MODE_SMASK);
@@ -1239,10 +1264,10 @@ retry:
 		/* apply static CTLE tunings */
 		u8 pcie_dc, pcie_lf, pcie_hf, pcie_bw;
 
-		pcie_dc = ctle_tunings[pcie_pset][0];
-		pcie_lf = ctle_tunings[pcie_pset][1];
-		pcie_hf = ctle_tunings[pcie_pset][2];
-		pcie_bw = ctle_tunings[pcie_pset][3];
+		pcie_dc = ctle_tunings[pset][0];
+		pcie_lf = ctle_tunings[pset][1];
+		pcie_hf = ctle_tunings[pset][2];
+		pcie_bw = ctle_tunings[pset][3];
 		write_gasket_interrupt(dd, intnum++, 0x0026, 0x0200 | pcie_dc);
 		write_gasket_interrupt(dd, intnum++, 0x0026, 0x0100 | pcie_lf);
 		write_gasket_interrupt(dd, intnum++, 0x0026, 0x0000 | pcie_hf);
@@ -1447,11 +1472,12 @@ retry:
 	dd_dev_info(dd, "%s: new speed and width: %s\n", __func__,
 		    dd->lbus_info);
 
-	if (dd->lbus_speed != target_speed) { /* not target */
+	if (dd->lbus_speed != target_speed ||
+	    dd->lbus_width < target_width) { /* not target */
 		/* maybe retry */
 		do_retry = retry_count < pcie_retry;
-		dd_dev_err(dd, "PCIe link speed did not switch to Gen%d%s\n",
-			   pcie_target, do_retry ? ", retrying" : "");
+		dd_dev_err(dd, "PCIe link speed or width did not match target%s\n",
+			   do_retry ? ", retrying" : "");
 		retry_count++;
 		if (do_retry) {
 			msleep(100); /* allow time to settle */

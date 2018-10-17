@@ -73,7 +73,7 @@ static int program_rcvarray(struct hfi1_filedata *fd, struct tid_user_buf *,
 static int unprogram_rcvarray(struct hfi1_filedata *fd, u32 tidinfo,
 			      struct tid_group **grp);
 static void clear_tid_node(struct hfi1_filedata *fd, struct tid_rb_node *node);
-static u32 find_phys_blocks(struct page **pages, unsigned npages,
+static u32 find_phys_blocks(struct page **pages, unsigned int npages,
 			    struct tid_pageset *list);
 
 static struct mmu_rb_ops tid_rb_ops = {
@@ -168,6 +168,7 @@ int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
 		fd->tid_limit = uctxt->expected_count;
 	}
 	spin_unlock(&fd->tid_lock);
+
 	return ret;
 }
 
@@ -489,7 +490,6 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 				hfi1_cdbg(TID,
 					  "Failed to program RcvArray entries %d",
 					  ret);
-				ret = -EFAULT;
 				goto unlock;
 			} else if (ret > 0) {
 				if (grp->used == grp->size)
@@ -1087,4 +1087,3 @@ static void tid_rb_remove(void *arg, struct mmu_rb_node *node)
 
 	cacheless_tid_rb_remove(fdata, tnode);
 }
-

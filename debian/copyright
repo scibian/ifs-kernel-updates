@@ -3,8 +3,8 @@ Upstream-Name: ifs-kernel-updates
 Source: IntelOPA-IFS release at http://www.intel.com
 
 Files: *
-Copyright: 2004-2017 Intel Corporation
-		   Many others
+Copyright: 2004-2018 Intel Corporation
+           Many others
 License: GPL-2
 
 Files: debian/*

@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -48,11 +48,16 @@
 #include "trace.h"
 #include "qp.h"
 
+#define IB_BTHE_E                 BIT(IB_BTHE_E_SHIFT)
+
+#define OPFN_CODE(code) BIT((code - 1))
+#define OPFN_MASK(code) OPFN_CODE(STL_VERBS_EXTD_##code)
+
 struct hfi1_opfn_type {
-	bool (*request)(struct rvt_qp *, u64 *);
-	bool (*response)(struct rvt_qp *, u64 *);
-	bool (*reply)(struct rvt_qp *, u64);
-	void (*error)(struct rvt_qp *);
+	bool (*request)(struct rvt_qp *qp, u64 *data);
+	bool (*response)(struct rvt_qp *qp, u64 *data);
+	bool (*reply)(struct rvt_qp *qp, u64 data);
+	void (*error)(struct rvt_qp *qp);
 };
 
 struct hfi1_opfn_type hfi1_opfn_handlers[STL_VERBS_EXTD_MAX] = {
@@ -60,6 +65,13 @@ struct hfi1_opfn_type hfi1_opfn_handlers[STL_VERBS_EXTD_MAX] = {
 	{ tid_rdma_conn_req, tid_rdma_conn_resp, tid_rdma_conn_reply,
 	  tid_rdma_conn_error },
 };
+
+static void opfn_schedule_conn_request(struct rvt_qp *qp);
+
+static bool hfi1_opfn_extended(u32 bth1)
+{
+	return !!(bth1 & IB_BTHE_E);
+}
 
 void opfn_conn_request(struct rvt_qp *qp)
 {
@@ -148,7 +160,7 @@ void opfn_send_conn_request(struct work_struct *work)
  * to a different workqueue to avoid double locking QP s_lock in call to
  * ib_post_send in opfn_conn_request
  */
-void opfn_schedule_conn_request(struct rvt_qp *qp)
+static void opfn_schedule_conn_request(struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 
@@ -278,8 +290,7 @@ void opfn_init(struct rvt_qp *qp, struct ib_qp_attr *attr, int attr_mask)
 		struct tid_rdma_params *local = &priv->tid_rdma.local;
 
 		if (attr_mask & IB_QP_TIMEOUT)
-			priv->tid_retry_timeout_jiffies =
-				HFI1_TID_RETRY_TO_FACTOR * qp->timeout_jiffies;
+			priv->tid_retry_timeout_jiffies = qp->timeout_jiffies;
 		if (qp->pmtu == enum_to_mtu(OPA_MTU_4096) ||
 		    qp->pmtu == enum_to_mtu(OPA_MTU_8192)) {
 			tid_rdma_opfn_init(qp, local);

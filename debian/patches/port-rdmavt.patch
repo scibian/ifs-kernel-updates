@@ -1,7 +1,7 @@
 Description: Port rdmavt to kernel 4.9.0
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2018-06-29>
+Last-Update: <2018-10-17>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
@@ -15,138 +15,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  else
  #normal makefile
---- a/compat/compat.h
-+++ b/compat/compat.h
-@@ -44,24 +44,16 @@
-  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-  *
-  */
--#if !defined(RH74_COMPAT_H)
--#define RH74_COMPAT_H
-+#if !defined(DEB9_COMPAT_H)
-+#define DEB9_COMPAT_H
- 
- #include "compat_common.h"
- 
--#define __GFP_RECLAIM	(__GFP_WAIT)
- #define OPA_CAP_MASK3_IsEthOnFabricSupported      BIT(13)
- 
- #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
- #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
- 
--#define PCI_IRQ_LEGACY          BIT(0) /* allow legacy interrupts */
--#define PCI_IRQ_MSI             BIT(1) /* allow MSI interrupts */
--#define PCI_IRQ_MSIX            BIT(2) /* allow MSI-X interrupts */
--#define PCI_IRQ_AFFINITY        BIT(3) /* auto-assign affinity */
--#define PCI_IRQ_ALL_TYPES \
--(PCI_IRQ_LEGACY | PCI_IRQ_MSI | PCI_IRQ_MSIX)
--
- struct hfi1_msix_entry;
- struct hfi1_devdata;
- 
-@@ -78,101 +70,7 @@
- };
- 
- void pcie_flr(struct pci_dev *dev);
--int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
--			  unsigned int max_vecs, unsigned int flags);
--void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
--		struct hfi1_msix_entry *hfi1_msix_entry);
--int bitmap_print_to_pagebuf(bool list, char *buf,
--			    const unsigned long *maskp, int nmaskbits);
- struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
- 
--int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
--__acquires(&debugfs_srcu);
--
--void debugfs_use_file_finish(int srcu_idx) __releases(&debugfs_srcu);
--struct ib_umem *ib_umem_get_hfi(struct ib_ucontext *context, unsigned long addr,
--				size_t size, int access, int dmasync);
--
--static inline long compat_get_user_pages(unsigned long start,
--					 unsigned long nr_pages,
--					 unsigned int gup_flags,
--					 struct page **pages,
--					 struct vm_area_struct **vmas)
--{
--	return get_user_pages(current, current->mm, start,
--			      nr_pages, 1, 1, pages, vmas);
--}
--
--#define get_user_pages(start, nr_pages, gup_flags, pages, vmas) \
--	compat_get_user_pages(start, nr_pages, gup_flags, pages, vmas)
--
--static inline int simple_positive(struct dentry *dentry)
--{
--	return !d_unhashed(dentry) && dentry->d_inode;
--}
--
--static inline void hfi1_enable_intx(struct pci_dev *pdev)
--{
--	/* first, turn on INTx */
--	pci_intx(pdev, 1);
--	/* then turn off MSI-X */
--	pci_disable_msix(pdev);
--}
--
--static inline void pci_free_irq_vectors(struct pci_dev *dev)
--{
--	pci_disable_msix(dev);
--	pci_disable_msi(dev);
--}
--
--/* Helpers to hide struct msi_desc implementation details */
--#define msi_desc_to_dev(desc)           ((desc)->dev)
--#define dev_to_msi_list(dev)            (&(dev)->msi_list)
--#define first_msi_entry(dev)            \
--	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
--#define for_each_msi_entry(desc, dev)   \
--	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
--
--#ifdef CONFIG_PCI_MSI
--/**
-- * pci_irq_vector - return Linux IRQ number of a device vector
-- * @dev: PCI device to operate on
-- * @nr: device-relative interrupt vector index (0-based).
-- */
--static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
--{
--	if (dev->msix_enabled) {
--		struct msi_desc *entry;
--		int i = 0;
--
--		for_each_msi_entry(entry, dev) {
--			if (i == nr)
--				return entry->irq;
--			i++;
--		}
--		WARN_ON_ONCE(1);
--		return -EINVAL;
--	}
--
--	if (dev->msi_enabled) {
--		struct msi_desc *entry = first_msi_entry(dev);
--
--		if (WARN_ON_ONCE(nr >= entry->nvec_used))
--			return -EINVAL;
--	} else {
--		if (WARN_ON_ONCE(nr > 0))
--			return -EINVAL;
--	}
--
--	return dev->irq + nr;
--}
--#else
--static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
--{
--	if (WARN_ON_ONCE(nr > 0))
--		return -EINVAL;
--	return dev->irq;
--}
--#endif
- 
--#endif //RH74_COMPAT
-+#endif //DEB9_COMPAT
 --- a/rdmavt/mr.c
 +++ b/rdmavt/mr.c
 @@ -406,7 +406,8 @@
@@ -171,105 +39,142 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				      BIT(umem->page_shift));
 --- a/rdmavt/vt.c
 +++ b/rdmavt/vt.c
-@@ -784,7 +784,8 @@
- 	}
+@@ -777,7 +777,8 @@
+ 	spin_lock_init(&rdi->n_cqs_lock);
  
  	/* DMA Operations */
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
++	&& !defined(IFS_DEB9)
+ 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
+ #elif defined(IFS_RH75)
+ 	rdi->ibdev.dev.device_rh->dma_ops =
+--- a/compat/compat_common.h
++++ b/compat/compat_common.h
+@@ -404,7 +404,7 @@
+ }
+ 
+ #endif /* NEED_IB_HELPER_FUNCTIONS */
+-#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15))
++#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_DEB9))
+ 
+ #if NEED_KTHREAD_HELPER_FUNCTIONS
+ static inline bool kthread_queue_work(struct kthread_worker *worker,
+@@ -454,7 +454,9 @@
+ 	flush_kthread_worker(worker);
+ 	return worker;
+ }
++#endif
+ 
++#if !defined(IFS_DEB9)
+ static inline void kthread_destroy_worker(struct kthread_worker *worker)
+ {
+ 	if (!worker)
+--- a/hfi1/hfi.h
++++ b/hfi1/hfi.h
+@@ -657,7 +657,8 @@
+ #define MAX_NAME_SIZE 64
+ struct hfi1_msix_entry {
+ 	enum irq_type type;
+-#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)
++#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3) \
++	|| defined(IFS_DEB9)
+ 	struct msix_entry msix;
+ #endif
+ 	int irq;
+@@ -2393,7 +2394,8 @@
+ 
+ static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
+ {
 -#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 +#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
 +	&& !defined(IFS_DEB9)
- 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
- #else
- 	rdi->ibdev.dma_ops =
---- a/compat/compat_common.h
-+++ b/compat/compat_common.h
-@@ -85,7 +85,9 @@
- #define RDMA_CORE_CAP_ETH_AH            0x00002000
- #define RDMA_CORE_CAP_OPA_AH            0x00000000
+ 	const struct ib_global_route *grh = rdma_ah_read_grh(attr);
+ 	u32 dlid = rdma_ah_get_dlid(attr);
  
-+#if !defined(IFS_DEB9)
- #define kthread_init_work(work, fn) init_kthread_work(work, fn)
-+#endif
+--- a/compat/compat.h
++++ b/compat/compat.h
+@@ -44,12 +44,11 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  *
+  */
+-#if !defined(RH75_COMPAT_H)
+-#define RH75_COMPAT_H
++#if !defined(DEB9_COMPAT_H)
++#define DEB9_COMPAT_H
  
- #define rb_root_cached			rb_root
- #define RB_ROOT_CACHED			RB_ROOT
-@@ -383,6 +385,7 @@
- 	return RDMA_AH_ATTR_TYPE_IB;
- }
+ #include "compat_common.h"
  
-+#if !defined(IFS_DEB9)
- static inline bool kthread_queue_work(struct kthread_worker *worker,
- 				      struct kthread_work *work)
+-#define __GFP_RECLAIM	(__GFP_WAIT)
+ 
+ #define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
+ 
+@@ -62,49 +61,14 @@
+ 
+ void pcie_flr(struct pci_dev *dev);
+ 
+-void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
+-		struct hfi1_msix_entry *hfi1_msix_entry);
+-int bitmap_print_to_pagebuf(bool list, char *buf,
+-			    const unsigned long *maskp, int nmaskbits);
+-int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
+-__acquires(&debugfs_srcu);
+-
+-void debugfs_use_file_finish(int srcu_idx) __releases(&debugfs_srcu);
+-struct ib_umem *ib_umem_get_hfi(struct ib_ucontext *context, unsigned long addr,
+-				size_t size, int access, int dmasync);
+-
+-static inline long compat_get_user_pages(unsigned long start,
+-					 unsigned long nr_pages,
+-					 unsigned int gup_flags,
+-					 struct page **pages,
+-					 struct vm_area_struct **vmas)
+-{
+-	return get_user_pages(current, current->mm, start,
+-			      nr_pages, 1, 1, pages, vmas);
+-}
+-
+-#define get_user_pages(start, nr_pages, gup_flags, pages, vmas) \
+-	compat_get_user_pages(start, nr_pages, gup_flags, pages, vmas)
+-
+-static inline int simple_positive(struct dentry *dentry)
+-{
+-	return !d_unhashed(dentry) && dentry->d_inode;
+-}
++struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
+ 
+ static inline void hfi1_enable_intx(struct pci_dev *pdev)
  {
-@@ -439,5 +442,6 @@
- 	kthread_stop(worker->task);
- 	kfree(worker);
+-	/* first, turn on INTx */
+-	pci_intx(pdev, 1);
+-	/* then turn off MSI-X */
+-	pci_disable_msix(pdev);
++       /* first, turn on INTx */
++       pci_intx(pdev, 1);
++       /* then turn off MSI-X */
++       pci_disable_msix(pdev);
  }
-+#endif
  
- #endif
---- a/rdmavt/compat_common.c
-+++ b/rdmavt/compat_common.c
-@@ -203,7 +203,7 @@
- 		dev_err(&dev->dev,
- 			"timed out waiting for pending transaction; performing function level reset anyway\n");
- 
--		pcie_capability_set_word(dev,
-+	pcie_capability_set_word(dev,
- 					 PCI_EXP_DEVCTL,
- 					 PCI_EXP_DEVCTL_BCR_FLR);
- 	pci_flr_wait(dev);
+-/* Helpers to hide struct msi_desc implementation details */
+-#define msi_desc_to_dev(desc)           ((desc)->dev)
+-#define dev_to_msi_list(dev)            (&(dev)->msi_list)
+-#define first_msi_entry(dev)            \
+-	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
+-#define for_each_msi_entry(desc, dev)   \
+-	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
+-
+-#endif //RH75_COMPAT
++#endif //DEB9_COMPAT
 --- a/rdmavt/compat.c
 +++ b/rdmavt/compat.c
-@@ -63,7 +63,7 @@
- {
- 	struct ib_ah *ah;
+@@ -58,92 +58,204 @@
+ #include "../hfi1/hfi.h"
+ #include "compat.h"
  
--	ah = pd->device->create_ah(pd, ah_attr, NULL);
-+	ah = pd->device->create_ah(pd, ah_attr);
- 
- 	if (!IS_ERR(ah)) {
- 		ah->device  = pd->device;
-@@ -76,128 +76,7 @@
- }
- EXPORT_SYMBOL(rdma_create_ah);
- 
--int pci_alloc_irq_vectors(struct pci_dev *pcidev, unsigned int min_vecs,
--			  unsigned int max_vecs, unsigned int flags)
--{
--	int i, nvec;
--	struct hfi1_msix_entry *entries;
--
--	if (min_vecs != 1 || max_vecs < min_vecs)
--		return -ERANGE;
--
--	nvec = max_vecs;
--
--	if (flags & PCI_IRQ_MSIX) {
--		entries = kcalloc(nvec, sizeof(*entries), GFP_KERNEL);
--		if (!entries)
--			return -ENOMEM;
--
--		/* 1-1 MSI-X entry assignment */
--		for (i = 0; i < max_vecs; i++)
--			entries[i].msix.entry = i;
--
--		msix_setup(pcidev, pcidev->msix_cap, &nvec, entries);
--		return nvec;
--	}
--
--	if (flags & PCI_IRQ_LEGACY) {
--		hfi1_enable_intx(pcidev);
--		return 1;
--	}
--
--	return -ENOSPC;
--}
--EXPORT_SYMBOL(pci_alloc_irq_vectors);
--
 -void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
 -		struct hfi1_msix_entry *hfi1_msix_entry)
--{
++struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr)
+ {
 -	int ret;
 -	int nvec = *msixcnt;
 -	struct msix_entry *msix_entry;
@@ -285,31 +190,61 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -		ret = -ENOMEM;
 -		goto do_intx;
 -	}
--
++        struct ib_ah *ah;
+ 
 -	for (i = 0; i < nvec; i++)
 -		msix_entry[i] = hfi1_msix_entry[i].msix;
++        ah = pd->device->create_ah(pd, ah_attr);
  
 -	ret = pci_enable_msix_range(pcidev, msix_entry, 1, nvec);
 -	if (ret < 0)
 -		goto free_msix_entry;
 -	nvec = ret;
--
++        if (!IS_ERR(ah)) {
++                ah->device  = pd->device;
++                ah->pd      = pd;
++                ah->uobject = NULL;
++                atomic_inc(&pd->usecnt);
++        }
+ 
 -	for (i = 0; i < nvec; i++)
 -		hfi1_msix_entry[i].msix = msix_entry[i];
--
++        return ah;
++}
++EXPORT_SYMBOL(rdma_create_ah);
+ 
 -	kfree(msix_entry);
 -	*msixcnt = nvec;
 -	return;
--
++//DMA
++/*
++ * The following functions implement driver specific replacements
++ * for the ib_dma_*() functions.
++ *
++ * These functions return kernel virtual addresses instead of
++ * device bus addresses since the driver uses the CPU to copy
++ * data instead of using hardware DMA.
++ */
++static int rvt_mapping_error(struct ib_device *dev, u64 dma_addr)
++{
++        return dma_addr == BAD_DMA_ADDRESS;
++}
+ 
 -free_msix_entry:
 -	kfree(msix_entry);
--
++static u64 rvt_dma_map_single(struct ib_device *dev, void *cpu_addr,
++                              size_t size, enum dma_data_direction direction)
++{
++        if (WARN_ON(!valid_dma_direction(direction)))
++                return BAD_DMA_ADDRESS;
+ 
 -do_intx:
 -	*msixcnt = 0;
 -	hfi1_enable_intx(pcidev);
--}
++        return (u64)cpu_addr;
+ }
 -EXPORT_SYMBOL(msix_setup);
--
+ 
 -/**
 - * debugfs_use_file_start - mark the beginning of file data access
 - * @dentry: the dentry object whose data is being accessed.
@@ -330,72 +265,181 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 - * Regardless of the return code, any call to
 - * debugfs_use_file_start() must be followed by a matching call
 - * to debugfs_use_file_finish().
-- */
++static void rvt_dma_unmap_single(struct ib_device *dev, u64 addr, size_t size,
++                                 enum dma_data_direction direction)
++{
++        /* This is a stub, nothing to be done here */
++}
++
++static u64 rvt_dma_map_page(struct ib_device *dev, struct page *page,
++                            unsigned long offset, size_t size,
++                            enum dma_data_direction direction)
++{        u64 addr;
++
++        if (WARN_ON(!valid_dma_direction(direction)))
++                return BAD_DMA_ADDRESS;
++
++        addr = (u64)page_address(page);
++        if (addr)
++                addr += offset;
++
++        return addr;
++}
++
++static void rvt_dma_unmap_page(struct ib_device *dev, u64 addr, size_t size,
++                               enum dma_data_direction direction)
++{
++        /* This is a stub, nothing to be done here */
++}
++
++static int rvt_map_sg(struct ib_device *dev, struct scatterlist *sgl,
++                      int nents, enum dma_data_direction direction)
++{
++        struct scatterlist *sg;
++        u64 addr;
++        int i;        int ret = nents;
++
++        if (WARN_ON(!valid_dma_direction(direction)))
++                return 0;
++
++        for_each_sg(sgl, sg, nents, i) {
++                addr = (u64)page_address(sg_page(sg));
++                if (!addr) {
++                        ret = 0;
++                        break;
++                }
++                sg->dma_address = addr + sg->offset;
++                #ifdef CONFIG_NEED_SG_DMA_LENGTH
++                sg->dma_length = sg->length;
++                #endif
++        }
++        return ret;
++}
++
++static void rvt_unmap_sg(struct ib_device *dev,
++                         struct scatterlist *sg, int nents,
++                         enum dma_data_direction direction)
++{
++        /* This is a stub, nothing to be done here */}
++
++static int rvt_map_sg_attrs(struct ib_device *dev, struct scatterlist *sgl,
++                            int nents, enum dma_data_direction direction,
++                            unsigned long attrs)
++{
++        return rvt_map_sg(dev, sgl, nents, direction);
++}
++
++static void rvt_unmap_sg_attrs(struct ib_device *dev,
++                               struct scatterlist *sg, int nents,
++                               enum dma_data_direction direction,
++                               unsigned long attrs)
++{
++        return rvt_unmap_sg(dev, sg, nents, direction);
++}
++
++static void rvt_sync_single_for_cpu(struct ib_device *dev, u64 addr,
++                                    size_t size, enum dma_data_direction dir)
++{
++}
++
++static void rvt_sync_single_for_device(struct ib_device *dev, u64 addr,
++                                       size_t size,                                       enum dma_data_direction dir)
++{
++}
++
++static void *rvt_dma_alloc_coherent(struct ib_device *dev, size_t size,
++                                    u64 *dma_handle, gfp_t flag)
++{
++        struct page *p;
++        void *addr = NULL;
++
++        p = alloc_pages(flag, get_order(size));
++        if (p)
++                addr = page_address(p);
++        if (dma_handle)
++                *dma_handle = (u64)addr;
++        return addr;
++}
++
++static void rvt_dma_free_coherent(struct ib_device *dev, size_t size,
++                                  void *cpu_addr, u64 dma_handle)
++{
++        free_pages((unsigned long)cpu_addr, get_order(size));
++}
++
++/*
++ * We should only need to wait 100ms after FLR, but some devices take longer.
++ * Wait for up to 1000ms for config space to return something other than -1.
++ * Intel IGD requires this when an LCD panel is attached.  We read the 2nd
++ * dword because VFs don't implement the 1st dword.
+  */
 -int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
 -	__acquires(&debugfs_srcu)
--{
++static void pci_flr_wait(struct pci_dev *dev)
+ {
 -	*srcu_idx = srcu_read_lock(&debugfs_srcu);
 -	barrier();
 -	if (d_unlinked(dentry))
 -		return -EIO;
 -	return 0;
--}
++        int i = 0;
++        u32 id;
++
++        do {
++                msleep(100);
++                pci_read_config_dword(dev, PCI_COMMAND, &id);
++        } while (i++ < 10 && id == ~0);
++
++        if (id == ~0)
++                dev_warn(&dev->dev, "Failed to return from FLR\n");
++        else if (i > 1)
++                dev_info(&dev->dev, "Required additional %dms to return from FLR\n",
++                         (i - 1) * 100);
+ }
 -EXPORT_SYMBOL(debugfs_use_file_start);
--
--/**
+ 
+ /**
 - * debugfs_use_file_finish - mark the end of file data access
 - * @srcu_idx: the SRCU index "created" by a former call to
 - *            debugfs_use_file_start().
-- *
++ * pcie_flr - initiate a PCIe function level reset
++ *  @dev:        device to reset
+  *
 - * Allow any ongoing concurrent call into debugfs_remove() or
 - * debugfs_remove_recursive() blocked by a former call to
 - * debugfs_use_file_start() to proceed and return to its caller.
-- */
++ * Initiate a function level reset on @dev.  The caller should ensure the
++ * device supports FLR before calling this function, e.g. by using the
++ * pcie_has_flr() helper.
+  */
 -void debugfs_use_file_finish(int srcu_idx) __releases(&debugfs_srcu)
--{
++void pcie_flr(struct pci_dev *dev)
+ {
 -	srcu_read_unlock(&debugfs_srcu, srcu_idx);
--}
++	if (!pci_wait_for_pending_transaction(dev)) {
++                dev_err(&dev->dev,
++                        "timed out waiting for pending transaction; performing function level reset anyway\n");
++	}
++		pcie_capability_set_word(dev,
++								 PCI_EXP_DEVCTL,
++								 PCI_EXP_DEVCTL_BCR_FLR);
++        pci_flr_wait(dev);
+ }
 -EXPORT_SYMBOL(debugfs_use_file_finish);
- 
- //DMA
- /*
-@@ -285,7 +164,7 @@
- 
- static int rvt_map_sg_attrs(struct ib_device *dev, struct scatterlist *sgl,
- 			    int nents, enum dma_data_direction direction,
--			    struct dma_attrs *attrs)
-+			    unsigned long attrs)
- {
- 	return rvt_map_sg(dev, sgl, nents, direction);
- }
-@@ -293,7 +172,7 @@
- static void rvt_unmap_sg_attrs(struct ib_device *dev,
- 			       struct scatterlist *sg, int nents,
- 			       enum dma_data_direction direction,
--			       struct dma_attrs *attrs)
-+			       unsigned long attrs)
- {
- 	return rvt_unmap_sg(dev, sg, nents, direction);
- }
---- a/hfi1/hfi.h
-+++ b/hfi1/hfi.h
-@@ -656,7 +656,8 @@
- #define MAX_NAME_SIZE 64
- struct hfi1_msix_entry {
- 	enum irq_type type;
--#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)
-+#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3) \
-+	|| defined(IFS_DEB9)
- 	struct msix_entry msix;
- #endif
- 	int irq;
-@@ -2385,7 +2386,8 @@
- 
- static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
- {
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- 	const struct ib_global_route *grh = rdma_ah_read_grh(attr);
- 	u32 dlid = rdma_ah_get_dlid(attr);
- 
++EXPORT_SYMBOL_GPL(pcie_flr);
++
++struct ib_dma_mapping_ops rvt_default_dma_mapping_ops = {
++        .mapping_error = rvt_mapping_error,
++        .map_single = rvt_dma_map_single,
++        .unmap_single = rvt_dma_unmap_single,
++        .map_page = rvt_dma_map_page,
++        .unmap_page = rvt_dma_unmap_page,
++        .map_sg = rvt_map_sg,
++        .unmap_sg = rvt_unmap_sg,
++        .map_sg_attrs = rvt_map_sg_attrs,
++        .unmap_sg_attrs = rvt_unmap_sg_attrs,
++        .sync_single_for_cpu = rvt_sync_single_for_cpu,
++        .sync_single_for_device = rvt_sync_single_for_device,
++        .alloc_coherent = rvt_dma_alloc_coherent,
++        .free_coherent = rvt_dma_free_coherent
++};

@@ -3,7 +3,7 @@ Description: Prepare Makefile for porting the modules
  in sequence. Define IFS_DEB9 instead of IFS_RH74.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2018-06-29>
+Last-Update: <2018-10-17>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
@@ -12,7 +12,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  ifneq ($(KERNELRELEASE),)
  #kbuild part of makefile
  
--CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_RH74
+-CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_RH75
 -obj-y := rdmavt/ hfi1/ ib_qib/
 +CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_DEB9
 +obj-y :=

@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016-2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -132,7 +132,5 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 	      struct hfi1_ctxtdata *rcd);
 struct rvt_swqe *do_rc_completion(struct rvt_qp *qp, struct rvt_swqe *wqe,
 				  struct hfi1_ibport *ibp);
-void rdma_seq_err(struct rvt_qp *qp, struct hfi1_ibport *ibp, u32 psn,
-		  struct hfi1_ctxtdata *rcd);
 
 #endif /* HFI1_RC_H */

@@ -1,6 +1,0 @@
-# tEH is a false positive
-kmod-ifs-kernel-updates-4.9.0-6-amd64: spelling-error-in-binary lib/modules/4.9.0-6-amd64/updates/ifs-kernel-updates/hfi1/hfi1.ko tEH the
-# ment is a false positive
-kmod-ifs-kernel-updates-4.9.0-6-amd64: spelling-error-in-binary lib/modules/4.9.0-6-amd64/updates/ifs-kernel-updates/hfi1/hfi1.ko ment meant
-# package name has kernel version and upstream version
-kmod-ifs-kernel-updates-4.9.0-6-amd64: package-has-long-file-name

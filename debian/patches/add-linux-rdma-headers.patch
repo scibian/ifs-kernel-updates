@@ -1,9 +1,9 @@
 Description: Add headers from debian kernel that will later be modified.
  Adds kernel headers that need to be modified for the OPA build. The source was
- linux-3.16.39. Modification will be performed by sucessive patches.
+ linux-3.16.56. Modification will be performed by sucessive patches.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2017-12-14>
+Last-Update: <2018-05-29>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- /dev/null

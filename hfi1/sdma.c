@@ -856,7 +856,7 @@ struct sdma_engine *sdma_select_user_engine(struct hfi1_devdata *dd,
 {
 	struct sdma_rht_node *rht_node;
 	struct sdma_engine *sde = NULL;
-	const struct cpumask *current_mask = tsk_cpus_allowed(current);
+	const struct cpumask *current_mask = &current->cpus_allowed;
 	unsigned long cpu_id;
 
 	/*
@@ -1083,15 +1083,11 @@ out_free:
 
 ssize_t sdma_get_cpu_to_sde_map(struct sdma_engine *sde, char *buf)
 {
-	int n;
 	mutex_lock(&process_to_sde_mutex);
 	if (cpumask_empty(&sde->cpu_mask))
 		snprintf(buf, PAGE_SIZE, "%s\n", "empty");
-	else {
-		n = cpulist_scnprintf(buf, PAGE_SIZE - 2, &sde->cpu_mask);
-		buf[n++] = '\n';
-		buf[n] = '\0';
-	}
+	else
+		cpumap_print_to_pagebuf(true, buf, &sde->cpu_mask);
 	mutex_unlock(&process_to_sde_mutex);
 	return strnlen(buf, PAGE_SIZE);
 }
@@ -1285,13 +1281,15 @@ bail:
 	return -ENOMEM;
 }
 
-/*
- * Clean up allocated memory.
+/**
+ * sdma_clean()  Clean up allocated memory
+ * @dd:          struct hfi1_devdata
+ * @num_engines: num sdma engines
  *
- * This routine is can be called regardless of the success of sdma_init()
- *
+ * This routine can be called regardless of the success of
+ * sdma_init()
  */
-static void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
+void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 {
 	size_t i;
 	struct sdma_engine *sde;
@@ -1401,6 +1399,13 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		return ret;
 
 	idle_cnt = ns_to_cclock(dd, idle_cnt);
+	if (idle_cnt)
+		dd->default_desc1 =
+			SDMA_DESC1_HEAD_TO_HOST_FLAG;
+	else
+		dd->default_desc1 =
+			SDMA_DESC1_INT_REQ_FLAG;
+
 	if (!sdma_desct_intr)
 		sdma_desct_intr = SDMA_DESC_INTR;
 
@@ -1444,13 +1449,6 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 
 		sde->tail_csr =
 			get_kctxt_csr_addr(dd, this_idx, SD(TAIL));
-
-		if (idle_cnt)
-			dd->default_desc1 =
-				SDMA_DESC1_HEAD_TO_HOST_FLAG;
-		else
-			dd->default_desc1 =
-				SDMA_DESC1_INT_REQ_FLAG;
 
 		tasklet_init(&sde->sdma_hw_clean_up_task, sdma_hw_clean_up_task,
 			     (unsigned long)sde);
@@ -1632,7 +1630,6 @@ void sdma_exit(struct hfi1_devdata *dd)
 		 */
 		sdma_finalput(&sde->state);
 	}
-	sdma_clean(dd, dd->num_sdma);
 }
 
 /*
@@ -2511,7 +2508,8 @@ update_tail:
 	total_count = submit_count + flush_count;
 	if (wait) {
 		iowait_sdma_add(iowait_ioww_to_iow(wait), total_count);
-		iowait_starve_clear(submit_count > 0, iowait_ioww_to_iow(wait));
+		iowait_starve_clear(submit_count > 0,
+				    iowait_ioww_to_iow(wait));
 	}
 	if (tail != INVALID_TAIL)
 		sdma_update_tail(sde, tail);

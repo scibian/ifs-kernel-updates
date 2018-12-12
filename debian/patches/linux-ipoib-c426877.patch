@@ -27,9 +27,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -240,7 +240,7 @@ struct ipoib_cm_tx {
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -240,7 +240,7 @@
  	struct net_device   *dev;
  	struct ipoib_neigh  *neigh;
  	struct ipoib_path   *path;
@@ -38,7 +38,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	unsigned	     tx_head;
  	unsigned	     tx_tail;
  	unsigned long	     flags;
-@@ -506,6 +506,33 @@ int ipoib_mcast_stop_thread(struct net_d
+@@ -506,6 +506,33 @@
  void ipoib_mcast_dev_down(struct net_device *dev);
  void ipoib_mcast_dev_flush(struct net_device *dev);
  
@@ -72,9 +72,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #ifdef CONFIG_INFINIBAND_IPOIB_DEBUG
  struct ipoib_mcast_iter *ipoib_mcast_iter_init(struct net_device *dev);
  int ipoib_mcast_iter_next(struct ipoib_mcast_iter *iter);
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_cm.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_cm.c
-@@ -694,14 +694,12 @@ repost:
+--- a/ib_ipoib/ipoib_cm.c
++++ b/ib_ipoib/ipoib_cm.c
+@@ -693,14 +693,12 @@
  static inline int post_send(struct ipoib_dev_priv *priv,
  			    struct ipoib_cm_tx *tx,
  			    unsigned int wr_id,
@@ -91,7 +91,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	priv->tx_wr.wr_id	= wr_id | IPOIB_OP_CM;
  
  	return ib_post_send(tx->qp, &priv->tx_wr, &bad_wr);
-@@ -710,8 +708,7 @@ static inline int post_send(struct ipoib
+@@ -709,8 +707,7 @@
  void ipoib_cm_send(struct net_device *dev, struct sk_buff *skb, struct ipoib_cm_tx *tx)
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
@@ -101,7 +101,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	int rc;
  
  	if (unlikely(skb->len > tx->mtu)) {
-@@ -735,24 +732,21 @@ void ipoib_cm_send(struct net_device *de
+@@ -734,24 +731,21 @@
  	 */
  	tx_req = &tx->tx_ring[tx->tx_head & (ipoib_sendq_size - 1)];
  	tx_req->skb = skb;
@@ -130,7 +130,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		dev_kfree_skb_any(skb);
  	} else {
  		dev->trans_start = jiffies;
-@@ -777,7 +771,7 @@ void ipoib_cm_handle_tx_wc(struct net_de
+@@ -776,7 +770,7 @@
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	struct ipoib_cm_tx *tx = wc->qp->qp_context;
  	unsigned int wr_id = wc->wr_id & ~IPOIB_OP_CM;
@@ -139,7 +139,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	unsigned long flags;
  
  	ipoib_dbg_data(priv, "cm send completion: id %d, status: %d\n",
-@@ -791,7 +785,7 @@ void ipoib_cm_handle_tx_wc(struct net_de
+@@ -790,7 +784,7 @@
  
  	tx_req = &tx->tx_ring[wr_id];
  
@@ -148,7 +148,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	/* FIXME: is this right? Shouldn't we only increment on success? */
  	++dev->stats.tx_packets;
-@@ -1036,6 +1030,9 @@ static struct ib_qp *ipoib_cm_create_tx_
+@@ -1035,6 +1029,9 @@
  
  	struct ib_qp *tx_qp;
  
@@ -157,8 +157,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
  	tx_qp = ib_create_qp(priv->pd, &attr);
  	if (PTR_ERR(tx_qp) == -EINVAL) {
- 		ipoib_warn(priv, "can't use GFP_NOIO for QPs on device %s, using GFP_KERNEL\n",
-@@ -1170,7 +1167,7 @@ err_tx:
+ 		attr.create_flags &= ~IB_QP_CREATE_USE_GFP_NOIO;
+@@ -1167,7 +1164,7 @@
  static void ipoib_cm_tx_destroy(struct ipoib_cm_tx *p)
  {
  	struct ipoib_dev_priv *priv = netdev_priv(p->dev);
@@ -167,7 +167,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	unsigned long begin;
  
  	ipoib_dbg(priv, "Destroy active connection 0x%x head 0x%x tail 0x%x\n",
-@@ -1197,8 +1194,7 @@ timeout:
+@@ -1194,8 +1191,7 @@
  
  	while ((int) p->tx_tail - (int) p->tx_head < 0) {
  		tx_req = &p->tx_ring[p->tx_tail & (ipoib_sendq_size - 1)];
@@ -177,7 +177,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		dev_kfree_skb_any(tx_req->skb);
  		++p->tx_tail;
  		netif_tx_lock_bh(p->dev);
-@@ -1471,7 +1467,6 @@ static void ipoib_cm_stale_task(struct w
+@@ -1468,7 +1464,6 @@
  	spin_unlock_irq(&priv->lock);
  }
  
@@ -185,9 +185,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static ssize_t show_mode(struct device *d, struct device_attribute *attr,
  			 char *buf)
  {
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -263,8 +263,7 @@ repost:
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -263,8 +263,7 @@
  			   "for buf %d\n", wr_id);
  }
  
@@ -197,7 +197,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct sk_buff *skb = tx_req->skb;
  	u64 *mapping = tx_req->mapping;
-@@ -305,8 +304,8 @@ partial_error:
+@@ -305,8 +304,8 @@
  	return -EIO;
  }
  
@@ -208,7 +208,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct sk_buff *skb = tx_req->skb;
  	u64 *mapping = tx_req->mapping;
-@@ -314,7 +313,8 @@ static void ipoib_dma_unmap_tx(struct ib
+@@ -314,7 +313,8 @@
  	int off;
  
  	if (skb_headlen(skb)) {
@@ -218,7 +218,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		off = 1;
  	} else
  		off = 0;
-@@ -322,8 +322,8 @@ static void ipoib_dma_unmap_tx(struct ib
+@@ -322,8 +322,8 @@
  	for (i = 0; i < skb_shinfo(skb)->nr_frags; ++i) {
  		const skb_frag_t *frag = &skb_shinfo(skb)->frags[i];
  
@@ -229,7 +229,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  }
  
-@@ -389,7 +389,7 @@ static void ipoib_ib_handle_tx_wc(struct
+@@ -389,7 +389,7 @@
  
  	tx_req = &priv->tx_ring[wr_id];
  
@@ -238,7 +238,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	++dev->stats.tx_packets;
  	dev->stats.tx_bytes += tx_req->skb->len;
-@@ -514,24 +514,10 @@ static inline int post_send(struct ipoib
+@@ -514,24 +514,10 @@
  			    void *head, int hlen)
  {
  	struct ib_send_wr *bad_wr;
@@ -264,7 +264,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	priv->tx_wr.wr_id 	     = wr_id;
  	priv->tx_wr.wr.ud.remote_qpn = qpn;
  	priv->tx_wr.wr.ud.ah 	     = address;
-@@ -617,7 +603,7 @@ void ipoib_send(struct net_device *dev,
+@@ -617,7 +603,7 @@
  		ipoib_warn(priv, "post_send failed, error %d\n", rc);
  		++dev->stats.tx_errors;
  		--priv->tx_outstanding;
@@ -273,7 +273,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		dev_kfree_skb_any(skb);
  		if (netif_queue_stopped(dev))
  			netif_wake_queue(dev);
-@@ -868,7 +854,7 @@ int ipoib_ib_dev_stop(struct net_device
+@@ -868,7 +854,7 @@
  			while ((int) priv->tx_tail - (int) priv->tx_head < 0) {
  				tx_req = &priv->tx_ring[priv->tx_tail &
  							(ipoib_sendq_size - 1)];
@@ -282,9 +282,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				dev_kfree_skb_any(tx_req->skb);
  				++priv->tx_tail;
  				--priv->tx_outstanding;
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -190,7 +190,7 @@ static netdev_features_t ipoib_fix_featu
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -217,7 +217,7 @@
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  
  	if (test_bit(IPOIB_FLAG_ADMIN_CM, &priv->flags))

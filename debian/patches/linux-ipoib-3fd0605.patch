@@ -18,9 +18,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -226,7 +226,23 @@ static int ipoib_mcast_join_finish(struc
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -226,7 +226,23 @@
  			spin_unlock_irq(&priv->lock);
  			return -EAGAIN;
  		}

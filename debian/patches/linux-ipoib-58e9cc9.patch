@@ -11,9 +11,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -1567,7 +1567,8 @@ static struct net_device *ipoib_add_port
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -1608,7 +1608,8 @@
  	SET_NETDEV_DEV(priv->dev, hca->dma_device);
  	priv->dev->dev_id = port - 1;
  
@@ -23,7 +23,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		priv->max_ib_mtu = ib_mtu_enum_to_int(attr.max_mtu);
  	else {
  		printk(KERN_WARNING "%s: ib_query_port %d failed\n",
-@@ -1588,7 +1589,8 @@ static struct net_device *ipoib_add_port
+@@ -1629,7 +1630,8 @@
  		goto device_init_failed;
  	}
  

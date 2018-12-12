@@ -8,17 +8,16 @@ Last-Update: <2017-12-14>
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
 +++ b/Makefile
-@@ -20,7 +20,9 @@
- 	ib_ucm/ \
+@@ -16,7 +16,8 @@
+ 	ib_umad/ \
+ 	ib_srpt/ \
  	rdma_cm/ \
- 	rdma_ucm/ \
--	ib_srpt/
-+	ib_srpt/ \
+-	rdma_ucm/
++	rdma_ucm/ \
 +	ib_ipoib/
-+
- 
  
  else
+ #normal makefile
 --- /dev/null
 +++ b/ib_ipoib/Kconfig
 @@ -0,0 +1,49 @@
@@ -73,7 +72,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	  impact.
 --- /dev/null
 +++ b/ib_ipoib/Makefile
-@@ -0,0 +1,41 @@
+@@ -0,0 +1,39 @@
 +#
 +# Ib_ipoib module
 +#
@@ -81,12 +80,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
-+ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND_IPOIB) += ib_ipoib.o
 +
@@ -891,7 +888,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#endif /* _IPOIB_H */
 --- /dev/null
 +++ b/ib_ipoib/ipoib_cm.c
-@@ -0,0 +1,1635 @@
+@@ -0,0 +1,1634 @@
 +/*
 + * Copyright (c) 2006 Mellanox Technologies. All rights reserved
 + *
@@ -1402,7 +1399,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	case IB_CM_REQ_RECEIVED:
 +		return ipoib_cm_req_handler(cm_id, event);
 +	case IB_CM_DREQ_RECEIVED:
-+		p = cm_id->context;
 +		ib_send_cm_drep(cm_id, NULL, 0);
 +		/* Fall through */
 +	case IB_CM_REJ_RECEIVED:
@@ -1932,8 +1928,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	tx_qp = ib_create_qp(priv->pd, &attr);
 +	if (PTR_ERR(tx_qp) == -EINVAL) {
-+		ipoib_warn(priv, "can't use GFP_NOIO for QPs on device %s, using GFP_KERNEL\n",
-+			   priv->ca->name);
 +		attr.create_flags &= ~IB_QP_CREATE_USE_GFP_NOIO;
 +		tx_qp = ib_create_qp(priv->pd, &attr);
 +	}
@@ -2272,7 +2266,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	while (!list_empty(&priv->cm.reap_list)) {
 +		p = list_entry(priv->cm.reap_list.next, typeof(*p), list);
-+		list_del(&p->list);
++		list_del_init(&p->list);
 +		spin_unlock_irqrestore(&priv->lock, flags);
 +		netif_tx_unlock_bh(dev);
 +		ipoib_cm_tx_destroy(p);
@@ -2392,12 +2386,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	ret = ipoib_set_mode(dev, buf);
 +
-+	rtnl_unlock();
++	/* The assumption is that the function ipoib_set_mode returned
++	 * with the rtnl held by it, if not the value -EBUSY returned,
++	 * then no need to rtnl_unlock
++	 */
++	if (ret != -EBUSY)
++		rtnl_unlock();
 +
-+	if (!ret)
-+		return count;
-+
-+	return ret;
++	return (!ret || ret == -EBUSY) ? count : ret;
 +}
 +
 +static DEVICE_ATTR(mode, S_IWUSR | S_IRUGO, show_mode, set_mode);
@@ -2641,7 +2637,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +}
 --- /dev/null
 +++ b/ib_ipoib/ipoib_fs.c
-@@ -0,0 +1,299 @@
+@@ -0,0 +1,300 @@
 +/*
 + * Copyright (c) 2004 Topspin Communications.  All rights reserved.
 + *
@@ -2925,10 +2921,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +{
 +	struct ipoib_dev_priv *priv = netdev_priv(dev);
 +
-+	if (priv->mcg_dentry)
-+		debugfs_remove(priv->mcg_dentry);
-+	if (priv->path_dentry)
-+		debugfs_remove(priv->path_dentry);
++	WARN_ONCE(!priv->mcg_dentry, "null mcg debug file\n");
++	WARN_ONCE(!priv->path_dentry, "null path debug file\n");
++	debugfs_remove(priv->mcg_dentry);
++	debugfs_remove(priv->path_dentry);
++	priv->mcg_dentry = priv->path_dentry = NULL;
 +}
 +
 +int ipoib_register_debugfs(void)
@@ -4102,7 +4099,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +}
 --- /dev/null
 +++ b/ib_ipoib/ipoib_main.c
-@@ -0,0 +1,1799 @@
+@@ -0,0 +1,1850 @@
 +/*
 + * Copyright (c) 2004 Topspin Communications.  All rights reserved.
 + * Copyright (c) 2005 Sun Microsystems, Inc. All rights reserved.
@@ -4202,6 +4199,33 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	.add    = ipoib_add_one,
 +	.remove = ipoib_remove_one
 +};
++
++#ifdef CONFIG_INFINIBAND_IPOIB_DEBUG
++static int ipoib_netdev_event(struct notifier_block *this,
++			      unsigned long event, void *ptr)
++{
++	struct netdev_notifier_info *ni = ptr;
++	struct net_device *dev = ni->dev;
++
++	if (dev->netdev_ops->ndo_open != ipoib_open)
++		return NOTIFY_DONE;
++
++	switch (event) {
++	case NETDEV_REGISTER:
++		ipoib_create_debug_files(dev);
++		break;
++	case NETDEV_CHANGENAME:
++		ipoib_delete_debug_files(dev);
++		ipoib_create_debug_files(dev);
++		break;
++	case NETDEV_UNREGISTER:
++		ipoib_delete_debug_files(dev);
++		break;
++	}
++
++	return NOTIFY_DONE;
++}
++#endif
 +
 +int ipoib_open(struct net_device *dev)
 +{
@@ -4331,6 +4355,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +{
 +	struct ipoib_dev_priv *priv = netdev_priv(dev);
 +
++	if ((test_bit(IPOIB_FLAG_ADMIN_CM, &priv->flags) &&
++	     !strcmp(buf, "connected\n")) ||
++	     (!test_bit(IPOIB_FLAG_ADMIN_CM, &priv->flags) &&
++	     !strcmp(buf, "datagram\n"))) {
++		return 0;
++	}
++
 +	/* flush paths if we switch modes so that connections are restarted */
 +	if (IPOIB_CM_SUPPORTED(dev->dev_addr) && !strcmp(buf, "connected\n")) {
 +		set_bit(IPOIB_FLAG_ADMIN_CM, &priv->flags);
@@ -4341,8 +4372,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		priv->tx_wr.send_flags &= ~IB_SEND_IP_CSUM;
 +
 +		ipoib_flush_paths(dev);
-+		rtnl_lock();
-+		return 0;
++		return (!rtnl_trylock()) ? -EBUSY : 0;
 +	}
 +
 +	if (!strcmp(buf, "datagram\n")) {
@@ -4351,8 +4381,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		dev_set_mtu(dev, min(priv->mcast_mtu, dev->mtu));
 +		rtnl_unlock();
 +		ipoib_flush_paths(dev);
-+		rtnl_lock();
-+		return 0;
++		return (!rtnl_trylock()) ? -EBUSY : 0;
 +	}
 +
 +	return -EINVAL;
@@ -4688,8 +4717,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	return 0;
 +}
 +
-+static void neigh_add_path(struct sk_buff *skb, u8 *daddr,
-+			   struct net_device *dev)
++static struct ipoib_neigh *neigh_add_path(struct sk_buff *skb, u8 *daddr,
++					  struct net_device *dev)
 +{
 +	struct ipoib_dev_priv *priv = netdev_priv(dev);
 +	struct ipoib_path *path;
@@ -4702,7 +4731,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		spin_unlock_irqrestore(&priv->lock, flags);
 +		++dev->stats.tx_dropped;
 +		dev_kfree_skb_any(skb);
-+		return;
++		return NULL;
++	}
++
++	/* To avoid race condition, make sure that the
++	 * neigh will be added only once.
++	 */
++	if (unlikely(!list_empty(&neigh->list))) {
++		spin_unlock_irqrestore(&priv->lock, flags);
++		return neigh;
 +	}
 +
 +	path = __path_find(dev, daddr + 4);
@@ -4738,7 +4775,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +			spin_unlock_irqrestore(&priv->lock, flags);
 +			ipoib_send(dev, skb, path->ah, IPOIB_QPN(daddr));
 +			ipoib_neigh_put(neigh);
-+			return;
++			return NULL;
 +		}
 +	} else {
 +		neigh->ah  = NULL;
@@ -4751,7 +4788,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	spin_unlock_irqrestore(&priv->lock, flags);
 +	ipoib_neigh_put(neigh);
-+	return;
++	return NULL;
 +
 +err_path:
 +	ipoib_neigh_free(neigh);
@@ -4761,6 +4798,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	spin_unlock_irqrestore(&priv->lock, flags);
 +	ipoib_neigh_put(neigh);
++
++	return NULL;
 +}
 +
 +static void unicast_arp_send(struct sk_buff *skb, struct net_device *dev,
@@ -4857,8 +4896,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	case htons(ETH_P_TIPC):
 +		neigh = ipoib_neigh_get(dev, cb->hwaddr);
 +		if (unlikely(!neigh)) {
-+			neigh_add_path(skb, cb->hwaddr, dev);
-+			return NETDEV_TX_OK;
++			neigh = neigh_add_path(skb, cb->hwaddr, dev);
++			if (likely(!neigh))
++				return NETDEV_TX_OK;
 +		}
 +		break;
 +	case htons(ETH_P_ARP):
@@ -5040,7 +5080,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +						   rcu_dereference_protected(neigh->hnext,
 +									     lockdep_is_held(&priv->lock)));
 +				/* remove from path/mc list */
-+				list_del(&neigh->list);
++				list_del_init(&neigh->list);
 +				call_rcu(&neigh->rcu, ipoib_neigh_reclaim);
 +			} else {
 +				np = &neigh->hnext;
@@ -5203,7 +5243,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +					   rcu_dereference_protected(neigh->hnext,
 +								     lockdep_is_held(&priv->lock)));
 +			/* remove from parent list */
-+			list_del(&neigh->list);
++			list_del_init(&neigh->list);
 +			call_rcu(&neigh->rcu, ipoib_neigh_reclaim);
 +			return;
 +		} else {
@@ -5288,7 +5328,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +						   rcu_dereference_protected(neigh->hnext,
 +									     lockdep_is_held(&priv->lock)));
 +				/* remove from parent list */
-+				list_del(&neigh->list);
++				list_del_init(&neigh->list);
 +				call_rcu(&neigh->rcu, ipoib_neigh_reclaim);
 +			} else {
 +				np = &neigh->hnext;
@@ -5308,6 +5348,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	int i, wait_flushed = 0;
 +
 +	init_completion(&priv->ntbl.flushed);
++	set_bit(IPOIB_NEIGH_TBL_FLUSH, &priv->flags);
 +
 +	spin_lock_irqsave(&priv->lock, flags);
 +
@@ -5330,7 +5371,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +					   rcu_dereference_protected(neigh->hnext,
 +								     lockdep_is_held(&priv->lock)));
 +			/* remove from path/mc list */
-+			list_del(&neigh->list);
++			list_del_init(&neigh->list);
 +			call_rcu(&neigh->rcu, ipoib_neigh_reclaim);
 +		}
 +	}
@@ -5352,7 +5393,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	ipoib_dbg(priv, "ipoib_neigh_hash_uninit\n");
 +	init_completion(&priv->ntbl.deleted);
-+	set_bit(IPOIB_NEIGH_TBL_FLUSH, &priv->flags);
 +
 +	/* Stop GC if called at init fail need to cancel work */
 +	stopped = test_and_set_bit(IPOIB_STOP_NEIGH_GC, &priv->flags);
@@ -5412,8 +5452,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	LIST_HEAD(head);
 +
 +	ASSERT_RTNL();
-+
-+	ipoib_delete_debug_files(dev);
 +
 +	/* Delete any child interfaces first */
 +	list_for_each_entry_safe(cpriv, tcpriv, &priv->child_intfs, list) {
@@ -5720,8 +5758,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		goto register_failed;
 +	}
 +
-+	ipoib_create_debug_files(priv->dev);
-+
 +	if (ipoib_cm_add_mode_attr(priv->dev))
 +		goto sysfs_failed;
 +	if (ipoib_add_pkey_attr(priv->dev))
@@ -5736,7 +5772,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	return priv->dev;
 +
 +sysfs_failed:
-+	ipoib_delete_debug_files(priv->dev);
 +	unregister_netdev(priv->dev);
 +
 +register_failed:
@@ -5827,6 +5862,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	kfree(dev_list);
 +}
 +
++#ifdef CONFIG_INFINIBAND_IPOIB_DEBUG
++static struct notifier_block ipoib_netdev_notifier = {
++	.notifier_call = ipoib_netdev_event,
++};
++#endif
++
 +static int __init ipoib_init_module(void)
 +{
 +	int ret;
@@ -5840,6 +5881,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	ipoib_sendq_size = max3(ipoib_sendq_size, 2 * MAX_SEND_CQE, IPOIB_MIN_QUEUE_SIZE);
 +#ifdef CONFIG_INFINIBAND_IPOIB_CM
 +	ipoib_max_conn_qp = min(ipoib_max_conn_qp, IPOIB_CM_MAX_CONN_QP);
++	ipoib_max_conn_qp = max(ipoib_max_conn_qp, 0);
 +#endif
 +
 +	/*
@@ -5876,6 +5918,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	if (ret)
 +		goto err_client;
 +
++#ifdef CONFIG_INFINIBAND_IPOIB_DEBUG
++	register_netdevice_notifier(&ipoib_netdev_notifier);
++#endif
 +	return 0;
 +
 +err_client:
@@ -5893,6 +5938,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +static void __exit ipoib_cleanup_module(void)
 +{
++#ifdef CONFIG_INFINIBAND_IPOIB_DEBUG
++	unregister_netdevice_notifier(&ipoib_netdev_notifier);
++#endif
 +	ipoib_netlink_fini();
 +	ib_unregister_client(&ipoib_client);
 +	ib_sa_unregister_client(&ipoib_sa_client);
@@ -5904,7 +5952,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +module_exit(ipoib_cleanup_module);
 --- /dev/null
 +++ b/ib_ipoib/ipoib_multicast.c
-@@ -0,0 +1,971 @@
+@@ -0,0 +1,977 @@
 +/*
 + * Copyright (c) 2004, 2005 Topspin Communications.  All rights reserved.
 + * Copyright (c) 2005 Sun Microsystems, Inc. All rights reserved.
@@ -6430,8 +6478,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	if (!test_bit(IPOIB_MCAST_RUN, &priv->flags))
 +		return;
 +
-+	if (ib_query_port(priv->ca, priv->port, &port_attr) ||
-+	    port_attr.state != IB_PORT_ACTIVE) {
++	if (ib_query_port(priv->ca, priv->port, &port_attr)) {
++		ipoib_dbg(priv, "ib_query_port() failed\n");
++		return;
++	}
++	if (port_attr.state != IB_PORT_ACTIVE) {
 +		ipoib_dbg(priv, "port state is not ACTIVE (state = %d) suspending join task\n",
 +			  port_attr.state);
 +		return;
@@ -6632,7 +6683,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		spin_lock_irqsave(&priv->lock, flags);
 +		if (!neigh) {
 +			neigh = ipoib_neigh_alloc(daddr, dev);
-+			if (neigh) {
++			/* Make sure that the neigh will be added only
++			 * once to mcast list.
++			 */
++			if (neigh && list_empty(&neigh->list)) {
 +				kref_get(&mcast->ah->ref);
 +				neigh->ah	= mcast->ah;
 +				list_add_tail(&neigh->list, &mcast->neigh_list);
@@ -7363,7 +7417,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +}
 --- /dev/null
 +++ b/ib_ipoib/ipoib_vlan.c
-@@ -0,0 +1,215 @@
+@@ -0,0 +1,217 @@
 +/*
 + * Copyright (c) 2004 Topspin Communications.  All rights reserved.
 + *
@@ -7452,8 +7506,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	priv->parent = ppriv->dev;
 +
-+	ipoib_create_debug_files(priv->dev);
-+
 +	/* RTNL childs don't need proprietary sysfs entries */
 +	if (type == IPOIB_LEGACY_CHILD) {
 +		if (ipoib_cm_add_mode_attr(priv->dev))
@@ -7475,7 +7527,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +sysfs_failed:
 +	result = -ENOMEM;
-+	ipoib_delete_debug_files(priv->dev);
 +	unregister_netdevice(priv->dev);
 +
 +register_failed:
@@ -7502,12 +7553,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	snprintf(intf_name, sizeof intf_name, "%s.%04x",
 +		 ppriv->dev->name, pkey);
-+	priv = ipoib_intf_alloc(intf_name);
-+	if (!priv)
-+		return -ENOMEM;
 +
 +	if (!rtnl_trylock())
 +		return restart_syscall();
++
++	priv = ipoib_intf_alloc(intf_name);
++	if (!priv)
++		return -ENOMEM;
 +
 +	down_write(&ppriv->vlan_rwsem);
 +
@@ -7534,10 +7586,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +out:
 +	up_write(&ppriv->vlan_rwsem);
 +
++	rtnl_unlock();
++
 +	if (result)
 +		free_netdev(priv->dev);
-+
-+	rtnl_unlock();
 +
 +	return result;
 +}
@@ -7562,13 +7614,17 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	list_for_each_entry_safe(priv, tpriv, &ppriv->child_intfs, list) {
 +		if (priv->pkey == pkey &&
 +		    priv->child_type == IPOIB_LEGACY_CHILD) {
-+			unregister_netdevice(priv->dev);
 +			list_del(&priv->list);
 +			dev = priv->dev;
 +			break;
 +		}
 +	}
 +	up_write(&ppriv->vlan_rwsem);
++
++	if (dev) {
++		ipoib_dbg(ppriv, "delete child vlan %s\n", dev->name);
++		unregister_netdevice(dev);
++	}
 +
 +	rtnl_unlock();
 +

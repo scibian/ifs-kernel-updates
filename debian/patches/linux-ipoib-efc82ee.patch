@@ -12,9 +12,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -480,10 +480,10 @@ void ipoib_ib_dev_flush_heavy(struct wor
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -480,10 +480,10 @@
  void ipoib_pkey_event(struct work_struct *work);
  void ipoib_ib_dev_cleanup(struct net_device *dev);
  
@@ -28,7 +28,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  void ipoib_pkey_dev_check_presence(struct net_device *dev);
  
  int ipoib_dev_init(struct net_device *dev, struct ib_device *ca, int port);
-@@ -495,7 +495,7 @@ void ipoib_mcast_send(struct net_device
+@@ -495,7 +495,7 @@
  
  void ipoib_mcast_restart_task(struct work_struct *work);
  int ipoib_mcast_start_thread(struct net_device *dev);
@@ -37,9 +37,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  void ipoib_mcast_dev_down(struct net_device *dev);
  void ipoib_mcast_dev_flush(struct net_device *dev);
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -659,22 +659,21 @@ void ipoib_reap_ah(struct work_struct *w
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -659,22 +659,21 @@
  				   round_jiffies_relative(HZ));
  }
  
@@ -66,7 +66,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  static void ipoib_ib_tx_timer_func(unsigned long ctx)
-@@ -682,7 +681,7 @@ static void ipoib_ib_tx_timer_func(unsig
+@@ -682,7 +681,7 @@
  	drain_tx_cq((struct net_device *)ctx);
  }
  
@@ -75,7 +75,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	int ret;
-@@ -724,7 +723,7 @@ int ipoib_ib_dev_open(struct net_device
+@@ -724,7 +723,7 @@
  dev_stop:
  	if (!test_and_set_bit(IPOIB_FLAG_INITIALIZED, &priv->flags))
  		napi_enable(&priv->napi);
@@ -84,7 +84,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	return -1;
  }
  
-@@ -756,7 +755,7 @@ int ipoib_ib_dev_up(struct net_device *d
+@@ -756,7 +755,7 @@
  	return ipoib_mcast_start_thread(dev);
  }
  
@@ -93,7 +93,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  
-@@ -765,7 +764,7 @@ int ipoib_ib_dev_down(struct net_device
+@@ -765,7 +764,7 @@
  	clear_bit(IPOIB_FLAG_OPER_UP, &priv->flags);
  	netif_carrier_off(dev);
  
@@ -102,7 +102,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ipoib_mcast_dev_flush(dev);
  
  	ipoib_flush_paths(dev);
-@@ -825,7 +824,7 @@ void ipoib_drain_cq(struct net_device *d
+@@ -825,7 +824,7 @@
  	local_bh_enable();
  }
  
@@ -111,7 +111,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	struct ib_qp_attr qp_attr;
-@@ -895,7 +894,7 @@ timeout:
+@@ -895,7 +894,7 @@
  	if (ib_modify_qp(priv->qp, &qp_attr, IB_QP_STATE))
  		ipoib_warn(priv, "Failed to modify QP to RESET state\n");
  
@@ -120,7 +120,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	ib_req_notify_cq(priv->recv_cq, IB_CQ_NEXT_COMP);
  
-@@ -919,7 +918,7 @@ int ipoib_ib_dev_init(struct net_device
+@@ -919,7 +918,7 @@
  		    (unsigned long) dev);
  
  	if (dev->flags & IFF_UP) {
@@ -129,7 +129,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  			ipoib_transport_dev_cleanup(dev);
  			return -ENODEV;
  		}
-@@ -1047,16 +1046,16 @@ static void __ipoib_ib_dev_flush(struct
+@@ -1047,16 +1046,16 @@
  		ipoib_mcast_dev_flush(dev);
  		if (oper_up)
  			set_bit(IPOIB_FLAG_OPER_UP, &priv->flags);
@@ -150,7 +150,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  			return;
  		if (netif_queue_stopped(dev))
  			netif_start_queue(dev);
-@@ -1108,7 +1107,7 @@ void ipoib_ib_dev_cleanup(struct net_dev
+@@ -1108,7 +1107,7 @@
  	 */
  	ipoib_flush_paths(dev);
  
@@ -159,7 +159,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ipoib_mcast_dev_flush(dev);
  
  	/*
-@@ -1117,7 +1116,7 @@ void ipoib_ib_dev_cleanup(struct net_dev
+@@ -1117,7 +1116,7 @@
  	 * the neighbor garbage collection is stopped and reaped.
  	 * That should all be done now, so make a final ah flush.
  	 */
@@ -168,9 +168,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	ipoib_transport_dev_cleanup(dev);
  }
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -108,7 +108,7 @@ int ipoib_open(struct net_device *dev)
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -135,7 +135,7 @@
  
  	set_bit(IPOIB_FLAG_ADMIN_UP, &priv->flags);
  
@@ -179,7 +179,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		if (!test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags))
  			return 0;
  		goto err_disable;
-@@ -139,7 +139,7 @@ int ipoib_open(struct net_device *dev)
+@@ -166,7 +166,7 @@
  	return 0;
  
  err_stop:
@@ -188,7 +188,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  err_disable:
  	clear_bit(IPOIB_FLAG_ADMIN_UP, &priv->flags);
-@@ -157,8 +157,8 @@ static int ipoib_stop(struct net_device
+@@ -184,8 +184,8 @@
  
  	netif_stop_queue(dev);
  
@@ -199,9 +199,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	if (!test_bit(IPOIB_FLAG_SUBINTERFACE, &priv->flags)) {
  		struct ipoib_dev_priv *cpriv;
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -613,7 +613,7 @@ int ipoib_mcast_start_thread(struct net_
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -616,7 +616,7 @@
  	return 0;
  }
  
@@ -210,7 +210,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  
-@@ -624,8 +624,7 @@ int ipoib_mcast_stop_thread(struct net_d
+@@ -627,8 +627,7 @@
  	cancel_delayed_work(&priv->mcast_task);
  	mutex_unlock(&mcast_mutex);
  
@@ -220,7 +220,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	return 0;
  }
-@@ -797,7 +796,18 @@ void ipoib_mcast_restart_task(struct wor
+@@ -803,7 +802,18 @@
  
  	ipoib_dbg_mcast(priv, "restarting multicast task\n");
  

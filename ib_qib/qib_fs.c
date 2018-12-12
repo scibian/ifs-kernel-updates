@@ -64,7 +64,7 @@ static int qibfs_mknod(struct inode *dir, struct dentry *dentry,
 	inode->i_uid = GLOBAL_ROOT_UID;
 	inode->i_gid = GLOBAL_ROOT_GID;
 	inode->i_blocks = 0;
-	inode->i_atime = CURRENT_TIME;
+	inode->i_atime = current_time(inode);
 	inode->i_mtime = inode->i_atime;
 	inode->i_ctime = inode->i_atime;
 	inode->i_private = data;
@@ -89,15 +89,14 @@ static int create_file(const char *name, umode_t mode,
 {
 	int error;
 
-	*dentry = NULL;
-	mutex_lock(&parent->d_inode->i_mutex);
+	inode_lock(d_inode(parent));
 	*dentry = lookup_one_len(name, parent, strlen(name));
 	if (!IS_ERR(*dentry))
-		error = qibfs_mknod(parent->d_inode, *dentry,
+		error = qibfs_mknod(d_inode(parent), *dentry,
 				    mode, fops, data);
 	else
 		error = PTR_ERR(*dentry);
-	mutex_unlock(&parent->d_inode->i_mutex);
+	inode_unlock(d_inode(parent));
 
 	return error;
 }
@@ -440,10 +439,10 @@ static int remove_file(struct dentry *parent, char *name)
 	}
 
 	spin_lock(&tmp->d_lock);
-	if (!d_unhashed(tmp) && tmp->d_inode) {
+	if (simple_positive(tmp)) {
 		__d_drop(tmp);
 		spin_unlock(&tmp->d_lock);
-		simple_unlink(parent->d_inode, tmp);
+		simple_unlink(d_inode(parent), tmp);
 	} else {
 		spin_unlock(&tmp->d_lock);
 	}
@@ -466,7 +465,7 @@ static int remove_device_files(struct super_block *sb,
 	int ret, i;
 
 	root = dget(sb->s_root);
-	mutex_lock(&root->d_inode->i_mutex);
+	inode_lock(d_inode(root));
 	snprintf(unit, sizeof(unit), "%u", dd->unit);
 	dir = lookup_one_len(unit, root, strlen(unit));
 
@@ -476,7 +475,7 @@ static int remove_device_files(struct super_block *sb,
 		goto bail;
 	}
 
-	mutex_lock(&dir->d_inode->i_mutex);
+	inode_lock(d_inode(dir));
 	remove_file(dir, "counters");
 	remove_file(dir, "counter_names");
 	remove_file(dir, "portcounter_names");
@@ -491,13 +490,13 @@ static int remove_device_files(struct super_block *sb,
 		}
 	}
 	remove_file(dir, "flash");
-	mutex_unlock(&dir->d_inode->i_mutex);
-	ret = simple_rmdir(root->d_inode, dir);
+	inode_unlock(d_inode(dir));
+	ret = simple_rmdir(d_inode(root), dir);
 	d_delete(dir);
 	dput(dir);
 
 bail:
-	mutex_unlock(&root->d_inode->i_mutex);
+	inode_unlock(d_inode(root));
 	dput(root);
 	return ret;
 }
@@ -513,7 +512,7 @@ static int qibfs_fill_super(struct super_block *sb, void *data, int silent)
 	unsigned long flags;
 	int ret;
 
-	static struct tree_descr files[] = {
+	static const struct tree_descr files[] = {
 		[2] = {"driver_stats", &driver_ops[0], S_IRUGO},
 		[3] = {"driver_stats_names", &driver_ops[1], S_IRUGO},
 		{""},

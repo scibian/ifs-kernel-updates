@@ -1,24 +1,25 @@
-Description: Don't build ib_qib
- Adds kernel headers that need to be modified for the OPA build. The source was
- linux-3.16.39. Modification will be performed by sucessive patches.
+Description: Remove makefile targets
+  Remove all targets from the build. This is in preparation for patch development.
+  Modify statements for install target to work with Debian kbuild.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2017-12-14>
+Last-Update: <2018-09-18>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
 +++ b/Makefile
-@@ -9,7 +9,8 @@
+@@ -7,8 +7,8 @@
+ ifneq ($(KERNELRELEASE),)
+ #kbuild part of makefile
  
- CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1
- 
+-CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_RH75
 -obj-y := rdmavt/ hfi1/ ib_qib/
-+obj-y := rdmavt/ \
-+	hfi1/
++CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_DEB8
++obj-y :=
  
  else
  #normal makefile
-@@ -22,7 +23,7 @@
+@@ -21,7 +21,7 @@
  	$(MAKE) -C $(KDIR) M=$$PWD clean
  
  install:

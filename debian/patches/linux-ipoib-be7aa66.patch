@@ -13,9 +13,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -1264,15 +1264,13 @@ int ipoib_dev_init(struct net_device *de
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -1307,15 +1307,13 @@
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  
@@ -32,7 +32,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  
  	priv->tx_ring = vzalloc(ipoib_sendq_size * sizeof *priv->tx_ring);
-@@ -1287,16 +1285,24 @@ int ipoib_dev_init(struct net_device *de
+@@ -1330,16 +1328,24 @@
  	if (ipoib_ib_dev_init(dev, ca, port))
  		goto out_tx_ring_cleanup;
  
@@ -59,7 +59,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  out:
  	return -ENOMEM;
  }
-@@ -1319,6 +1325,12 @@ void ipoib_dev_cleanup(struct net_device
+@@ -1360,6 +1366,12 @@
  	}
  	unregister_netdevice_many(&head);
  
@@ -72,7 +72,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ipoib_ib_dev_cleanup(dev);
  
  	kfree(priv->rx_ring);
-@@ -1326,8 +1338,6 @@ void ipoib_dev_cleanup(struct net_device
+@@ -1367,8 +1379,6 @@
  
  	priv->rx_ring = NULL;
  	priv->tx_ring = NULL;

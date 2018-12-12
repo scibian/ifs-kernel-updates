@@ -21,9 +21,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -55,8 +55,6 @@ MODULE_PARM_DESC(mcast_debug_level,
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -55,8 +55,6 @@
  		 "Enable multicast debug tracing if > 0");
  #endif
  
@@ -32,7 +32,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  struct ipoib_mcast_iter {
  	struct net_device *dev;
  	union ib_gid       mgid;
-@@ -67,7 +65,7 @@ struct ipoib_mcast_iter {
+@@ -67,7 +65,7 @@
  };
  
  /*
@@ -41,7 +41,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
   */
  static void __ipoib_mcast_schedule_join_thread(struct ipoib_dev_priv *priv,
  					       struct ipoib_mcast *mcast,
-@@ -352,16 +350,6 @@ static int ipoib_mcast_join_complete(int
+@@ -352,16 +350,6 @@
  			"sendonly " : "",
  			mcast->mcmember.mgid.raw, status);
  
@@ -58,7 +58,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	/* We trap for port events ourselves. */
  	if (status == -ENETRESET) {
  		status = 0;
-@@ -383,8 +371,10 @@ static int ipoib_mcast_join_complete(int
+@@ -383,8 +371,10 @@
  		 * send out all of the non-broadcast joins
  		 */
  		if (mcast == priv->broadcast) {
@@ -69,7 +69,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		}
  	} else {
  		if (mcast->logcount++ < 20) {
-@@ -417,16 +407,28 @@ static int ipoib_mcast_join_complete(int
+@@ -417,16 +407,28 @@
  				dev_kfree_skb_any(skb_dequeue(&mcast->pkt_queue));
  			}
  			netif_tx_unlock_bh(dev);
@@ -101,7 +101,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	return status;
  }
  
-@@ -434,6 +436,7 @@ static void ipoib_mcast_join(struct net_
+@@ -434,6 +436,7 @@
  			     int create)
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
@@ -109,7 +109,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	struct ib_sa_mcmember_rec rec = {
  		.join_state = 1
  	};
-@@ -475,18 +478,19 @@ static void ipoib_mcast_join(struct net_
+@@ -475,18 +478,19 @@
  		rec.hop_limit	  = priv->broadcast->mcmember.hop_limit;
  	}
  
@@ -135,7 +135,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  void ipoib_mcast_join_task(struct work_struct *work)
-@@ -515,15 +519,6 @@ void ipoib_mcast_join_task(struct work_s
+@@ -518,15 +522,6 @@
  	else
  		memcpy(priv->dev->dev_addr + 4, priv->local_gid.raw, sizeof (union ib_gid));
  
@@ -151,7 +151,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	spin_lock_irq(&priv->lock);
  	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags))
  		goto out;
-@@ -584,9 +579,7 @@ void ipoib_mcast_join_task(struct work_s
+@@ -587,9 +582,7 @@
  				else
  					create = 1;
  				spin_unlock_irq(&priv->lock);
@@ -161,7 +161,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				spin_lock_irq(&priv->lock);
  			} else if (!delay_until ||
  				 time_before(mcast->delay_until, delay_until))
-@@ -608,7 +601,6 @@ out:
+@@ -611,7 +604,6 @@
  		set_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags);
  	}
  	spin_unlock_irq(&priv->lock);
@@ -169,7 +169,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (mcast)
  		ipoib_mcast_join(dev, mcast, create);
  }
-@@ -616,13 +608,14 @@ out:
+@@ -619,13 +611,14 @@
  int ipoib_mcast_start_thread(struct net_device *dev)
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
@@ -186,7 +186,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	return 0;
  }
-@@ -630,13 +623,14 @@ int ipoib_mcast_start_thread(struct net_
+@@ -633,13 +626,14 @@
  int ipoib_mcast_stop_thread(struct net_device *dev)
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);

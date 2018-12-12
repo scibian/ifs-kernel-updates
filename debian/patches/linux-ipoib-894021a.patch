@@ -25,9 +25,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -353,18 +353,27 @@ void ipoib_mcast_carrier_on_task(struct
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -353,18 +353,27 @@
  						   carrier_on_task);
  	struct ib_port_attr attr;
  
@@ -61,7 +61,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (!ipoib_cm_admin_enabled(priv->dev))
  		dev_set_mtu(priv->dev, min(priv->mcast_mtu, priv->admin_mtu));
  	netif_carrier_on(priv->dev);
-@@ -535,7 +544,7 @@ void ipoib_mcast_join_task(struct work_s
+@@ -538,7 +547,7 @@
  	if (!priv->broadcast) {
  		struct ipoib_mcast *broadcast;
  
@@ -70,7 +70,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  			return;
  
  		broadcast = ipoib_mcast_alloc(dev, 1);
-@@ -882,7 +891,7 @@ void ipoib_mcast_restart_task(struct wor
+@@ -888,7 +897,7 @@
  		ipoib_mcast_free(mcast);
  	}
  

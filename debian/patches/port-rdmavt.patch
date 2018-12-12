@@ -1,21 +1,13 @@
 Description: Port rdmavt to debian kernel 3.16
- Ports the code delivered for rdmavt_uverbs to debian kernel 3.16.
+ Ports rdmavt code to debian kernel 3.16.
+ Notably, this patch uses atomic_t instead of of percpu_ref for mr reference
+ counting due to performance issues found with percpu_ref and
+ wait_for_completion_timeout in kernel 3.16.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2017-12-14>
+Last-Update: <2018-11-26>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- a/rdmavt/ah.c
-+++ b/rdmavt/ah.c
-@@ -120,6 +120,8 @@
- 	spin_lock_irqsave(&dev->n_ahs_lock, flags);
- 	if (dev->n_ahs_allocated == dev->dparms.props.max_ah) {
- 		spin_unlock(&dev->n_ahs_lock);
-+		rvt_pr_warn_ratelimited(dev, "%s: too many AHs allocated: max_ahs=%d\n",
-+								__func__, dev->dparms.props.max_ah);
- 		kfree(ah);
- 		return ERR_PTR(-ENOMEM);
- 	}
 --- a/rdmavt/cq.h
 +++ b/rdmavt/cq.h
 @@ -51,10 +51,10 @@
@@ -74,15 +66,68 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
 --- a/rdmavt/mr.c
 +++ b/rdmavt/mr.c
-@@ -49,6 +49,7 @@
- #include <linux/vmalloc.h>
- #include <rdma/ib_umem.h>
- #include <rdma/rdma_vt.h>
-+#include "core_compat.h"
- #include "vt.h"
- #include "mr.h"
- #include "trace.h"
-@@ -408,7 +409,7 @@
+@@ -120,19 +120,11 @@
+ 	mr->mapsz = 0;
+ 	while (i)
+ 		kfree(mr->map[--i]);
+-	percpu_ref_exit(&mr->refcount);
+ }
+ 
+-static void __rvt_mregion_complete(struct percpu_ref *ref)
+-{
+-	struct rvt_mregion *mr = container_of(ref, struct rvt_mregion,
+-					      refcount);
+-
+-	complete(&mr->comp);
+-}
+ 
+ static int rvt_init_mregion(struct rvt_mregion *mr, struct ib_pd *pd,
+-			    int count, unsigned int percpu_flags)
++							int count)
+ {
+ 	int m, i = 0;
+ 	struct rvt_dev_info *dev = ib_to_rvt(pd->device);
+@@ -147,11 +139,8 @@
+ 		mr->mapsz++;
+ 	}
+ 	init_completion(&mr->comp);
+-	/* count returning the ptr to user */
+-	if (percpu_ref_init(&mr->refcount, &__rvt_mregion_complete,
+-			    percpu_flags, GFP_KERNEL))
+-		goto bail;
+ 
++	atomic_set(&mr->refcount, 0);
+ 	atomic_set(&mr->lkey_invalid, 0);
+ 	mr->pd = pd;
+ 	mr->max_segs = count;
+@@ -271,8 +260,6 @@
+ 	freed++;
+ out:
+ 	spin_unlock_irqrestore(&rkt->lock, flags);
+-	if (freed)
+-		percpu_ref_kill(&mr->refcount);
+ }
+ 
+ static struct rvt_mr *__rvt_alloc_mr(int count, struct ib_pd *pd)
+@@ -287,7 +274,7 @@
+ 	if (!mr)
+ 		goto bail;
+ 
+-	rval = rvt_init_mregion(&mr->mr, pd, count, 0);
++	rval = rvt_init_mregion(&mr->mr, pd, count);
+ 	if (rval)
+ 		goto bail;
+ 	/*
+@@ -341,7 +328,7 @@
+ 		goto bail;
+ 	}
+ 
+-	rval = rvt_init_mregion(&mr->mr, pd, 0, 0);
++	rval = rvt_init_mregion(&mr->mr, pd, 0);
+ 	if (rval) {
+ 		ret = ERR_PTR(rval);
+ 		goto bail;
+@@ -403,10 +390,11 @@
  	mr->mr.user_base = start;
  	mr->mr.iova = virt_addr;
  	mr->mr.length = length;
@@ -90,8 +135,31 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	mr->mr.offset = umem->offset;
  	mr->mr.access_flags = mr_access_flags;
  	mr->umem = umem;
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
++	&& !defined(IFS_DEB8)
+ 	mr->mr.page_shift = umem->page_shift;
+ #else
+ 	if (is_power_of_2(umem->page_size))
+@@ -423,7 +411,8 @@
+ 			goto bail_inval;
+ 		}
+ 		mr->mr.map[m]->segs[n].vaddr = vaddr;
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
++	&& !defined(IFS_DEB8)
+ 		mr->mr.map[m]->segs[n].length = BIT(umem->page_shift);
+ 		trace_rvt_mr_user_seg(&mr->mr, m, n, vaddr,
+ 				      BIT(umem->page_shift));
+@@ -498,17 +487,15 @@
+ 	unsigned long timeout;
+ 	struct rvt_dev_info *rdi = ib_to_rvt(mr->pd->device);
  
-@@ -501,9 +502,9 @@
+-	if (percpu_ref_is_zero(&mr->refcount))
+-		return 0;
+ 	/* avoid dma mr */
+ 	if (mr->lkey)
+ 		rvt_dereg_clean_qps(mr);
  	timeout = wait_for_completion_timeout(&mr->comp, 5 * HZ);
  	if (!timeout) {
  		rvt_pr_err(rdi,
@@ -99,11 +167,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +			   "%s timeout mr %p pd %p lkey %x refcount %d\n",
  			   t, mr, mr->pd, mr->lkey,
 -			   atomic_long_read(&mr->refcount.count));
-+			   atomic_read(&mr->refcount.count));
++			   atomic_read(&mr->refcount));
  		rvt_get_mr(mr);
  		return -EBUSY;
  	}
-@@ -596,6 +597,7 @@
+@@ -601,6 +588,7 @@
  	return &mr->ibmr;
  }
  
@@ -111,20 +179,30 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /**
   * rvt_set_page - page assignment function called by ib_sg_to_pages
   * @ibmr: memory region
-@@ -647,6 +649,7 @@
- 	return ib_sg_to_pages(ibmr, sg, sg_nents, sg_offset,
- 			      rvt_set_page);
+@@ -672,6 +660,7 @@
+ 	return ib_sg_to_pages(ibmr, sg, sg_nents, rvt_set_page);
  }
+ #endif
 +#endif /* CONFIG_RVT_MAP_MR_SG */
- 
  /**
   * rvt_fast_reg_mr - fast register physical MR
-@@ -793,7 +796,7 @@
+  * @qp: the queue pair where the work request comes from
+@@ -760,8 +749,7 @@
+ 	if (!fmr)
+ 		goto bail;
+ 
+-	rval = rvt_init_mregion(&fmr->mr, pd, fmr_attr->max_pages,
+-				PERCPU_REF_INIT_ATOMIC);
++	rval = rvt_init_mregion(&fmr->mr, pd, fmr_attr->max_pages);
+ 	if (rval)
+ 		goto bail;
+ 
+@@ -817,7 +805,7 @@
  	u32 ps;
  	struct rvt_dev_info *rdi = ib_to_rvt(ibfmr->device);
  
 -	i = atomic_long_read(&fmr->mr.refcount.count);
-+	i = atomic_read(&fmr->mr.refcount.count);
++	i = atomic_read(&fmr->mr.refcount);
  	if (i > 2)
  		return -EBUSY;
  
@@ -149,7 +227,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		goto bail;
 --- a/rdmavt/qp.c
 +++ b/rdmavt/qp.c
-@@ -993,6 +993,7 @@
+@@ -1004,6 +1004,7 @@
  	spin_lock(&rdi->n_qps_lock);
  	if (rdi->n_qps_allocated == rdi->dparms.props.max_qp) {
  		spin_unlock(&rdi->n_qps_lock);
@@ -159,7 +237,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
 --- a/rdmavt/srq.c
 +++ b/rdmavt/srq.c
-@@ -144,6 +144,8 @@
+@@ -147,6 +147,8 @@
  	spin_lock(&dev->n_srqs_lock);
  	if (dev->n_srqs_allocated == dev->dparms.props.max_srq) {
  		spin_unlock(&dev->n_srqs_lock);
@@ -170,7 +248,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
 --- a/rdmavt/vt.c
 +++ b/rdmavt/vt.c
-@@ -120,13 +120,10 @@
+@@ -119,13 +119,10 @@
  EXPORT_SYMBOL(rvt_dealloc_device);
  
  static int rvt_query_device(struct ib_device *ibdev,
@@ -185,7 +263,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	/*
  	 * Return rvt_dev_info.dparms.props contents
  	 */
-@@ -320,6 +317,7 @@
+@@ -319,6 +316,7 @@
  	return 0;
  }
  
@@ -201,7 +279,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  enum {
  	MISC,
-@@ -477,9 +476,11 @@
+@@ -476,9 +475,11 @@
  		break;
  
  	case GET_PORT_IMMUTABLE:
@@ -213,7 +291,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		break;
  
  	case CREATE_QP:
-@@ -636,14 +637,16 @@
+@@ -635,14 +636,16 @@
  
  	case ALLOC_MR:
  		check_driver_override(rdi, offsetof(struct ib_device,
@@ -231,24 +309,33 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		break;
  
  	case MAP_PHYS_FMR:
+@@ -777,7 +780,7 @@
+ 	spin_lock_init(&rdi->n_cqs_lock);
+ 
+ 	/* DMA Operations */
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
+ 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
+ #elif defined(IFS_RH75)
+ 	rdi->ibdev.dev.device_rh->dma_ops =
 --- a/rdmavt/vt.h
 +++ b/rdmavt/vt.h
-@@ -74,7 +74,13 @@
+@@ -73,7 +73,13 @@
  		      fmt, \
  		      ##__VA_ARGS__)
  
 -#define rvt_pr_err(rdi, fmt, ...) \
 +#define rvt_pr_warn_ratelimited(rdi, fmt, ...) \
 +	__rvt_pr_warn_ratelimited(rdi->driver_f.get_pci_dev(rdi), \
-+		      rdi->driver_f.get_card_name(rdi), \
++		      rvt_get_ibdev_name(rdi), \
 +		      fmt, \
 +		      ##__VA_ARGS__)
 +
 +#define rvt_pr_err(rdi, fmt, ...)				 \
  	__rvt_pr_err(rdi->driver_f.get_pci_dev(rdi), \
- 		     rdi->driver_f.get_card_name(rdi), \
+ 		     rvt_get_ibdev_name(rdi), \
  		     fmt, \
-@@ -86,6 +92,9 @@
+@@ -85,6 +91,9 @@
  #define __rvt_pr_warn(pdev, name, fmt, ...) \
  	dev_warn(&pdev->dev, "%s: " fmt, name, ##__VA_ARGS__)
  
@@ -270,7 +357,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		    const struct ib_wc *in_wc, const struct ib_grh *in_grh,
 --- a/rdmavt/cq.c
 +++ b/rdmavt/cq.c
-@@ -170,7 +170,7 @@
+@@ -168,7 +168,7 @@
  /**
   * rvt_create_cq - create a completion queue
   * @ibdev: the device this completion queue is attached to
@@ -279,7 +366,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
   * @context: unused by the QLogic_IB driver
   * @udata: user data for libibverbs.so
   *
-@@ -179,20 +179,16 @@
+@@ -177,21 +177,16 @@
   * Return: pointer to the completion queue or negative errno values
   * for failure.
   */
@@ -298,13 +385,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	struct ib_cq *ret;
  	u32 sz;
 -	unsigned int entries = attr->cqe;
+-	int comp_vector = attr->comp_vector;
 -
 -	if (attr->flags)
 -		return ERR_PTR(-EINVAL);
  
  	if (entries < 1 || entries > rdi->dparms.props.max_cqe)
  		return ERR_PTR(-EINVAL);
-@@ -244,6 +240,8 @@
+@@ -248,6 +243,8 @@
  	spin_lock_irq(&rdi->n_cqs_lock);
  	if (rdi->n_cqs_allocated == rdi->dparms.props.max_cq) {
  		spin_unlock_irq(&rdi->n_cqs_lock);
@@ -313,15 +401,199 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		ret = ERR_PTR(-ENOMEM);
  		goto bail_ip;
  	}
---- a/include/rdma/rdmavt_qp.h
-+++ b/include/rdma/rdmavt_qp.h
-@@ -153,6 +153,81 @@
- 	(RVT_PROCESS_SEND_OK | RVT_FLUSH_SEND | RVT_PROCESS_RECV_OK)
+@@ -282,7 +279,7 @@
  
- /*
-+ * For back porting from kernel 4.6 to Debian 8.
-+ * Copied from include/rdma/ib_verbs.h.
+ 	ret = &cq->ibcq;
+ 
+-	trace_rvt_create_cq(cq, attr);
++	trace_rvt_create_cq(cq, entries, comp_vector);
+ 	goto done;
+ 
+ bail_ip:
+--- a/Makefile
++++ b/Makefile
+@@ -17,7 +17,8 @@
+ 	ib_srpt/ \
+ 	rdma_cm/ \
+ 	rdma_ucm/ \
+-	ib_ipoib/
++	ib_ipoib/ \
++	rdmavt/
+ 
+ else
+ #normal makefile
+--- a/rdmavt/ah.c
++++ b/rdmavt/ah.c
+@@ -114,6 +114,8 @@
+ 	if (dev->n_ahs_allocated == dev->dparms.props.max_ah) {
+ 		spin_unlock_irqrestore(&dev->n_ahs_lock, flags);
+ 		kfree(ah);
++		rvt_pr_warn_ratelimited(dev, "%s: too many AHs allocated: max_ahs=%d\n",
++								__func__, dev->dparms.props.max_ah);
+ 		return ERR_PTR(-ENOMEM);
+ 	}
+ 
+--- a/rdmavt/Makefile
++++ b/rdmavt/Makefile
+@@ -4,10 +4,11 @@
+ #
+ # Called from the kernel module build system.
+ #
++
+ ifneq ($(KERNELRELEASE),)
+ #kbuild part of makefile
+ 
+-NOSTDINC_FLAGS += -I${M}/include -I${M}/compat
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
+ 
+ obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
+ 
+--- a/compat/compat.h
++++ b/compat/compat.h
+@@ -44,8 +44,8 @@
+  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+  *
+  */
+-#if !defined(RH75_COMPAT_H)
+-#define RH75_COMPAT_H
++#if !defined(DEB8_COMPAT_H)
++#define DEB8_COMPAT_H
+ 
+ #include "compat_common.h"
+ 
+@@ -57,6 +57,13 @@
+ #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
+ #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
+ 
++#define PCI_IRQ_LEGACY          BIT(0) /* allow legacy interrupts */
++#define PCI_IRQ_MSI             BIT(1) /* allow MSI interrupts */
++#define PCI_IRQ_MSIX            BIT(2) /* allow MSI-X interrupts */
++#define PCI_IRQ_AFFINITY        BIT(3) /* auto-assign affinity */
++#define PCI_IRQ_ALL_TYPES \
++(PCI_IRQ_LEGACY | PCI_IRQ_MSI | PCI_IRQ_MSIX)
++
+ struct hfi1_msix_entry;
+ struct hfi1_devdata;
+ 
+@@ -66,6 +73,11 @@
+ 		struct hfi1_msix_entry *hfi1_msix_entry);
+ int bitmap_print_to_pagebuf(bool list, char *buf,
+ 			    const unsigned long *maskp, int nmaskbits);
++
++struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
++int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
++                          unsigned int max_vecs, unsigned int flags);
++
+ int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
+ __acquires(&debugfs_srcu);
+ 
+@@ -107,4 +119,53 @@
+ #define for_each_msi_entry(desc, dev)   \
+ 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
+ 
+-#endif //RH75_COMPAT
++#ifdef CONFIG_PCI_MSI
++#define dev_to_msi_list(dev)		(&(dev)->msi_list)
++#define first_msi_entry(dev)										\
++	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
++#define for_each_msi_entry(desc, dev)								\
++        list_for_each_entry((desc), dev_to_msi_list((dev)), list)
++
++/**
++ * pci_irq_vector - return Linux IRQ number of a device vector
++ * @dev: PCI device to operate on
++ * @nr: device-relative interrupt vector index (0-based).
 + */
++static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
++{
++        if (dev->msix_enabled) {
++                struct msi_desc *entry;
++                int i = 0;
++
++                for_each_msi_entry(entry, dev) {
++                        if (i == nr)
++                                return entry->irq;
++                        i++;
++                }
++                WARN_ON_ONCE(1);
++                return -EINVAL;
++        }
++
++        if (dev->msi_enabled) {
++                struct msi_desc *entry = first_msi_entry(dev);
++
++                if (WARN_ON_ONCE(nr >= entry->nvec_used))
++                        return -EINVAL;
++        } else {
++                if (WARN_ON_ONCE(nr > 0))
++                        return -EINVAL;
++        }
++
++        return dev->irq + nr;
++}
++#else
++static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
++{
++        if (WARN_ON_ONCE(nr > 0))
++                return -EINVAL;
++        return dev->irq;
++}
++#endif
++
++
++#endif //DEB8_COMPAT
+--- a/include/rdma/rdma_vt.h
++++ b/include/rdma/rdma_vt.h
+@@ -201,7 +201,8 @@
+ 	defined(IFS_RH74) || \
+ 	defined(IFS_RH75) || \
+ 	defined(IFS_SLES12SP2) || \
+-	defined(IFS_SLES12SP3))
++	defined(IFS_SLES12SP3) || \
++	defined(IFS_DEB8))
+ 
+ struct rvt_dev_info;
+ struct rvt_swqe;
+--- a/compat/compat_common.h
++++ b/compat/compat_common.h
+@@ -47,6 +47,8 @@
+ #if !defined(COMPAT_COMMON_H)
+ #define COMPAT_COMMON_H
+ 
++#define IB_MULTICAST_LID_BASE  cpu_to_be16(0xC000)
++
+ #include <linux/socket.h>
+ #include <net/ipv6.h>
+ #include <net/ip.h>
+@@ -66,11 +68,14 @@
+ #define BAD_DMA_ADDRESS ((u64)0)
+ #endif
+ 
++#define NULLS_MARKER(value) (1UL | (((long)value) << 1))
++
+ #define SHMLBA PAGE_SIZE         /* attach addr a multiple of this */
+ 
+ #define MAX_NICE        19
+ #define MIN_NICE        -20
+ #define NICE_WIDTH      (MAX_NICE - MIN_NICE + 1)
++
+ #define IB_DEVICE_RDMA_NETDEV_OPA_VNIC	0
+ #define IB_DEVICE_NODE_DESC_MAX 64
+ #undef __get_dynamic_array_len
+@@ -83,6 +88,9 @@
+ #define  current_time(inode)			  CURRENT_TIME
+ #endif
+ 
++#define IB_WR_REG_MR IB_WR_FAST_REG_MR
++#define IB_WC_REG_MR IB_WC_FAST_REG_MR
++
+ /* Address format                       0x000FF000 */
+ #if !defined RDMA_CORE_CAP_AF_IB
+ #define RDMA_CORE_CAP_AF_IB             0x00001000
+@@ -105,6 +113,59 @@
+ #define rb_first_cached(root)		rb_first(root)
+ #endif
+ 
 +struct ib_send_wr_hdr {
 +	struct ib_send_wr      *next;
 +	u64                     wr_id;
@@ -341,12 +613,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	u32                     rkey;
 +};
 +
-+static inline struct ib_rdma_wr *rdma_wr(struct ib_send_wr *wr)
-+{
-+	return container_of((struct ib_send_wr_hdr *)wr, struct ib_rdma_wr,
-+			    wr);
-+}
-+
 +struct ib_atomic_wr {
 +	struct ib_send_wr_hdr   wr;
 +	u64                     remote_addr;
@@ -356,12 +622,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	u64                     swap_mask;
 +	u32                     rkey;
 +};
-+
-+static inline struct ib_atomic_wr *atomic_wr(struct ib_send_wr *wr)
-+{
-+	return container_of((struct ib_send_wr_hdr *)wr, struct ib_atomic_wr,
-+			    wr);
-+}
 +
 +struct ib_ud_wr {
 +	struct ib_send_wr_hdr   wr;
@@ -375,11 +635,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	u8                      port_num;
 +};
 +
-+static inline struct ib_ud_wr *ud_wr(struct ib_send_wr *wr)
-+{
-+	return container_of((struct ib_send_wr_hdr *)wr, struct ib_ud_wr, wr);
-+}
-+
 +struct ib_reg_wr {
 +	struct ib_send_wr_hdr   wr;
 +	struct ib_mr            *mr;
@@ -387,53 +642,1305 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	int                     access;
 +};
 +
-+static inline struct ib_reg_wr *reg_wr(struct ib_send_wr *wr)
-+{
-+	return container_of((struct ib_send_wr_hdr *)wr, struct ib_reg_wr, wr);
-+}
++struct ib_vl_weight_elem {
++	u8      vl;     /* VL is low 5 bits, upper 3 bits reserved */
++	u8      weight;
++};
 +
-+
-+/*
-  * Internal send flags
-  */
- #define RVT_SEND_RESERVE_USED           IB_SEND_RESERVED_START
-@@ -250,6 +325,10 @@
+ extern struct srcu_struct debugfs_srcu;
+ extern struct ib_dma_mapping_ops rvt_default_dma_mapping_ops;
  
- #define RVT_OPERATION_MAX (IB_WR_RESERVED10 + 1)
+@@ -169,6 +230,12 @@
+ 	u8 reserved[3];
+ } __packed;
  
-+/* Needed for Debian 8 backport */
-+#define IB_WR_REG_MR IB_WR_FAST_REG_MR
-+#define IB_WC_REG_MR IB_WC_FAST_REG_MR
-+
- /**
-  * rvt_operation_params - op table entry
-  * @length - the length to copy into the swqe entry
---- a/include/rdma/rdma_vt.h
-+++ b/include/rdma/rdma_vt.h
-@@ -61,6 +61,9 @@
- #include <rdma/rdmavt_mr.h>
- #include <rdma/rdmavt_qp.h>
- 
-+/* For backporting to Debian 8 */
-+#define IB_MULTICAST_LID_BASE  cpu_to_be16(0xC000)
-+
- #define RVT_MAX_PKEY_VALUES 16
- 
- /* For backport */
---- a/rdmavt/mr.h
-+++ b/rdmavt/mr.h
-@@ -49,6 +49,14 @@
-  */
- 
- #include <rdma/rdma_vt.h>
-+
-+/* For backport from kernel 4.x to Debian 8. */
 +enum ib_mr_type {
 +	IB_MR_TYPE_MEM_REG,
 +	IB_MR_TYPE_SIGNATURE,
 +	IB_MR_TYPE_SG_GAPS,
 +};
 +
- struct rvt_fmr {
- 	struct ib_fmr ibfmr;
- 	struct rvt_mregion mr;        /* must be last */
+ /* rdma netdev type - specifies protocol type */
+ enum rdma_netdev_t {
+ 	RDMA_NETDEV_OPA_VNIC,
+@@ -301,6 +368,29 @@
+ 	return (u16)lid;
+ }
+ 
++static inline struct ib_rdma_wr *rdma_wr(struct ib_send_wr *wr)
++{
++	return container_of((struct ib_send_wr_hdr *)wr, struct ib_rdma_wr,
++			    wr);
++}
++
++static inline struct ib_atomic_wr *atomic_wr(struct ib_send_wr *wr)
++{
++	return container_of((struct ib_send_wr_hdr *)wr, struct ib_atomic_wr,
++			    wr);
++}
++
++static inline struct ib_ud_wr *ud_wr(struct ib_send_wr *wr)
++{
++	return container_of((struct ib_send_wr_hdr *)wr, struct ib_ud_wr, wr);
++}
++
++static inline struct ib_reg_wr *reg_wr(struct ib_send_wr *wr)
++{
++	return container_of((struct ib_send_wr_hdr *)wr, struct ib_reg_wr, wr);
++}
++
++
+ /**
+  * rdma_destroy_ah - Destroys an address handle.
+  * @ah: The address handle to destroy.
+@@ -474,4 +564,6 @@
+ 				u8                port_num,
+ 				u64              *sn_pfx);
+ #endif
++
++
+ #endif
+--- /dev/null
++++ b/include/linux/rhashtable.h
+@@ -0,0 +1,908 @@
++/*
++ * Resizable, Scalable, Concurrent Hash Table
++ *
++ * Copyright (c) 2015 Herbert Xu <herbert@gondor.apana.org.au>
++ * Copyright (c) 2014-2015 Thomas Graf <tgraf@suug.ch>
++ * Copyright (c) 2008-2014 Patrick McHardy <kaber@trash.net>
++ *
++ * Code partially derived from nft_hash
++ * Rewritten with rehash code from br_multicast plus single list
++ * pointer as suggested by Josh Triplett
++ *
++ * This program is free software; you can redistribute it and/or modify
++ * it under the terms of the GNU General Public License version 2 as
++ * published by the Free Software Foundation.
++ */
++
++#ifndef _LINUX_RHASHTABLE_H
++#define _LINUX_RHASHTABLE_H
++
++#include <linux/atomic.h>
++#include <linux/compiler.h>
++#include <linux/err.h>
++#include <linux/errno.h>
++#include <linux/jhash.h>
++#include <linux/list_nulls.h>
++#include <linux/workqueue.h>
++#include <linux/mutex.h>
++#include <linux/rcupdate.h>
++
++/*
++ * The end of the chain is marked with a special nulls marks which has
++ * the following format:
++ *
++ * +-------+-----------------------------------------------------+-+
++ * | Base  |                      Hash                           |1|
++ * +-------+-----------------------------------------------------+-+
++ *
++ * Base (4 bits) : Reserved to distinguish between multiple tables.
++ *                 Specified via &struct rhashtable_params.nulls_base.
++ * Hash (27 bits): Full hash (unmasked) of first element added to bucket
++ * 1 (1 bit)     : Nulls marker (always set)
++ *
++ * The remaining bits of the next pointer remain unused for now.
++ */
++#define RHT_BASE_BITS		4
++#define RHT_HASH_BITS		27
++#define RHT_BASE_SHIFT		RHT_HASH_BITS
++
++/* Base bits plus 1 bit for nulls marker */
++#define RHT_HASH_RESERVED_SPACE	(RHT_BASE_BITS + 1)
++
++struct rhash_head {
++	struct rhash_head __rcu		*next;
++};
++
++/**
++ * struct bucket_table - Table of hash buckets
++ * @size: Number of hash buckets
++ * @rehash: Current bucket being rehashed
++ * @hash_rnd: Random seed to fold into hash
++ * @locks_mask: Mask to apply before accessing locks[]
++ * @locks: Array of spinlocks protecting individual buckets
++ * @walkers: List of active walkers
++ * @rcu: RCU structure for freeing the table
++ * @future_tbl: Table under construction during rehashing
++ * @buckets: size * hash buckets
++ */
++struct bucket_table {
++	unsigned int		size;
++	unsigned int		rehash;
++	u32			hash_rnd;
++	unsigned int		locks_mask;
++	spinlock_t		*locks;
++	struct list_head	walkers;
++	struct rcu_head		rcu;
++
++	struct bucket_table __rcu *future_tbl;
++
++	struct rhash_head __rcu	*buckets[] ____cacheline_aligned_in_smp;
++};
++
++/**
++ * struct rhashtable_compare_arg - Key for the function rhashtable_compare
++ * @ht: Hash table
++ * @key: Key to compare against
++ */
++struct rhashtable_compare_arg {
++	struct rhashtable *ht;
++	const void *key;
++};
++
++typedef u32 (*rht_hashfn_t)(const void *data, u32 len, u32 seed);
++typedef u32 (*rht_obj_hashfn_t)(const void *data, u32 len, u32 seed);
++typedef int (*rht_obj_cmpfn_t)(struct rhashtable_compare_arg *arg,
++			       const void *obj);
++
++struct rhashtable;
++
++/**
++ * struct rhashtable_params - Hash table construction parameters
++ * @nelem_hint: Hint on number of elements, should be 75% of desired size
++ * @key_len: Length of key
++ * @key_offset: Offset of key in struct to be hashed
++ * @head_offset: Offset of rhash_head in struct to be hashed
++ * @insecure_max_entries: Maximum number of entries (may be exceeded)
++ * @max_size: Maximum size while expanding
++ * @min_size: Minimum size while shrinking
++ * @nulls_base: Base value to generate nulls marker
++ * @insecure_elasticity: Set to true to disable chain length checks
++ * @automatic_shrinking: Enable automatic shrinking of tables
++ * @locks_mul: Number of bucket locks to allocate per cpu (default: 128)
++ * @hashfn: Hash function (default: jhash2 if !(key_len % 4), or jhash)
++ * @obj_hashfn: Function to hash object
++ * @obj_cmpfn: Function to compare key with object
++ */
++struct rhashtable_params {
++	size_t			nelem_hint;
++	size_t			key_len;
++	size_t			key_offset;
++	size_t			head_offset;
++	unsigned int		insecure_max_entries;
++	unsigned int		max_size;
++	unsigned int		min_size;
++	u32			nulls_base;
++	bool			insecure_elasticity;
++	bool			automatic_shrinking;
++	size_t			locks_mul;
++	rht_hashfn_t		hashfn;
++	rht_obj_hashfn_t	obj_hashfn;
++	rht_obj_cmpfn_t		obj_cmpfn;
++};
++
++/**
++ * struct rhashtable - Hash table handle
++ * @tbl: Bucket table
++ * @nelems: Number of elements in table
++ * @key_len: Key length for hashfn
++ * @elasticity: Maximum chain length before rehash
++ * @p: Configuration parameters
++ * @run_work: Deferred worker to expand/shrink asynchronously
++ * @mutex: Mutex to protect current/future table swapping
++ * @lock: Spin lock to protect walker list
++ */
++struct rhashtable {
++	struct bucket_table __rcu	*tbl;
++	atomic_t			nelems;
++	unsigned int			key_len;
++	unsigned int			elasticity;
++	struct rhashtable_params	p;
++	struct work_struct		run_work;
++	struct mutex                    mutex;
++	spinlock_t			lock;
++};
++
++/**
++ * struct rhashtable_walker - Hash table walker
++ * @list: List entry on list of walkers
++ * @tbl: The table that we were walking over
++ */
++struct rhashtable_walker {
++	struct list_head list;
++	struct bucket_table *tbl;
++};
++
++/**
++ * struct rhashtable_iter - Hash table iterator, fits into netlink cb
++ * @ht: Table to iterate through
++ * @p: Current pointer
++ * @walker: Associated rhashtable walker
++ * @slot: Current slot
++ * @skip: Number of entries to skip in slot
++ */
++struct rhashtable_iter {
++	struct rhashtable *ht;
++	struct rhash_head *p;
++	struct rhashtable_walker *walker;
++	unsigned int slot;
++	unsigned int skip;
++};
++
++static inline unsigned long rht_marker(const struct rhashtable *ht, u32 hash)
++{
++	return NULLS_MARKER(ht->p.nulls_base + hash);
++}
++
++#define INIT_RHT_NULLS_HEAD(ptr, ht, hash) \
++	((ptr) = (typeof(ptr)) rht_marker(ht, hash))
++
++static inline bool rht_is_a_nulls(const struct rhash_head *ptr)
++{
++	return ((unsigned long) ptr & 1);
++}
++
++static inline unsigned long rht_get_nulls_value(const struct rhash_head *ptr)
++{
++	return ((unsigned long) ptr) >> 1;
++}
++
++static inline void *rht_obj(const struct rhashtable *ht,
++			    const struct rhash_head *he)
++{
++	return (char *)he - ht->p.head_offset;
++}
++
++static inline unsigned int rht_bucket_index(const struct bucket_table *tbl,
++					    unsigned int hash)
++{
++	return (hash >> RHT_HASH_RESERVED_SPACE) & (tbl->size - 1);
++}
++
++static inline unsigned int rht_key_hashfn(
++	struct rhashtable *ht, const struct bucket_table *tbl,
++	const void *key, const struct rhashtable_params params)
++{
++	unsigned int hash;
++
++	/* params must be equal to ht->p if it isn't constant. */
++	if (!__builtin_constant_p(params.key_len))
++		hash = ht->p.hashfn(key, ht->key_len, tbl->hash_rnd);
++	else if (params.key_len) {
++		unsigned int key_len = params.key_len;
++
++		if (params.hashfn)
++			hash = params.hashfn(key, key_len, tbl->hash_rnd);
++		else if (key_len & (sizeof(u32) - 1))
++			hash = jhash(key, key_len, tbl->hash_rnd);
++		else
++			hash = jhash2(key, key_len / sizeof(u32),
++				      tbl->hash_rnd);
++	} else {
++		unsigned int key_len = ht->p.key_len;
++
++		if (params.hashfn)
++			hash = params.hashfn(key, key_len, tbl->hash_rnd);
++		else
++			hash = jhash(key, key_len, tbl->hash_rnd);
++	}
++
++	return rht_bucket_index(tbl, hash);
++}
++
++static inline unsigned int rht_head_hashfn(
++	struct rhashtable *ht, const struct bucket_table *tbl,
++	const struct rhash_head *he, const struct rhashtable_params params)
++{
++	const char *ptr = rht_obj(ht, he);
++
++	return likely(params.obj_hashfn) ?
++	       rht_bucket_index(tbl, params.obj_hashfn(ptr, params.key_len ?:
++							    ht->p.key_len,
++						       tbl->hash_rnd)) :
++	       rht_key_hashfn(ht, tbl, ptr + params.key_offset, params);
++}
++
++/**
++ * rht_grow_above_75 - returns true if nelems > 0.75 * table-size
++ * @ht:		hash table
++ * @tbl:	current table
++ */
++static inline bool rht_grow_above_75(const struct rhashtable *ht,
++				     const struct bucket_table *tbl)
++{
++	/* Expand table when exceeding 75% load */
++	return atomic_read(&ht->nelems) > (tbl->size / 4 * 3) &&
++	       (!ht->p.max_size || tbl->size < ht->p.max_size);
++}
++
++/**
++ * rht_shrink_below_30 - returns true if nelems < 0.3 * table-size
++ * @ht:		hash table
++ * @tbl:	current table
++ */
++static inline bool rht_shrink_below_30(const struct rhashtable *ht,
++				       const struct bucket_table *tbl)
++{
++	/* Shrink table beneath 30% load */
++	return atomic_read(&ht->nelems) < (tbl->size * 3 / 10) &&
++	       tbl->size > ht->p.min_size;
++}
++
++/**
++ * rht_grow_above_100 - returns true if nelems > table-size
++ * @ht:		hash table
++ * @tbl:	current table
++ */
++static inline bool rht_grow_above_100(const struct rhashtable *ht,
++				      const struct bucket_table *tbl)
++{
++	return atomic_read(&ht->nelems) > tbl->size &&
++		(!ht->p.max_size || tbl->size < ht->p.max_size);
++}
++
++/**
++ * rht_grow_above_max - returns true if table is above maximum
++ * @ht:		hash table
++ * @tbl:	current table
++ */
++static inline bool rht_grow_above_max(const struct rhashtable *ht,
++				      const struct bucket_table *tbl)
++{
++	return ht->p.insecure_max_entries &&
++	       atomic_read(&ht->nelems) >= ht->p.insecure_max_entries;
++}
++
++/* The bucket lock is selected based on the hash and protects mutations
++ * on a group of hash buckets.
++ *
++ * A maximum of tbl->size/2 bucket locks is allocated. This ensures that
++ * a single lock always covers both buckets which may both contains
++ * entries which link to the same bucket of the old table during resizing.
++ * This allows to simplify the locking as locking the bucket in both
++ * tables during resize always guarantee protection.
++ *
++ * IMPORTANT: When holding the bucket lock of both the old and new table
++ * during expansions and shrinking, the old bucket lock must always be
++ * acquired first.
++ */
++static inline spinlock_t *rht_bucket_lock(const struct bucket_table *tbl,
++					  unsigned int hash)
++{
++	return &tbl->locks[hash & tbl->locks_mask];
++}
++
++#ifdef CONFIG_PROVE_LOCKING
++int lockdep_rht_mutex_is_held(struct rhashtable *ht);
++int lockdep_rht_bucket_is_held(const struct bucket_table *tbl, u32 hash);
++#else
++static inline int lockdep_rht_mutex_is_held(struct rhashtable *ht)
++{
++	return 1;
++}
++
++static inline int lockdep_rht_bucket_is_held(const struct bucket_table *tbl,
++					     u32 hash)
++{
++	return 1;
++}
++#endif /* CONFIG_PROVE_LOCKING */
++
++int rhashtable_init(struct rhashtable *ht,
++		    const struct rhashtable_params *params);
++
++struct bucket_table *rhashtable_insert_slow(struct rhashtable *ht,
++					    const void *key,
++					    struct rhash_head *obj,
++					    struct bucket_table *old_tbl);
++int rhashtable_insert_rehash(struct rhashtable *ht, struct bucket_table *tbl);
++
++int rhashtable_walk_init(struct rhashtable *ht, struct rhashtable_iter *iter);
++void rhashtable_walk_exit(struct rhashtable_iter *iter);
++int rhashtable_walk_start(struct rhashtable_iter *iter) __acquires(RCU);
++void *rhashtable_walk_next(struct rhashtable_iter *iter);
++void rhashtable_walk_stop(struct rhashtable_iter *iter) __releases(RCU);
++
++void rhashtable_free_and_destroy(struct rhashtable *ht,
++				 void (*free_fn)(void *ptr, void *arg),
++				 void *arg);
++void rhashtable_destroy(struct rhashtable *ht);
++
++#define rht_dereference(p, ht) \
++	rcu_dereference_protected(p, lockdep_rht_mutex_is_held(ht))
++
++#define rht_dereference_rcu(p, ht) \
++	rcu_dereference_check(p, lockdep_rht_mutex_is_held(ht))
++
++#define rht_dereference_bucket(p, tbl, hash) \
++	rcu_dereference_protected(p, lockdep_rht_bucket_is_held(tbl, hash))
++
++#define rht_dereference_bucket_rcu(p, tbl, hash) \
++	rcu_dereference_check(p, lockdep_rht_bucket_is_held(tbl, hash))
++
++#define rht_entry(tpos, pos, member) \
++	({ tpos = container_of(pos, typeof(*tpos), member); 1; })
++
++/**
++ * rht_for_each_continue - continue iterating over hash chain
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @head:	the previous &struct rhash_head to continue from
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ */
++#define rht_for_each_continue(pos, head, tbl, hash) \
++	for (pos = rht_dereference_bucket(head, tbl, hash); \
++	     !rht_is_a_nulls(pos); \
++	     pos = rht_dereference_bucket((pos)->next, tbl, hash))
++
++/**
++ * rht_for_each - iterate over hash chain
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ */
++#define rht_for_each(pos, tbl, hash) \
++	rht_for_each_continue(pos, (tbl)->buckets[hash], tbl, hash)
++
++/**
++ * rht_for_each_entry_continue - continue iterating over hash chain
++ * @tpos:	the type * to use as a loop cursor.
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @head:	the previous &struct rhash_head to continue from
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ * @member:	name of the &struct rhash_head within the hashable struct.
++ */
++#define rht_for_each_entry_continue(tpos, pos, head, tbl, hash, member)	\
++	for (pos = rht_dereference_bucket(head, tbl, hash);		\
++	     (!rht_is_a_nulls(pos)) && rht_entry(tpos, pos, member);	\
++	     pos = rht_dereference_bucket((pos)->next, tbl, hash))
++
++/**
++ * rht_for_each_entry - iterate over hash chain of given type
++ * @tpos:	the type * to use as a loop cursor.
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ * @member:	name of the &struct rhash_head within the hashable struct.
++ */
++#define rht_for_each_entry(tpos, pos, tbl, hash, member)		\
++	rht_for_each_entry_continue(tpos, pos, (tbl)->buckets[hash],	\
++				    tbl, hash, member)
++
++/**
++ * rht_for_each_entry_safe - safely iterate over hash chain of given type
++ * @tpos:	the type * to use as a loop cursor.
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @next:	the &struct rhash_head to use as next in loop cursor.
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ * @member:	name of the &struct rhash_head within the hashable struct.
++ *
++ * This hash chain list-traversal primitive allows for the looped code to
++ * remove the loop cursor from the list.
++ */
++#define rht_for_each_entry_safe(tpos, pos, next, tbl, hash, member)	    \
++	for (pos = rht_dereference_bucket((tbl)->buckets[hash], tbl, hash), \
++	     next = !rht_is_a_nulls(pos) ?				    \
++		       rht_dereference_bucket(pos->next, tbl, hash) : NULL; \
++	     (!rht_is_a_nulls(pos)) && rht_entry(tpos, pos, member);	    \
++	     pos = next,						    \
++	     next = !rht_is_a_nulls(pos) ?				    \
++		       rht_dereference_bucket(pos->next, tbl, hash) : NULL)
++
++/**
++ * rht_for_each_rcu_continue - continue iterating over rcu hash chain
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @head:	the previous &struct rhash_head to continue from
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ *
++ * This hash chain list-traversal primitive may safely run concurrently with
++ * the _rcu mutation primitives such as rhashtable_insert() as long as the
++ * traversal is guarded by rcu_read_lock().
++ */
++#define rht_for_each_rcu_continue(pos, head, tbl, hash)			\
++	for (({barrier(); }),						\
++	     pos = rht_dereference_bucket_rcu(head, tbl, hash);		\
++	     !rht_is_a_nulls(pos);					\
++	     pos = rcu_dereference_raw(pos->next))
++
++/**
++ * rht_for_each_rcu - iterate over rcu hash chain
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ *
++ * This hash chain list-traversal primitive may safely run concurrently with
++ * the _rcu mutation primitives such as rhashtable_insert() as long as the
++ * traversal is guarded by rcu_read_lock().
++ */
++#define rht_for_each_rcu(pos, tbl, hash)				\
++	rht_for_each_rcu_continue(pos, (tbl)->buckets[hash], tbl, hash)
++
++/**
++ * rht_for_each_entry_rcu_continue - continue iterating over rcu hash chain
++ * @tpos:	the type * to use as a loop cursor.
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @head:	the previous &struct rhash_head to continue from
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ * @member:	name of the &struct rhash_head within the hashable struct.
++ *
++ * This hash chain list-traversal primitive may safely run concurrently with
++ * the _rcu mutation primitives such as rhashtable_insert() as long as the
++ * traversal is guarded by rcu_read_lock().
++ */
++#define rht_for_each_entry_rcu_continue(tpos, pos, head, tbl, hash, member) \
++	for (({barrier(); }),						    \
++	     pos = rht_dereference_bucket_rcu(head, tbl, hash);		    \
++	     (!rht_is_a_nulls(pos)) && rht_entry(tpos, pos, member);	    \
++	     pos = rht_dereference_bucket_rcu(pos->next, tbl, hash))
++
++/**
++ * rht_for_each_entry_rcu - iterate over rcu hash chain of given type
++ * @tpos:	the type * to use as a loop cursor.
++ * @pos:	the &struct rhash_head to use as a loop cursor.
++ * @tbl:	the &struct bucket_table
++ * @hash:	the hash value / bucket index
++ * @member:	name of the &struct rhash_head within the hashable struct.
++ *
++ * This hash chain list-traversal primitive may safely run concurrently with
++ * the _rcu mutation primitives such as rhashtable_insert() as long as the
++ * traversal is guarded by rcu_read_lock().
++ */
++#define rht_for_each_entry_rcu(tpos, pos, tbl, hash, member)		\
++	rht_for_each_entry_rcu_continue(tpos, pos, (tbl)->buckets[hash],\
++					tbl, hash, member)
++
++static inline int rhashtable_compare(struct rhashtable_compare_arg *arg,
++				     const void *obj)
++{
++	struct rhashtable *ht = arg->ht;
++	const char *ptr = obj;
++
++	return memcmp(ptr + ht->p.key_offset, arg->key, ht->p.key_len);
++}
++
++/**
++ * rhashtable_lookup_fast - search hash table, inlined version
++ * @ht:		hash table
++ * @key:	the pointer to the key
++ * @params:	hash table parameters
++ *
++ * Computes the hash value for the key and traverses the bucket chain looking
++ * for a entry with an identical key. The first matching entry is returned.
++ *
++ * Returns the first entry on which the compare function returned true.
++ */
++static inline void *rhashtable_lookup_fast(
++	struct rhashtable *ht, const void *key,
++	const struct rhashtable_params params)
++{
++	struct rhashtable_compare_arg arg = {
++		.ht = ht,
++		.key = key,
++	};
++	const struct bucket_table *tbl;
++	struct rhash_head *he;
++	unsigned int hash;
++
++	rcu_read_lock();
++
++	tbl = rht_dereference_rcu(ht->tbl, ht);
++restart:
++	hash = rht_key_hashfn(ht, tbl, key, params);
++	rht_for_each_rcu(he, tbl, hash) {
++		if (params.obj_cmpfn ?
++		    params.obj_cmpfn(&arg, rht_obj(ht, he)) :
++		    rhashtable_compare(&arg, rht_obj(ht, he)))
++			continue;
++		rcu_read_unlock();
++		return rht_obj(ht, he);
++	}
++
++	/* Ensure we see any new tables. */
++	smp_rmb();
++
++	tbl = rht_dereference_rcu(tbl->future_tbl, ht);
++	if (unlikely(tbl))
++		goto restart;
++	rcu_read_unlock();
++
++	return NULL;
++}
++
++/* Internal function, please use rhashtable_insert_fast() instead */
++static inline int __rhashtable_insert_fast(
++	struct rhashtable *ht, const void *key, struct rhash_head *obj,
++	const struct rhashtable_params params)
++{
++	struct rhashtable_compare_arg arg = {
++		.ht = ht,
++		.key = key,
++	};
++	struct bucket_table *tbl, *new_tbl;
++	struct rhash_head *head;
++	spinlock_t *lock;
++	unsigned int elasticity;
++	unsigned int hash;
++	int err;
++
++restart:
++	rcu_read_lock();
++
++	tbl = rht_dereference_rcu(ht->tbl, ht);
++
++	/* All insertions must grab the oldest table containing
++	 * the hashed bucket that is yet to be rehashed.
++	 */
++	for (;;) {
++		hash = rht_head_hashfn(ht, tbl, obj, params);
++		lock = rht_bucket_lock(tbl, hash);
++		spin_lock_bh(lock);
++
++		if (tbl->rehash <= hash)
++			break;
++
++		spin_unlock_bh(lock);
++		tbl = rht_dereference_rcu(tbl->future_tbl, ht);
++	}
++
++	new_tbl = rht_dereference_rcu(tbl->future_tbl, ht);
++	if (unlikely(new_tbl)) {
++		tbl = rhashtable_insert_slow(ht, key, obj, new_tbl);
++		if (!IS_ERR_OR_NULL(tbl))
++			goto slow_path;
++
++		err = PTR_ERR(tbl);
++		goto out;
++	}
++
++	err = -E2BIG;
++	if (unlikely(rht_grow_above_max(ht, tbl)))
++		goto out;
++
++	if (unlikely(rht_grow_above_100(ht, tbl))) {
++slow_path:
++		spin_unlock_bh(lock);
++		err = rhashtable_insert_rehash(ht, tbl);
++		rcu_read_unlock();
++		if (err)
++			return err;
++
++		goto restart;
++	}
++
++	err = -EEXIST;
++	elasticity = ht->elasticity;
++	rht_for_each(head, tbl, hash) {
++		if (key &&
++		    unlikely(!(params.obj_cmpfn ?
++			       params.obj_cmpfn(&arg, rht_obj(ht, head)) :
++			       rhashtable_compare(&arg, rht_obj(ht, head)))))
++			goto out;
++		if (!--elasticity)
++			goto slow_path;
++	}
++
++	err = 0;
++
++	head = rht_dereference_bucket(tbl->buckets[hash], tbl, hash);
++
++	RCU_INIT_POINTER(obj->next, head);
++
++	rcu_assign_pointer(tbl->buckets[hash], obj);
++
++	atomic_inc(&ht->nelems);
++	if (rht_grow_above_75(ht, tbl))
++		schedule_work(&ht->run_work);
++
++out:
++	spin_unlock_bh(lock);
++	rcu_read_unlock();
++
++	return err;
++}
++
++/**
++ * rhashtable_insert_fast - insert object into hash table
++ * @ht:		hash table
++ * @obj:	pointer to hash head inside object
++ * @params:	hash table parameters
++ *
++ * Will take a per bucket spinlock to protect against mutual mutations
++ * on the same bucket. Multiple insertions may occur in parallel unless
++ * they map to the same bucket lock.
++ *
++ * It is safe to call this function from atomic context.
++ *
++ * Will trigger an automatic deferred table resizing if the size grows
++ * beyond the watermark indicated by grow_decision() which can be passed
++ * to rhashtable_init().
++ */
++static inline int rhashtable_insert_fast(
++	struct rhashtable *ht, struct rhash_head *obj,
++	const struct rhashtable_params params)
++{
++	return __rhashtable_insert_fast(ht, NULL, obj, params);
++}
++
++/**
++ * rhashtable_lookup_insert_fast - lookup and insert object into hash table
++ * @ht:		hash table
++ * @obj:	pointer to hash head inside object
++ * @params:	hash table parameters
++ *
++ * Locks down the bucket chain in both the old and new table if a resize
++ * is in progress to ensure that writers can't remove from the old table
++ * and can't insert to the new table during the atomic operation of search
++ * and insertion. Searches for duplicates in both the old and new table if
++ * a resize is in progress.
++ *
++ * This lookup function may only be used for fixed key hash table (key_len
++ * parameter set). It will BUG() if used inappropriately.
++ *
++ * It is safe to call this function from atomic context.
++ *
++ * Will trigger an automatic deferred table resizing if the size grows
++ * beyond the watermark indicated by grow_decision() which can be passed
++ * to rhashtable_init().
++ */
++static inline int rhashtable_lookup_insert_fast(
++	struct rhashtable *ht, struct rhash_head *obj,
++	const struct rhashtable_params params)
++{
++	const char *key = rht_obj(ht, obj);
++
++	BUG_ON(ht->p.obj_hashfn);
++
++	return __rhashtable_insert_fast(ht, key + ht->p.key_offset, obj,
++					params);
++}
++
++/**
++ * rhashtable_lookup_insert_key - search and insert object to hash table
++ *				  with explicit key
++ * @ht:		hash table
++ * @key:	key
++ * @obj:	pointer to hash head inside object
++ * @params:	hash table parameters
++ *
++ * Locks down the bucket chain in both the old and new table if a resize
++ * is in progress to ensure that writers can't remove from the old table
++ * and can't insert to the new table during the atomic operation of search
++ * and insertion. Searches for duplicates in both the old and new table if
++ * a resize is in progress.
++ *
++ * Lookups may occur in parallel with hashtable mutations and resizing.
++ *
++ * Will trigger an automatic deferred table resizing if the size grows
++ * beyond the watermark indicated by grow_decision() which can be passed
++ * to rhashtable_init().
++ *
++ * Returns zero on success.
++ */
++static inline int rhashtable_lookup_insert_key(
++	struct rhashtable *ht, const void *key, struct rhash_head *obj,
++	const struct rhashtable_params params)
++{
++	BUG_ON(!ht->p.obj_hashfn || !key);
++
++	return __rhashtable_insert_fast(ht, key, obj, params);
++}
++
++/* Internal function, please use rhashtable_remove_fast() instead */
++static inline int __rhashtable_remove_fast(
++	struct rhashtable *ht, struct bucket_table *tbl,
++	struct rhash_head *obj, const struct rhashtable_params params)
++{
++	struct rhash_head __rcu **pprev;
++	struct rhash_head *he;
++	spinlock_t * lock;
++	unsigned int hash;
++	int err = -ENOENT;
++
++	hash = rht_head_hashfn(ht, tbl, obj, params);
++	lock = rht_bucket_lock(tbl, hash);
++
++	spin_lock_bh(lock);
++
++	pprev = &tbl->buckets[hash];
++	rht_for_each(he, tbl, hash) {
++		if (he != obj) {
++			pprev = &he->next;
++			continue;
++		}
++
++		rcu_assign_pointer(*pprev, obj->next);
++		err = 0;
++		break;
++	}
++
++	spin_unlock_bh(lock);
++
++	return err;
++}
++
++/**
++ * rhashtable_remove_fast - remove object from hash table
++ * @ht:		hash table
++ * @obj:	pointer to hash head inside object
++ * @params:	hash table parameters
++ *
++ * Since the hash chain is single linked, the removal operation needs to
++ * walk the bucket chain upon removal. The removal operation is thus
++ * considerable slow if the hash table is not correctly sized.
++ *
++ * Will automatically shrink the table via rhashtable_expand() if the
++ * shrink_decision function specified at rhashtable_init() returns true.
++ *
++ * Returns zero on success, -ENOENT if the entry could not be found.
++ */
++static inline int rhashtable_remove_fast(
++	struct rhashtable *ht, struct rhash_head *obj,
++	const struct rhashtable_params params)
++{
++	struct bucket_table *tbl;
++	int err;
++
++	rcu_read_lock();
++
++	tbl = rht_dereference_rcu(ht->tbl, ht);
++
++	/* Because we have already taken (and released) the bucket
++	 * lock in old_tbl, if we find that future_tbl is not yet
++	 * visible then that guarantees the entry to still be in
++	 * the old tbl if it exists.
++	 */
++	while ((err = __rhashtable_remove_fast(ht, tbl, obj, params)) &&
++	       (tbl = rht_dereference_rcu(tbl->future_tbl, ht)))
++		;
++
++	if (err)
++		goto out;
++
++	atomic_dec(&ht->nelems);
++	if (unlikely(ht->p.automatic_shrinking &&
++		     rht_shrink_below_30(ht, tbl)))
++		schedule_work(&ht->run_work);
++
++out:
++	rcu_read_unlock();
++
++	return err;
++}
++
++/* Internal function, please use rhashtable_replace_fast() instead */
++static inline int __rhashtable_replace_fast(
++	struct rhashtable *ht, struct bucket_table *tbl,
++	struct rhash_head *obj_old, struct rhash_head *obj_new,
++	const struct rhashtable_params params)
++{
++	struct rhash_head __rcu **pprev;
++	struct rhash_head *he;
++	spinlock_t *lock;
++	unsigned int hash;
++	int err = -ENOENT;
++
++	/* Minimally, the old and new objects must have same hash
++	 * (which should mean identifiers are the same).
++	 */
++	hash = rht_head_hashfn(ht, tbl, obj_old, params);
++	if (hash != rht_head_hashfn(ht, tbl, obj_new, params))
++		return -EINVAL;
++
++	lock = rht_bucket_lock(tbl, hash);
++
++	spin_lock_bh(lock);
++
++	pprev = &tbl->buckets[hash];
++	rht_for_each(he, tbl, hash) {
++		if (he != obj_old) {
++			pprev = &he->next;
++			continue;
++		}
++
++		rcu_assign_pointer(obj_new->next, obj_old->next);
++		rcu_assign_pointer(*pprev, obj_new);
++		err = 0;
++		break;
++	}
++
++	spin_unlock_bh(lock);
++
++	return err;
++}
++
++/**
++ * rhashtable_replace_fast - replace an object in hash table
++ * @ht:		hash table
++ * @obj_old:	pointer to hash head inside object being replaced
++ * @obj_new:	pointer to hash head inside object which is new
++ * @params:	hash table parameters
++ *
++ * Replacing an object doesn't affect the number of elements in the hash table
++ * or bucket, so we don't need to worry about shrinking or expanding the
++ * table here.
++ *
++ * Returns zero on success, -ENOENT if the entry could not be found,
++ * -EINVAL if hash is not the same for the old and new objects.
++ */
++static inline int rhashtable_replace_fast(
++	struct rhashtable *ht, struct rhash_head *obj_old,
++	struct rhash_head *obj_new,
++	const struct rhashtable_params params)
++{
++	struct bucket_table *tbl;
++	int err;
++
++	rcu_read_lock();
++
++	tbl = rht_dereference_rcu(ht->tbl, ht);
++
++	/* Because we have already taken (and released) the bucket
++	 * lock in old_tbl, if we find that future_tbl is not yet
++	 * visible then that guarantees the entry to still be in
++	 * the old tbl if it exists.
++	 */
++	while ((err = __rhashtable_replace_fast(ht, tbl, obj_old,
++						obj_new, params)) &&
++	       (tbl = rht_dereference_rcu(tbl->future_tbl, ht)))
++		;
++
++	rcu_read_unlock();
++
++	return err;
++}
++
++#endif /* _LINUX_RHASHTABLE_H */
+--- a/rdmavt/trace_cq.h
++++ b/rdmavt/trace_cq.h
+@@ -76,8 +76,8 @@
+ 
+ DECLARE_EVENT_CLASS(rvt_cq_template,
+ 		    TP_PROTO(struct rvt_cq *cq,
+-			     const struct ib_cq_init_attr *attr),
+-		    TP_ARGS(cq, attr),
++					 int entries, int comp_vector),
++			TP_ARGS(cq, entries, comp_vector),
+ 		    TP_STRUCT__entry(RDI_DEV_ENTRY(cq->rdi)
+ 				     __field(struct rvt_mmap_info *, ip)
+ 				     __field(unsigned int, cqe)
+@@ -87,11 +87,11 @@
+ 				     ),
+ 		    TP_fast_assign(RDI_DEV_ASSIGN(cq->rdi)
+ 				   __entry->ip = cq->ip;
+-				   __entry->cqe = attr->cqe;
+-				   __entry->comp_vector = attr->comp_vector;
++			   	   __entry->cqe = entries;
++				   __entry->comp_vector = comp_vector;
+ 				   __entry->comp_vector_cpu =
+ 							cq->comp_vector_cpu;
+-				   __entry->flags = attr->flags;
++				   __entry->flags = 0;
+ 				   ),
+ 		    TP_printk(CQ_ATTR_PRINT, __get_str(dev),
+ 			      __entry->ip ? "true" : "false", __entry->cqe,
+@@ -101,8 +101,8 @@
+ );
+ 
+ DEFINE_EVENT(rvt_cq_template, rvt_create_cq,
+-	     TP_PROTO(struct rvt_cq *cq, const struct ib_cq_init_attr *attr),
+-	     TP_ARGS(cq, attr));
++		 TP_PROTO(struct rvt_cq *cq, int entries, int comp_vector),
++		 TP_ARGS(cq, entries, comp_vector));
+ 
+ #define CQ_PRN \
+ "[%s] idx %u wr_id %llx status %u opcode %u,%s length %u qpn %x"
+--- a/hfi1/hfi.h
++++ b/hfi1/hfi.h
+@@ -657,7 +657,7 @@
+ #define MAX_NAME_SIZE 64
+ struct hfi1_msix_entry {
+ 	enum irq_type type;
+-#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)
++#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3) || defined(IFS_DEB8)
+ 	struct msix_entry msix;
+ #endif
+ 	int irq;
+--- a/rdmavt/compat.c
++++ b/rdmavt/compat.c
+@@ -58,6 +58,55 @@
+ #include "../hfi1/hfi.h"
+ #include "compat.h"
+ 
++struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr)
++{
++        struct ib_ah *ah;
++
++        ah = pd->device->create_ah(pd, ah_attr);
++
++        if (!IS_ERR(ah)) {
++                ah->device  = pd->device;
++                ah->pd      = pd;
++                ah->uobject = NULL;
++                atomic_inc(&pd->usecnt);
++        }
++
++        return ah;
++}
++EXPORT_SYMBOL(rdma_create_ah);
++
++int pci_alloc_irq_vectors(struct pci_dev *pcidev, unsigned int min_vecs,
++                          unsigned int max_vecs, unsigned int flags)
++{
++        int i, nvec;
++        struct hfi1_msix_entry *entries;
++
++        if (min_vecs != 1 || max_vecs < min_vecs)
++                return -ERANGE;
++
++        nvec = max_vecs;
++
++        if (flags & PCI_IRQ_MSIX) {
++                entries = kcalloc(nvec, sizeof(*entries), GFP_KERNEL);
++                if (!entries)
++                        return -ENOMEM;
++
++                /* 1-1 MSI-X entry assignment */
++                for (i = 0; i < max_vecs; i++)
++                        entries[i].msix.entry = i;
++
++                msix_setup(pcidev, pcidev->msix_cap, &nvec, entries);
++                return nvec;
++        }
++        if (flags & PCI_IRQ_LEGACY) {
++                hfi1_enable_intx(pcidev);
++                return 1;
++        }
++
++        return -ENOSPC;
++}
++EXPORT_SYMBOL(pci_alloc_irq_vectors);
++
+ void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
+ 		struct hfi1_msix_entry *hfi1_msix_entry)
+ {
+@@ -147,3 +196,171 @@
+ 	srcu_read_unlock(&debugfs_srcu, srcu_idx);
+ }
+ EXPORT_SYMBOL(debugfs_use_file_finish);
++
++//DMA
++/*
++ * The following functions implement driver specific replacements
++ * for the ib_dma_*() functions.
++ *
++ * These functions return kernel virtual addresses instead of
++ * device bus addresses since the driver uses the CPU to copy
++ * data instead of using hardware DMA.
++ */
++static int rvt_mapping_error(struct ib_device *dev, u64 dma_addr)
++{
++        return dma_addr == BAD_DMA_ADDRESS;
++}
++
++static u64 rvt_dma_map_single(struct ib_device *dev, void *cpu_addr,
++                              size_t size, enum dma_data_direction direction)
++{
++        if (WARN_ON(!valid_dma_direction(direction)))
++                return BAD_DMA_ADDRESS;
++
++        return (u64)cpu_addr;
++}
++
++static void rvt_dma_unmap_single(struct ib_device *dev, u64 addr, size_t size,
++                                 enum dma_data_direction direction)
++{
++        /* This is a stub, nothing to be done here */
++}
++
++static u64 rvt_dma_map_page(struct ib_device *dev, struct page *page,
++                            unsigned long offset, size_t size,
++                            enum dma_data_direction direction)
++{
++        u64 addr;
++
++        if (WARN_ON(!valid_dma_direction(direction)))
++                return BAD_DMA_ADDRESS;
++        addr = (u64)page_address(page);
++        if (addr)
++                addr += offset;
++
++        return addr;
++}
++
++static void rvt_dma_unmap_page(struct ib_device *dev, u64 addr, size_t size,
++                               enum dma_data_direction direction)
++{
++        /* This is a stub, nothing to be done here */
++}
++
++static int rvt_map_sg(struct ib_device *dev, struct scatterlist *sgl,
++                      int nents, enum dma_data_direction direction)
++{
++        struct scatterlist *sg;        u64 addr;
++        int i;
++        int ret = nents;
++
++        if (WARN_ON(!valid_dma_direction(direction)))
++                return 0;
++
++        for_each_sg(sgl, sg, nents, i) {
++                addr = (u64)page_address(sg_page(sg));
++                if (!addr) {
++                        ret = 0;
++                        break;
++                }
++                sg->dma_address = addr + sg->offset;
++                #ifdef CONFIG_NEED_SG_DMA_LENGTH
++                sg->dma_length = sg->length;
++                #endif
++        }
++        return ret;
++}
++
++static void rvt_unmap_sg(struct ib_device *dev,
++                         struct scatterlist *sg, int nents,
++                         enum dma_data_direction direction)
++{
++        /* This is a stub, nothing to be done here */
++}
++
++static void rvt_sync_single_for_cpu(struct ib_device *dev, u64 addr,
++                                    size_t size, enum dma_data_direction dir)
++{
++}
++
++static void rvt_sync_single_for_device(struct ib_device *dev, u64 addr,
++                                       size_t size,
++                                       enum dma_data_direction dir)
++{
++}
++
++static void *rvt_dma_alloc_coherent(struct ib_device *dev, size_t size,
++                                    u64 *dma_handle, gfp_t flag){
++        struct page *p;
++        void *addr = NULL;
++
++        p = alloc_pages(flag, get_order(size));
++        if (p)
++                addr = page_address(p);
++        if (dma_handle)
++                *dma_handle = (u64)addr;
++        return addr;
++}
++
++static void rvt_dma_free_coherent(struct ib_device *dev, size_t size,
++                                  void *cpu_addr, u64 dma_handle)
++{
++        free_pages((unsigned long)cpu_addr, get_order(size));
++}
++
++/*
++ * We should only need to wait 100ms after FLR, but some devices take longer.
++ * Wait for up to 1000ms for config space to return something other than -1.
++ * Intel IGD requires this when an LCD panel is attached.  We read the 2nd
++ * dword because VFs don't implement the 1st dword.
++ */
++static void pci_flr_wait(struct pci_dev *dev)
++{
++        int i = 0;
++        u32 id;
++        do {
++                msleep(100);
++                pci_read_config_dword(dev, PCI_COMMAND, &id);
++        } while (i++ < 10 && id == ~0);
++
++        if (id == ~0)
++                dev_warn(&dev->dev, "Failed to return from FLR\n");
++        else if (i > 1)
++                dev_info(&dev->dev, "Required additional %dms to return from FLR\n",
++                         (i - 1) * 100);
++}
++
++/**
++ * pcie_flr - initiate a PCIe function level reset
++ *  @dev:        device to reset
++ *
++ * Initiate a function level reset on @dev.  The caller should ensure the
++ * device supports FLR before calling this function, e.g. by using the
++ * pcie_has_flr() helper.
++ */
++void pcie_flr(struct pci_dev *dev)
++{
++        if (!pci_wait_for_pending_transaction(dev))
++                dev_err(&dev->dev,
++                        "timed out waiting for pending transaction; performing function level reset anyway\n");
++
++                pcie_capability_set_word(dev,
++                                         PCI_EXP_DEVCTL,
++                                         PCI_EXP_DEVCTL_BCR_FLR);
++        pci_flr_wait(dev);
++}
++EXPORT_SYMBOL_GPL(pcie_flr);
++
++struct ib_dma_mapping_ops rvt_default_dma_mapping_ops = {
++        .mapping_error = rvt_mapping_error,
++        .map_single = rvt_dma_map_single,
++        .unmap_single = rvt_dma_unmap_single,
++        .map_page = rvt_dma_map_page,
++        .unmap_page = rvt_dma_unmap_page,
++        .map_sg = rvt_map_sg,
++        .unmap_sg = rvt_unmap_sg,
++        .sync_single_for_cpu = rvt_sync_single_for_cpu,
++        .sync_single_for_device = rvt_sync_single_for_device,
++        .alloc_coherent = rvt_dma_alloc_coherent,
++        .free_coherent = rvt_dma_free_coherent
++};
+--- a/rdmavt/mr.h
++++ b/rdmavt/mr.h
+@@ -82,6 +82,7 @@
+ struct ib_mr *rvt_alloc_mr(struct ib_pd *pd,
+ 			   enum ib_mr_type mr_type,
+ 			   u32 max_num_sg);
++#ifdef CONFIG_RVT_MAP_MR_SG
+ #if !defined(IFS_SLES12SP2)
+ int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
+ 		  int sg_nents, unsigned int *sg_offset);
+@@ -89,6 +90,7 @@
+ int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
+ 		  int sg_nents);
+ #endif
++#endif /* CONFIG_RVT_MAP_MR_SG */
+ struct ib_fmr *rvt_alloc_fmr(struct ib_pd *pd, int mr_access_flags,
+ 			     struct ib_fmr_attr *fmr_attr);
+ int rvt_map_phys_fmr(struct ib_fmr *ibfmr, u64 *page_list,
+--- a/include/rdma/rdmavt_mr.h
++++ b/include/rdma/rdmavt_mr.h
+@@ -52,7 +52,6 @@
+  * For Memory Regions. This stuff should probably be moved into rdmavt/mr.h once
+  * drivers no longer need access to the MR directly.
+  */
+-#include <linux/percpu-refcount.h>
+ 
+ /*
+  * A segment is a linear region of low physical memory.
+@@ -83,7 +82,7 @@
+ 	atomic_t lkey_invalid;	/* true if current lkey is invalid */
+ 	u8  page_shift;         /* 0 - non unform/non powerof2 sizes */
+ 	u8  lkey_published;     /* in global table */
+-	struct percpu_ref refcount;
++	atomic_t refcount;
+ 	struct completion comp; /* complete when refcount goes to zero */
+ 	struct rvt_segarray *map[0];    /* the segments */
+ };
+@@ -124,12 +123,13 @@
+ 
+ static inline void rvt_put_mr(struct rvt_mregion *mr)
+ {
+-	percpu_ref_put(&mr->refcount);
++	if (unlikely(atomic_dec_and_test(&mr->refcount)))
++		complete(&mr->comp);
+ }
+ 
+ static inline void rvt_get_mr(struct rvt_mregion *mr)
+ {
+-	percpu_ref_get(&mr->refcount);
++	atomic_inc(&mr->refcount);
+ }
+ 
+ static inline void rvt_put_ss(struct rvt_sge_state *ss)

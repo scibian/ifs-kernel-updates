@@ -27,9 +27,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -659,6 +659,24 @@ void ipoib_reap_ah(struct work_struct *w
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -659,6 +659,24 @@
  				   round_jiffies_relative(HZ));
  }
  
@@ -54,7 +54,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static void ipoib_ib_tx_timer_func(unsigned long ctx)
  {
  	drain_tx_cq((struct net_device *)ctx);
-@@ -877,24 +895,7 @@ timeout:
+@@ -877,24 +895,7 @@
  	if (ib_modify_qp(priv->qp, &qp_attr, IB_QP_STATE))
  		ipoib_warn(priv, "Failed to modify QP to RESET state\n");
  
@@ -80,7 +80,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	ib_req_notify_cq(priv->recv_cq, IB_CQ_NEXT_COMP);
  
-@@ -1046,6 +1047,7 @@ static void __ipoib_ib_dev_flush(struct
+@@ -1046,6 +1047,7 @@
  		ipoib_mcast_dev_flush(dev);
  		if (oper_up)
  			set_bit(IPOIB_FLAG_OPER_UP, &priv->flags);
@@ -88,7 +88,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  
  	if (level >= IPOIB_FLUSH_NORMAL)
-@@ -1109,6 +1111,14 @@ void ipoib_ib_dev_cleanup(struct net_dev
+@@ -1109,6 +1111,14 @@
  	ipoib_mcast_stop_thread(dev, 1);
  	ipoib_mcast_dev_flush(dev);
  

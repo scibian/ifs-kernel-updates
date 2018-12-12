@@ -11,9 +11,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -985,20 +985,21 @@ static inline int update_child_pkey(stru
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -985,20 +985,21 @@
  }
  
  static void __ipoib_ib_dev_flush(struct ipoib_dev_priv *priv,
@@ -38,7 +38,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	up_read(&priv->vlan_rwsem);
  
-@@ -1085,7 +1086,7 @@ void ipoib_ib_dev_flush_light(struct wor
+@@ -1085,7 +1086,7 @@
  	struct ipoib_dev_priv *priv =
  		container_of(work, struct ipoib_dev_priv, flush_light);
  
@@ -47,7 +47,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  void ipoib_ib_dev_flush_normal(struct work_struct *work)
-@@ -1093,7 +1094,7 @@ void ipoib_ib_dev_flush_normal(struct wo
+@@ -1093,7 +1094,7 @@
  	struct ipoib_dev_priv *priv =
  		container_of(work, struct ipoib_dev_priv, flush_normal);
  
@@ -56,7 +56,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  void ipoib_ib_dev_flush_heavy(struct work_struct *work)
-@@ -1101,7 +1102,7 @@ void ipoib_ib_dev_flush_heavy(struct wor
+@@ -1101,7 +1102,7 @@
  	struct ipoib_dev_priv *priv =
  		container_of(work, struct ipoib_dev_priv, flush_heavy);
  

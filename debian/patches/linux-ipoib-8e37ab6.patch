@@ -10,9 +10,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -1674,6 +1674,7 @@ static void ipoib_add_one(struct ib_devi
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -1712,6 +1712,7 @@
  	struct net_device *dev;
  	struct ipoib_dev_priv *priv;
  	int s, e, p;
@@ -20,7 +20,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	if (rdma_node_get_transport(device->node_type) != RDMA_TRANSPORT_IB)
  		return;
-@@ -1699,9 +1700,15 @@ static void ipoib_add_one(struct ib_devi
+@@ -1737,9 +1738,15 @@
  		if (!IS_ERR(dev)) {
  			priv = netdev_priv(dev);
  			list_add_tail(&priv->list, dev_list);

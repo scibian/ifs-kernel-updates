@@ -20,9 +20,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -99,9 +99,15 @@ enum {
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -99,9 +99,15 @@
  
  	IPOIB_MCAST_FLAG_FOUND	  = 0,	/* used in set_multicast_list */
  	IPOIB_MCAST_FLAG_SENDONLY = 1,
@@ -40,7 +40,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	MAX_SEND_CQE		  = 16,
  	IPOIB_CM_COPYBREAK	  = 256,
-@@ -149,6 +155,7 @@ struct ipoib_mcast {
+@@ -149,6 +155,7 @@
  
  	unsigned long created;
  	unsigned long backoff;
@@ -48,9 +48,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	unsigned long flags;
  	unsigned char logcount;
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -66,6 +66,48 @@ struct ipoib_mcast_iter {
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -66,6 +66,48 @@
  	unsigned int       send_only;
  };
  
@@ -99,7 +99,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static void ipoib_mcast_free(struct ipoib_mcast *mcast)
  {
  	struct net_device *dev = mcast->dev;
-@@ -103,6 +145,7 @@ static struct ipoib_mcast *ipoib_mcast_a
+@@ -103,6 +145,7 @@
  
  	mcast->dev = dev;
  	mcast->created = jiffies;
@@ -107,7 +107,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	mcast->backoff = 1;
  
  	INIT_LIST_HEAD(&mcast->list);
-@@ -270,17 +313,31 @@ ipoib_mcast_sendonly_join_complete(int s
+@@ -270,17 +313,31 @@
  {
  	struct ipoib_mcast *mcast = multicast->context;
  	struct net_device *dev = mcast->dev;
@@ -142,7 +142,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  					mcast->mcmember.mgid.raw, status);
  
  		/* Flush out any queued packets */
-@@ -290,11 +347,18 @@ ipoib_mcast_sendonly_join_complete(int s
+@@ -290,11 +347,18 @@
  			dev_kfree_skb_any(skb_dequeue(&mcast->pkt_queue));
  		}
  		netif_tx_unlock_bh(dev);
@@ -165,7 +165,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	return status;
  }
  
-@@ -312,19 +376,18 @@ static int ipoib_mcast_sendonly_join(str
+@@ -312,19 +376,18 @@
  	int ret = 0;
  
  	if (!test_bit(IPOIB_FLAG_OPER_UP, &priv->flags)) {
@@ -190,7 +190,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	mcast->mc = ib_sa_join_multicast(&ipoib_sa_client, priv->ca,
  					 priv->port, &rec,
  					 IB_SA_MCMEMBER_REC_MGID	|
-@@ -337,12 +400,14 @@ static int ipoib_mcast_sendonly_join(str
+@@ -337,12 +400,14 @@
  	if (IS_ERR(mcast->mc)) {
  		ret = PTR_ERR(mcast->mc);
  		clear_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags);
@@ -209,7 +209,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	return ret;
  }
-@@ -390,6 +455,16 @@ static int ipoib_mcast_join_complete(int
+@@ -390,6 +455,16 @@
  	ipoib_dbg_mcast(priv, "join completion for %pI6 (status %d)\n",
  			mcast->mcmember.mgid.raw, status);
  
@@ -226,7 +226,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	/* We trap for port events ourselves. */
  	if (status == -ENETRESET) {
  		status = 0;
-@@ -401,10 +476,8 @@ static int ipoib_mcast_join_complete(int
+@@ -401,10 +476,8 @@
  
  	if (!status) {
  		mcast->backoff = 1;
@@ -239,7 +239,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  		/*
  		 * Defer carrier on work to priv->wq to avoid a
-@@ -412,37 +485,26 @@ static int ipoib_mcast_join_complete(int
+@@ -412,37 +485,26 @@
  		 */
  		if (mcast == priv->broadcast)
  			queue_work(priv->wq, &priv->carrier_on_task);
@@ -293,7 +293,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	return status;
  }
  
-@@ -491,29 +553,18 @@ static void ipoib_mcast_join(struct net_
+@@ -491,29 +553,18 @@
  		rec.hop_limit	  = priv->broadcast->mcmember.hop_limit;
  	}
  
@@ -327,7 +327,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  void ipoib_mcast_join_task(struct work_struct *work)
-@@ -522,6 +573,9 @@ void ipoib_mcast_join_task(struct work_s
+@@ -522,6 +573,9 @@
  		container_of(work, struct ipoib_dev_priv, mcast_task.work);
  	struct net_device *dev = priv->dev;
  	struct ib_port_attr port_attr;
@@ -337,7 +337,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	if (!test_bit(IPOIB_MCAST_RUN, &priv->flags))
  		return;
-@@ -539,64 +593,102 @@ void ipoib_mcast_join_task(struct work_s
+@@ -542,64 +596,102 @@
  	else
  		memcpy(priv->dev->dev_addr + 4, priv->local_gid.raw, sizeof (union ib_gid));
  
@@ -475,7 +475,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  int ipoib_mcast_start_thread(struct net_device *dev)
-@@ -606,8 +698,8 @@ int ipoib_mcast_start_thread(struct net_
+@@ -609,8 +701,8 @@
  	ipoib_dbg_mcast(priv, "starting multicast thread\n");
  
  	mutex_lock(&mcast_mutex);
@@ -486,7 +486,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	mutex_unlock(&mcast_mutex);
  
  	return 0;
-@@ -635,7 +727,12 @@ static int ipoib_mcast_leave(struct net_
+@@ -638,7 +730,12 @@
  	int ret = 0;
  
  	if (test_and_clear_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags))
@@ -499,7 +499,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	if (test_and_clear_bit(IPOIB_MCAST_FLAG_ATTACHED, &mcast->flags)) {
  		ipoib_dbg_mcast(priv, "leaving MGID %pI6\n",
-@@ -646,7 +743,9 @@ static int ipoib_mcast_leave(struct net_
+@@ -649,7 +746,9 @@
  				      be16_to_cpu(mcast->mcmember.mlid));
  		if (ret)
  			ipoib_warn(priv, "ib_detach_mcast failed (result = %d)\n", ret);
@@ -510,7 +510,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	return 0;
  }
-@@ -687,6 +786,7 @@ void ipoib_mcast_send(struct net_device
+@@ -690,6 +789,7 @@
  		memcpy(mcast->mcmember.mgid.raw, mgid, sizeof (union ib_gid));
  		__ipoib_mcast_add(dev, mcast);
  		list_add_tail(&mcast->list, &priv->multicast_list);
@@ -518,7 +518,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  
  	if (!mcast->ah) {
-@@ -696,13 +796,6 @@ void ipoib_mcast_send(struct net_device
+@@ -699,13 +799,6 @@
  			++dev->stats.tx_dropped;
  			dev_kfree_skb_any(skb);
  		}
@@ -532,7 +532,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		/*
  		 * If lookup completes between here and out:, don't
  		 * want to send packet twice.
-@@ -761,9 +854,12 @@ void ipoib_mcast_dev_flush(struct net_de
+@@ -767,9 +860,12 @@
  
  	spin_unlock_irqrestore(&priv->lock, flags);
  
@@ -547,7 +547,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  			wait_for_completion(&mcast->done);
  
  	list_for_each_entry_safe(mcast, tmcast, &remove_list, list) {
-@@ -794,20 +890,14 @@ void ipoib_mcast_restart_task(struct wor
+@@ -800,20 +896,14 @@
  	unsigned long flags;
  	struct ib_sa_mcmember_rec rec;
  
@@ -575,7 +575,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	local_irq_save(flags);
  	netif_addr_lock(dev);
-@@ -893,14 +983,27 @@ void ipoib_mcast_restart_task(struct wor
+@@ -899,14 +989,27 @@
  	netif_addr_unlock(dev);
  	local_irq_restore(flags);
  

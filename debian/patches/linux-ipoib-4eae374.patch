@@ -14,9 +14,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -473,7 +473,7 @@ void ipoib_ib_dev_flush_heavy(struct wor
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -473,7 +473,7 @@
  void ipoib_pkey_event(struct work_struct *work);
  void ipoib_ib_dev_cleanup(struct net_device *dev);
  
@@ -25,9 +25,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  int ipoib_ib_dev_up(struct net_device *dev);
  int ipoib_ib_dev_down(struct net_device *dev, int flush);
  int ipoib_ib_dev_stop(struct net_device *dev, int flush);
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -664,7 +664,7 @@ static void ipoib_ib_tx_timer_func(unsig
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -664,7 +664,7 @@
  	drain_tx_cq((struct net_device *)ctx);
  }
  
@@ -36,7 +36,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	int ret;
-@@ -705,7 +705,7 @@ int ipoib_ib_dev_open(struct net_device
+@@ -705,7 +705,7 @@
  dev_stop:
  	if (!test_and_set_bit(IPOIB_FLAG_INITIALIZED, &priv->flags))
  		napi_enable(&priv->napi);
@@ -45,7 +45,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	return -1;
  }
  
-@@ -916,7 +916,7 @@ int ipoib_ib_dev_init(struct net_device
+@@ -916,7 +916,7 @@
  		    (unsigned long) dev);
  
  	if (dev->flags & IFF_UP) {
@@ -54,7 +54,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  			ipoib_transport_dev_cleanup(dev);
  			return -ENODEV;
  		}
-@@ -1042,7 +1042,7 @@ static void __ipoib_ib_dev_flush(struct
+@@ -1042,7 +1042,7 @@
  
  	if (level == IPOIB_FLUSH_HEAVY) {
  		ipoib_ib_dev_stop(dev, 0);
@@ -63,9 +63,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  
  	/*
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -114,7 +114,7 @@ int ipoib_open(struct net_device *dev)
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -141,7 +141,7 @@
  	if (!test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags))
  		return 0;
  

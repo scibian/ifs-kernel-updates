@@ -16,9 +16,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -307,111 +307,6 @@ static int ipoib_mcast_join_finish(struc
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -307,111 +307,6 @@
  	return 0;
  }
  
@@ -130,7 +130,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  void ipoib_mcast_carrier_on_task(struct work_struct *work)
  {
  	struct ipoib_dev_priv *priv = container_of(work, struct ipoib_dev_priv,
-@@ -452,7 +347,9 @@ static int ipoib_mcast_join_complete(int
+@@ -452,7 +347,9 @@
  	struct net_device *dev = mcast->dev;
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  
@@ -141,7 +141,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  			mcast->mcmember.mgid.raw, status);
  
  	/*
-@@ -477,27 +374,52 @@ static int ipoib_mcast_join_complete(int
+@@ -477,27 +374,52 @@
  	if (!status) {
  		mcast->backoff = 1;
  		mcast->delay_until = jiffies;
@@ -201,7 +201,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  out:
  	clear_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags);
-@@ -650,45 +572,45 @@ void ipoib_mcast_join_task(struct work_s
+@@ -653,45 +575,45 @@
  	list_for_each_entry(mcast, &priv->multicast_list, list) {
  		if (IS_ERR_OR_NULL(mcast->mc) &&
  		    !test_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags) &&
@@ -271,7 +271,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  int ipoib_mcast_start_thread(struct net_device *dev)
-@@ -731,8 +653,6 @@ static int ipoib_mcast_leave(struct net_
+@@ -734,8 +656,6 @@
  
  	if (!IS_ERR_OR_NULL(mcast->mc))
  		ib_sa_free_multicast(mcast->mc);
@@ -280,7 +280,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	if (test_and_clear_bit(IPOIB_MCAST_FLAG_ATTACHED, &mcast->flags)) {
  		ipoib_dbg_mcast(priv, "leaving MGID %pI6\n",
-@@ -768,43 +688,37 @@ void ipoib_mcast_send(struct net_device
+@@ -771,43 +691,37 @@
  	}
  
  	mcast = __ipoib_mcast_find(dev, mgid);

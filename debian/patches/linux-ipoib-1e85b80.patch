@@ -16,9 +16,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -640,8 +640,10 @@ static void neigh_add_path(struct sk_buf
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -680,8 +680,10 @@
  
  		if (!path->query && path_rec_start(dev, path))
  			goto err_path;
@@ -31,7 +31,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  
  	spin_unlock_irqrestore(&priv->lock, flags);
-@@ -676,7 +678,12 @@ static void unicast_arp_send(struct sk_b
+@@ -718,7 +720,12 @@
  			new_path = 1;
  		}
  		if (path) {

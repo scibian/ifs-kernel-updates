@@ -18,9 +18,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -393,8 +393,13 @@ static int ipoib_mcast_join_complete(int
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -393,8 +393,13 @@
  			goto out_locked;
  		}
  	} else {
@@ -36,7 +36,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				ipoib_dbg_mcast(priv, "%smulticast join failed for %pI6, status %d\n",
  						test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags) ? "sendonly " : "",
  						mcast->mcmember.mgid.raw, status);
-@@ -403,6 +408,9 @@ static int ipoib_mcast_join_complete(int
+@@ -403,6 +408,9 @@
  						test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags) ? "sendonly " : "",
  					   mcast->mcmember.mgid.raw, status);
  			}

@@ -25,9 +25,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -435,11 +435,6 @@ struct ipoib_neigh {
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -435,11 +435,6 @@
  #define IPOIB_UD_MTU(ib_mtu)		(ib_mtu - IPOIB_ENCAP_LEN)
  #define IPOIB_UD_BUF_SIZE(ib_mtu)	(ib_mtu + IB_GRH_BYTES)
  
@@ -39,9 +39,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  void ipoib_neigh_dtor(struct ipoib_neigh *neigh);
  static inline void ipoib_neigh_put(struct ipoib_neigh *neigh)
  {
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -94,39 +94,9 @@ void ipoib_free_ah(struct kref *kref)
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -94,39 +94,9 @@
  static void ipoib_ud_dma_unmap_rx(struct ipoib_dev_priv *priv,
  				  u64 mapping[IPOIB_UD_RX_SG])
  {
@@ -84,7 +84,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  static int ipoib_ib_post_receive(struct net_device *dev, int id)
-@@ -156,18 +126,11 @@ static struct sk_buff *ipoib_alloc_rx_sk
+@@ -156,18 +126,11 @@
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	struct sk_buff *skb;
  	int buf_size;
@@ -105,7 +105,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (unlikely(!skb))
  		return NULL;
  
-@@ -184,23 +147,8 @@ static struct sk_buff *ipoib_alloc_rx_sk
+@@ -184,23 +147,8 @@
  	if (unlikely(ib_dma_mapping_error(priv->ca, mapping[0])))
  		goto error;
  
@@ -129,7 +129,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  error:
  	dev_kfree_skb_any(skb);
  	return NULL;
-@@ -278,7 +226,8 @@ static void ipoib_ib_handle_rx_wc(struct
+@@ -278,7 +226,8 @@
  		       wc->byte_len, wc->slid);
  
  	ipoib_ud_dma_unmap_rx(priv, mapping);
@@ -139,7 +139,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	/* First byte of dgid signals multicast when 0xff */
  	dgid = &((struct ib_grh *)skb->data)->dgid;
-@@ -296,6 +245,8 @@ static void ipoib_ib_handle_rx_wc(struct
+@@ -296,6 +245,8 @@
  	skb_reset_mac_header(skb);
  	skb_pull(skb, IPOIB_ENCAP_LEN);
  
@@ -148,9 +148,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	++dev->stats.rx_packets;
  	dev->stats.rx_bytes += skb->len;
  
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_verbs.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_verbs.c
-@@ -227,15 +227,10 @@ int ipoib_transport_dev_init(struct net_
+--- a/ib_ipoib/ipoib_verbs.c
++++ b/ib_ipoib/ipoib_verbs.c
+@@ -227,15 +227,10 @@
  	priv->tx_wr.send_flags	= IB_SEND_SIGNALED;
  
  	priv->rx_sge[0].lkey = priv->mr->lkey;

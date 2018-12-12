@@ -12,9 +12,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -245,8 +245,6 @@ static void ipoib_ib_handle_rx_wc(struct
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -245,8 +245,6 @@
  	skb_reset_mac_header(skb);
  	skb_pull(skb, IPOIB_ENCAP_LEN);
  

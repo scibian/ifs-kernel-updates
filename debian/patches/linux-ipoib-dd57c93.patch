@@ -21,9 +21,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_ib.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_ib.c
-@@ -669,12 +669,13 @@ int ipoib_ib_dev_open(struct net_device
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -669,12 +669,13 @@
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	int ret;
  
@@ -41,7 +41,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	ret = ipoib_init_qp(dev);
  	if (ret) {
-@@ -712,9 +713,10 @@ dev_stop:
+@@ -712,9 +713,10 @@
  void ipoib_pkey_dev_check_presence(struct net_device *dev)
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
@@ -54,7 +54,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		clear_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
  	else
  		set_bit(IPOIB_PKEY_ASSIGNED, &priv->flags);
-@@ -958,13 +960,27 @@ static inline int update_parent_pkey(str
+@@ -958,13 +960,27 @@
  
  	return 1;
  }
@@ -83,7 +83,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	int result;
  
  	down_read(&priv->vlan_rwsem);
-@@ -978,19 +994,20 @@ static void __ipoib_ib_dev_flush(struct
+@@ -978,19 +994,20 @@
  
  	up_read(&priv->vlan_rwsem);
  
@@ -112,7 +112,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		ipoib_dbg(priv, "Not flushing - IPOIB_FLAG_ADMIN_UP not set.\n");
  		return;
  	}
-@@ -1000,19 +1017,13 @@ static void __ipoib_ib_dev_flush(struct
+@@ -1000,19 +1017,13 @@
  		 * (parent) devices should always takes what present in pkey index 0
  		 */
  		if (test_bit(IPOIB_FLAG_SUBINTERFACE, &priv->flags)) {
@@ -136,7 +136,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		} else {
  			result = update_parent_pkey(priv);
  			/* restart QP only if P_Key value changed */
-@@ -1041,8 +1052,12 @@ static void __ipoib_ib_dev_flush(struct
+@@ -1041,8 +1052,12 @@
  		ipoib_ib_dev_down(dev, 0);
  
  	if (level == IPOIB_FLUSH_HEAVY) {
@@ -151,7 +151,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  
  	/*
-@@ -1097,15 +1112,4 @@ void ipoib_ib_dev_cleanup(struct net_dev
+@@ -1097,15 +1112,4 @@
  	ipoib_transport_dev_cleanup(dev);
  }
  
@@ -167,9 +167,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -		ipoib_open(priv->dev);
 -}
  
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -108,14 +108,11 @@ int ipoib_open(struct net_device *dev)
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -135,14 +135,11 @@
  
  	set_bit(IPOIB_FLAG_ADMIN_UP, &priv->flags);
  

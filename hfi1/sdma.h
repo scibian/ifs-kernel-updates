@@ -420,6 +420,7 @@ struct sdma_engine {
 int sdma_init(struct hfi1_devdata *dd, u8 port);
 void sdma_start(struct hfi1_devdata *dd);
 void sdma_exit(struct hfi1_devdata *dd);
+void sdma_clean(struct hfi1_devdata *dd, size_t num_engines);
 void sdma_all_running(struct hfi1_devdata *dd);
 void sdma_all_idle(struct hfi1_devdata *dd);
 void sdma_freeze_notify(struct hfi1_devdata *dd, int go_idle);
@@ -848,7 +849,8 @@ static inline int sdma_txadd_kvaddr(
 			dd, SDMA_MAP_SINGLE, tx, addr, len);
 }
 
-struct iowait_wait;
+struct iowait_work;
+
 int sdma_send_txreq(struct sdma_engine *sde,
 		    struct iowait_work *wait,
 		    struct sdma_txreq *tx,
@@ -966,34 +968,34 @@ void sdma_engine_interrupt(struct sdma_engine *sde, u64 status);
  *      |    mask                  |              --/  |--------------------|
  *      |--------------------------|            -/     |        *           |
  *      |    actual_vls (max 8)    |          -/       |--------------------|
- *      |--------------------------|       --/         | sde[n] -> eng n    |
+ *      |--------------------------|       --/         | sde[n-1] -> eng n  |
  *      |    vls (max 8)           |     -/            +--------------------+
  *      |--------------------------|  --/
  *      |    map[0]                |-/
- *      |--------------------------|                   +--------------------+
- *      |    map[1]                |---                |       mask         |
- *      |--------------------------|   \----           |--------------------|
- *      |           *              |        \--        | sde[0] -> eng 1+n  |
- *      |           *              |           \----   |--------------------|
- *      |           *              |                \->| sde[1] -> eng 2+n  |
- *      |--------------------------|                   |--------------------|
- *      |   map[vls - 1]           |-                  |         *          |
- *      +--------------------------+ \-                |--------------------|
- *                                     \-              | sde[m] -> eng m+n  |
- *                                       \             +--------------------+
+ *      |--------------------------|                   +---------------------+
+ *      |    map[1]                |---                |       mask          |
+ *      |--------------------------|   \----           |---------------------|
+ *      |           *              |        \--        | sde[0] -> eng 1+n   |
+ *      |           *              |           \----   |---------------------|
+ *      |           *              |                \->| sde[1] -> eng 2+n   |
+ *      |--------------------------|                   |---------------------|
+ *      |   map[vls - 1]           |-                  |         *           |
+ *      +--------------------------+ \-                |---------------------|
+ *                                     \-              | sde[m-1] -> eng m+n |
+ *                                       \             +---------------------+
  *                                        \-
  *                                          \
- *                                           \-        +--------------------+
- *                                             \-      |       mask         |
- *                                               \     |--------------------|
- *                                                \-   | sde[0] -> eng 1+m+n|
- *                                                  \- |--------------------|
- *                                                    >| sde[1] -> eng 2+m+n|
- *                                                     |--------------------|
- *                                                     |         *          |
- *                                                     |--------------------|
- *                                                     | sde[o] -> eng o+m+n|
- *                                                     +--------------------+
+ *                                           \-        +----------------------+
+ *                                             \-      |       mask           |
+ *                                               \     |----------------------|
+ *                                                \-   | sde[0] -> eng 1+m+n  |
+ *                                                  \- |----------------------|
+ *                                                    >| sde[1] -> eng 2+m+n  |
+ *                                                     |----------------------|
+ *                                                     |         *            |
+ *                                                     |----------------------|
+ *                                                     | sde[o-1] -> eng o+m+n|
+ *                                                     +----------------------+
  *
  */
 

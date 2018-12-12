@@ -14,9 +14,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -80,7 +80,7 @@ enum {
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -80,7 +80,7 @@
  	IPOIB_NUM_WC		  = 4,
  
  	IPOIB_MAX_PATH_REC_QUEUE  = 3,

@@ -11,9 +11,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -232,6 +232,7 @@ int ipoib_set_mode(struct net_device *de
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -266,6 +266,7 @@
  		ipoib_warn(priv, "enabling connected mode "
  			   "will cause multicast packet drops\n");
  		netdev_update_features(dev);

@@ -14,9 +14,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_verbs.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_verbs.c
-@@ -176,7 +176,8 @@ int ipoib_transport_dev_init(struct net_
+--- a/ib_ipoib/ipoib_verbs.c
++++ b/ib_ipoib/ipoib_verbs.c
+@@ -176,7 +176,8 @@
  		else
  			size += ipoib_recvq_size * ipoib_max_conn_qp;
  	} else

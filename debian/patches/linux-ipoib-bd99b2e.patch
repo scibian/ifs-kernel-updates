@@ -11,9 +11,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -551,6 +551,8 @@ void ipoib_path_iter_read(struct ipoib_p
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -551,6 +551,8 @@
  
  int ipoib_mcast_attach(struct net_device *dev, u16 mlid,
  		       union ib_gid *mgid, int set_qkey);
@@ -22,9 +22,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  int ipoib_init_qp(struct net_device *dev);
  int ipoib_transport_dev_init(struct net_device *dev, struct ib_device *ca);
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -912,6 +912,9 @@ static void __ipoib_reap_neigh(struct ip
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -955,6 +955,9 @@
  	unsigned long dt;
  	unsigned long flags;
  	int i;
@@ -34,7 +34,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	if (test_bit(IPOIB_STOP_NEIGH_GC, &priv->flags))
  		return;
-@@ -939,6 +942,19 @@ static void __ipoib_reap_neigh(struct ip
+@@ -982,6 +985,19 @@
  							  lockdep_is_held(&priv->lock))) != NULL) {
  			/* was the neigh idle for two GC periods */
  			if (time_after(neigh_obsolete, neigh->alive)) {
@@ -54,7 +54,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				rcu_assign_pointer(*np,
  						   rcu_dereference_protected(neigh->hnext,
  									     lockdep_is_held(&priv->lock)));
-@@ -954,6 +970,8 @@ static void __ipoib_reap_neigh(struct ip
+@@ -997,6 +1013,8 @@
  
  out_unlock:
  	spin_unlock_irqrestore(&priv->lock, flags);
@@ -63,9 +63,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  static void ipoib_reap_neigh(struct work_struct *work)
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -153,7 +153,7 @@ static struct ipoib_mcast *ipoib_mcast_a
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -153,7 +153,7 @@
  	return mcast;
  }
  
@@ -74,7 +74,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	struct rb_node *n = priv->multicast_tree.rb_node;
-@@ -675,7 +675,7 @@ int ipoib_mcast_stop_thread(struct net_d
+@@ -678,7 +678,7 @@
  	return 0;
  }
  

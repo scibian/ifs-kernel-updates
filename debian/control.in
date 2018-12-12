@@ -1,13 +1,12 @@
 Source: ifs-kernel-updates
-Maintainer: Scibian Project <packaging@scibian.org>
+Maintainer: Brian T. Smith <bsmith@systemfabricworks.com>
 Section: kernel
 Priority: extra
-Standards-Version: 3.9.8
+Standards-Version: 3.9.6
 Homepage: http://www.intel.com
-Vcs-Git: https://github.com/scibian/ifs-kernel-updates.git
-Vcs-Browser: https://github.com/scibian/ifs-kernel-updates
-Build-Depends: debhelper (>= 10),
+Build-Depends: debhelper (>= 9),
                linux-headers-@KERNEL_VER@,
+               unifdef,
 
 Package: ifs-kernel-updates-dev
 Architecture: amd64
@@ -25,8 +24,9 @@ Depends: linux-image-@KERNEL_VER@,
          ${misc:Depends},
 Conflicts: compat-rdma,
 Replaces: compat-rdma,
-Description: Updated kernel modules for Omni-Path
- Updated kernel modules for Omni-Path, compiled for kernel
- @KERNEL_VER@.
- Includes the hfi1 driver for Omni-Path hardware and updated
- rdmavt.
+Description: Extra kernel modules for IFS
+ Updated kernel modules for OPA IFS, compiled for kernel
+ @KERNEL_VER@. This includes the hfi1 driver for
+ Omni-Path hardware, patched ib_ipoib for performance and stability
+ improvements, ib_mad with OPA MAD enhancements and core IB modules
+ recompiled against the OPA MAD headers.

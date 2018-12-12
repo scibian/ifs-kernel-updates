@@ -17,9 +17,9 @@ Forwarded: not-needed
 Last-Update: <2017-012-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -190,12 +190,6 @@ static int ipoib_mcast_join_finish(struc
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -190,12 +190,6 @@
  		spin_unlock_irq(&priv->lock);
  		priv->tx_wr.wr.ud.remote_qkey = priv->qkey;
  		set_qkey = 1;
@@ -32,7 +32,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	}
  
  	if (!test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags)) {
-@@ -371,6 +365,8 @@ void ipoib_mcast_carrier_on_task(struct
+@@ -371,6 +365,8 @@
  	}
  
  	rtnl_lock();

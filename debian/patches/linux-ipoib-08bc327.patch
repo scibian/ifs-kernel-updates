@@ -12,9 +12,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_multicast.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_multicast.c
-@@ -456,7 +456,10 @@ out_locked:
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -456,7 +456,10 @@
  	return status;
  }
  
@@ -26,7 +26,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	struct ib_sa_multicast *multicast;
-@@ -466,6 +469,10 @@ static void ipoib_mcast_join(struct net_
+@@ -466,6 +469,10 @@
  	ib_sa_comp_mask comp_mask;
  	int ret = 0;
  
@@ -37,7 +37,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ipoib_dbg_mcast(priv, "joining MGID %pI6\n", mcast->mcmember.mgid.raw);
  
  	rec.mgid     = mcast->mcmember.mgid;
-@@ -525,20 +532,23 @@ static void ipoib_mcast_join(struct net_
+@@ -525,20 +532,23 @@
  			rec.join_state = 4;
  #endif
  	}
@@ -62,7 +62,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  void ipoib_mcast_join_task(struct work_struct *work)
-@@ -620,9 +630,10 @@ void ipoib_mcast_join_task(struct work_s
+@@ -623,9 +633,10 @@
  				/* Found the next unjoined group */
  				init_completion(&mcast->done);
  				set_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags);
@@ -76,7 +76,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  			} else if (!delay_until ||
  				 time_before(mcast->delay_until, delay_until))
  				delay_until = mcast->delay_until;
-@@ -641,10 +652,9 @@ out:
+@@ -644,10 +655,9 @@
  	if (mcast) {
  		init_completion(&mcast->done);
  		set_bit(IPOIB_MCAST_FLAG_BUSY, &mcast->flags);

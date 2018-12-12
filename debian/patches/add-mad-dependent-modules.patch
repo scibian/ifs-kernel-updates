@@ -1,47 +1,45 @@
 Description: Compile modules that depend upon MAD agent.
  OPA MAD support changed the mad agent structures. This patch
- imports the original code fomr linux 3.16.39 for modules that
+ imports the original code fomr linux 3.16.56 for modules that
  depend upon those structures, so they may be recompiled.
- The module code is pristine v/s 3.16.39.
+ The module code is pristine v/s 3.16.56.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2017-12-14>
+Last-Update: <2018-08-21>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
 +++ b/Makefile
-@@ -13,7 +13,14 @@
- 	hfi1/ \
- 	ib_uverbs/ \
- 	ib_mad/ \
--	opa_compat/
-+	opa_compat/ \
-+	ib_umad/ \
+@@ -9,7 +9,14 @@
+ 
+ CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_DEB8
+ obj-y := ib_uverbs/ \
+-	ib_mad/
++	ib_mad/ \
 +	ib_sa/ \
 +	ib_cm/ \
 +	ib_ucm/ \
++	ib_umad/ \
++	ib_srpt/ \
 +	rdma_cm/ \
-+	rdma_ucm/ \
-+	ib_srpt/
- 
++	rdma_ucm/
  
  else
+ #normal makefile
 --- /dev/null
 +++ b/ib_cm/Makefile
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,31 @@
 +#
-+# Ib_cm module
++# ib_cm module
 +#
 +#
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
-+ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND) += ib_cm.o
 +
@@ -64,7 +62,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 --- /dev/null
 +++ b/ib_cm/cm.c
-@@ -0,0 +1,3939 @@
+@@ -0,0 +1,4032 @@
 +/*
 + * Copyright (c) 2004-2007 Intel Corporation.  All rights reserved.
 + * Copyright (c) 2004 Topspin Corporation.  All rights reserved.
@@ -147,6 +145,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	__be32 random_id_operand;
 +	struct list_head timewait_list;
 +	struct workqueue_struct *wq;
++	/* Sync on cm change port state */
++	spinlock_t state_lock;
 +} cm;
 +
 +/* Counter indexes ordered by attribute ID */
@@ -228,6 +228,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	struct ib_mad_agent *mad_agent;
 +	struct kobject port_obj;
 +	u8 port_num;
++	struct list_head cm_priv_prim_list;
++	struct list_head cm_priv_altr_list;
 +	struct cm_counter_group counter_group[CM_COUNTER_GROUPS];
 +};
 +
@@ -307,6 +309,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	u8 service_timeout;
 +	u8 target_ack_delay;
 +
++	struct list_head prim_list;
++	struct list_head altr_list;
++	/* Indicates that the send port mad is registered and av is set */
++	int prim_send_port_not_ready;
++	int altr_send_port_not_ready;
++
 +	struct list_head work_list;
 +	atomic_t work_count;
 +};
@@ -325,19 +333,46 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	struct ib_mad_agent *mad_agent;
 +	struct ib_mad_send_buf *m;
 +	struct ib_ah *ah;
++	struct cm_av *av;
++	unsigned long flags, flags2;
++	int ret = 0;
 +
++	/* don't let the port to be released till the agent is down */
++	spin_lock_irqsave(&cm.state_lock, flags2);
++	spin_lock_irqsave(&cm.lock, flags);
++	if (!cm_id_priv->prim_send_port_not_ready)
++		av = &cm_id_priv->av;
++	else if (!cm_id_priv->altr_send_port_not_ready &&
++		 (cm_id_priv->alt_av.port))
++		av = &cm_id_priv->alt_av;
++	else {
++		pr_info("%s: not valid CM id\n", __func__);
++		ret = -ENODEV;
++		spin_unlock_irqrestore(&cm.lock, flags);
++		goto out;
++	}
++	spin_unlock_irqrestore(&cm.lock, flags);
++	/* Make sure the port haven't released the mad yet */
 +	mad_agent = cm_id_priv->av.port->mad_agent;
-+	ah = ib_create_ah(mad_agent->qp->pd, &cm_id_priv->av.ah_attr);
-+	if (IS_ERR(ah))
-+		return PTR_ERR(ah);
++	if (!mad_agent) {
++		pr_info("%s: not a valid MAD agent\n", __func__);
++		ret = -ENODEV;
++		goto out;
++	}
++	ah = ib_create_ah(mad_agent->qp->pd, &av->ah_attr);
++	if (IS_ERR(ah)) {
++		ret = PTR_ERR(ah);
++		goto out;
++	}
 +
 +	m = ib_create_send_mad(mad_agent, cm_id_priv->id.remote_cm_qpn,
-+			       cm_id_priv->av.pkey_index,
++			       av->pkey_index,
 +			       0, IB_MGMT_MAD_HDR, IB_MGMT_MAD_DATA,
 +			       GFP_ATOMIC);
 +	if (IS_ERR(m)) {
 +		ib_destroy_ah(ah);
-+		return PTR_ERR(m);
++		ret = PTR_ERR(m);
++		goto out;
 +	}
 +
 +	/* Timeout set by caller if response is expected. */
@@ -347,7 +382,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	atomic_inc(&cm_id_priv->refcount);
 +	m->context[0] = cm_id_priv;
 +	*msg = m;
-+	return 0;
++
++out:
++	spin_unlock_irqrestore(&cm.state_lock, flags2);
++	return ret;
 +}
 +
 +static int cm_alloc_response_msg(struct cm_port *port,
@@ -416,7 +454,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +			   grh, &av->ah_attr);
 +}
 +
-+static int cm_init_av_by_path(struct ib_sa_path_rec *path, struct cm_av *av)
++static int cm_init_av_by_path(struct ib_sa_path_rec *path, struct cm_av *av,
++			      struct cm_id_private *cm_id_priv)
 +{
 +	struct cm_device *cm_dev;
 +	struct cm_port *port = NULL;
@@ -449,7 +488,17 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	memcpy(av->smac, path->smac, sizeof(av->smac));
 +
 +	av->valid = 1;
-+	return 0;
++	spin_lock_irqsave(&cm.lock, flags);
++	if (&cm_id_priv->av == av)
++		list_add_tail(&cm_id_priv->prim_list, &port->cm_priv_prim_list);
++	else if (&cm_id_priv->alt_av == av)
++		list_add_tail(&cm_id_priv->altr_list, &port->cm_priv_altr_list);
++	else
++		ret = -EINVAL;
++
++	spin_unlock_irqrestore(&cm.lock, flags);
++
++	return ret;
 +}
 +
 +static int cm_alloc_id(struct cm_id_private *cm_id_priv)
@@ -786,6 +835,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	spin_lock_init(&cm_id_priv->lock);
 +	init_completion(&cm_id_priv->comp);
 +	INIT_LIST_HEAD(&cm_id_priv->work_list);
++	INIT_LIST_HEAD(&cm_id_priv->prim_list);
++	INIT_LIST_HEAD(&cm_id_priv->altr_list);
 +	atomic_set(&cm_id_priv->work_count, -1);
 +	atomic_set(&cm_id_priv->refcount, 1);
 +	return &cm_id_priv->id;
@@ -983,6 +1034,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		spin_unlock_irq(&cm_id_priv->lock);
 +		break;
 +	}
++
++	spin_lock_irq(&cm.lock);
++	if (!list_empty(&cm_id_priv->altr_list) &&
++	    (!cm_id_priv->altr_send_port_not_ready))
++		list_del(&cm_id_priv->altr_list);
++	if (!list_empty(&cm_id_priv->prim_list) &&
++	    (!cm_id_priv->prim_send_port_not_ready))
++		list_del(&cm_id_priv->prim_list);
++	spin_unlock_irq(&cm.lock);
 +
 +	cm_free_id(cm_id->local_id);
 +	cm_deref_id(cm_id_priv);
@@ -1207,12 +1267,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		goto out;
 +	}
 +
-+	ret = cm_init_av_by_path(param->primary_path, &cm_id_priv->av);
++	ret = cm_init_av_by_path(param->primary_path, &cm_id_priv->av,
++				 cm_id_priv);
 +	if (ret)
 +		goto error1;
 +	if (param->alternate_path) {
 +		ret = cm_init_av_by_path(param->alternate_path,
-+					 &cm_id_priv->alt_av);
++					 &cm_id_priv->alt_av, cm_id_priv);
 +		if (ret)
 +			goto error1;
 +	}
@@ -1635,7 +1696,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +	memcpy(work->path[0].dmac, cm_id_priv->av.ah_attr.dmac, ETH_ALEN);
 +	work->path[0].vlan_id = cm_id_priv->av.ah_attr.vlan_id;
-+	ret = cm_init_av_by_path(&work->path[0], &cm_id_priv->av);
++	ret = cm_init_av_by_path(&work->path[0], &cm_id_priv->av, cm_id_priv);
 +	if (ret) {
 +		ib_get_cached_gid(work->port->cm_dev->ib_device,
 +				  work->port->port_num, 0, &work->path[0].sgid);
@@ -1645,7 +1706,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		goto rejected;
 +	}
 +	if (req_msg->alt_local_lid) {
-+		ret = cm_init_av_by_path(&work->path[1], &cm_id_priv->alt_av);
++		ret = cm_init_av_by_path(&work->path[1], &cm_id_priv->alt_av,
++					 cm_id_priv);
 +		if (ret) {
 +			ib_send_cm_rej(cm_id, IB_CM_REJ_INVALID_ALT_GID,
 +				       &work->path[0].sgid,
@@ -2700,7 +2762,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		goto out;
 +	}
 +
-+	ret = cm_init_av_by_path(alternate_path, &cm_id_priv->alt_av);
++	ret = cm_init_av_by_path(alternate_path, &cm_id_priv->alt_av,
++				 cm_id_priv);
 +	if (ret)
 +		goto out;
 +	cm_id_priv->alt_av.timeout =
@@ -2812,7 +2875,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	cm_init_av_for_response(work->port, work->mad_recv_wc->wc,
 +				work->mad_recv_wc->recv_buf.grh,
 +				&cm_id_priv->av);
-+	cm_init_av_by_path(param->alternate_path, &cm_id_priv->alt_av);
++	cm_init_av_by_path(param->alternate_path, &cm_id_priv->alt_av,
++			   cm_id_priv);
 +	ret = atomic_inc_and_test(&cm_id_priv->work_count);
 +	if (!ret)
 +		list_add_tail(&work->list, &cm_id_priv->work_list);
@@ -3004,7 +3068,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		return -EINVAL;
 +
 +	cm_id_priv = container_of(cm_id, struct cm_id_private, id);
-+	ret = cm_init_av_by_path(param->path, &cm_id_priv->av);
++	ret = cm_init_av_by_path(param->path, &cm_id_priv->av, cm_id_priv);
 +	if (ret)
 +		goto out;
 +
@@ -3425,7 +3489,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +static int cm_migrate(struct ib_cm_id *cm_id)
 +{
 +	struct cm_id_private *cm_id_priv;
++	struct cm_av tmp_av;
 +	unsigned long flags;
++	int tmp_send_port_not_ready;
 +	int ret = 0;
 +
 +	cm_id_priv = container_of(cm_id, struct cm_id_private, id);
@@ -3434,7 +3500,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	    (cm_id->lap_state == IB_CM_LAP_UNINIT ||
 +	     cm_id->lap_state == IB_CM_LAP_IDLE)) {
 +		cm_id->lap_state = IB_CM_LAP_IDLE;
++		/* Swap address vector */
++		tmp_av = cm_id_priv->av;
 +		cm_id_priv->av = cm_id_priv->alt_av;
++		cm_id_priv->alt_av = tmp_av;
++		/* Swap port send ready state */
++		tmp_send_port_not_ready = cm_id_priv->prim_send_port_not_ready;
++		cm_id_priv->prim_send_port_not_ready = cm_id_priv->altr_send_port_not_ready;
++		cm_id_priv->altr_send_port_not_ready = tmp_send_port_not_ready;
 +	} else
 +		ret = -EINVAL;
 +	spin_unlock_irqrestore(&cm_id_priv->lock, flags);
@@ -3866,6 +3939,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		port->cm_dev = cm_dev;
 +		port->port_num = i;
 +
++		INIT_LIST_HEAD(&port->cm_priv_prim_list);
++		INIT_LIST_HEAD(&port->cm_priv_altr_list);
++
 +		ret = cm_create_port_fs(port);
 +		if (ret)
 +			goto error1;
@@ -3912,6 +3988,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +{
 +	struct cm_device *cm_dev;
 +	struct cm_port *port;
++	struct cm_id_private *cm_id_priv;
++	struct ib_mad_agent *cur_mad_agent;
 +	struct ib_port_modify port_modify = {
 +		.clr_port_cap_mask = IB_PORT_CM_SUP
 +	};
@@ -3929,10 +4007,22 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	for (i = 1; i <= ib_device->phys_port_cnt; i++) {
 +		port = cm_dev->port[i-1];
 +		ib_modify_port(ib_device, port->port_num, 0, &port_modify);
-+		ib_unregister_mad_agent(port->mad_agent);
++		/* Mark all the cm_id's as not valid */
++		spin_lock_irq(&cm.lock);
++		list_for_each_entry(cm_id_priv, &port->cm_priv_altr_list, altr_list)
++			cm_id_priv->altr_send_port_not_ready = 1;
++		list_for_each_entry(cm_id_priv, &port->cm_priv_prim_list, prim_list)
++			cm_id_priv->prim_send_port_not_ready = 1;
++		spin_unlock_irq(&cm.lock);
++		spin_lock_irq(&cm.state_lock);
++		cur_mad_agent = port->mad_agent;
++		port->mad_agent = NULL;
++		spin_unlock_irq(&cm.state_lock);
++		ib_unregister_mad_agent(cur_mad_agent);
 +		flush_workqueue(cm.wq);
 +		cm_remove_port_fs(port);
 +	}
++
 +	device_unregister(cm_dev->device);
 +	kfree(cm_dev);
 +}
@@ -3945,6 +4035,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	INIT_LIST_HEAD(&cm.device_list);
 +	rwlock_init(&cm.device_lock);
 +	spin_lock_init(&cm.lock);
++	spin_lock_init(&cm.state_lock);
 +	cm.listen_service_table = RB_ROOT;
 +	cm.listen_service_id = be64_to_cpu(IB_CM_ASSIGN_SERVICE_ID);
 +	cm.remote_id_table = RB_ROOT;
@@ -4845,20 +4936,18 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#endif /* CM_MSGS_H */
 --- /dev/null
 +++ b/ib_sa/Makefile
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,31 @@
 +#
-+# Ib_sa module
++# ib_sa module
 +#
 +#
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
-+ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND) += ib_sa.o
 +
@@ -4881,7 +4970,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 --- /dev/null
 +++ b/ib_sa/multicast.c
-@@ -0,0 +1,898 @@
+@@ -0,0 +1,892 @@
 +/*
 + * Copyright (c) 2006 Intel Corporation.  All rights reserved.
 + *
@@ -4990,7 +5079,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	atomic_t		refcount;
 +	enum mcast_group_state	state;
 +	struct ib_sa_query	*query;
-+	int			query_id;
 +	u16			pkey_index;
 +	u8			leave_state;
 +	int			retries;
@@ -5223,11 +5311,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +				       member->multicast.comp_mask,
 +				       3000, GFP_KERNEL, join_handler, group,
 +				       &group->query);
-+	if (ret >= 0) {
-+		group->query_id = ret;
-+		ret = 0;
-+	}
-+	return ret;
++	return (ret > 0) ? 0 : ret;
 +}
 +
 +static int send_leave(struct mcast_group *group, u8 leave_state)
@@ -5247,11 +5331,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +				       IB_SA_MCMEMBER_REC_JOIN_STATE,
 +				       3000, GFP_KERNEL, leave_handler,
 +				       group, &group->query);
-+	if (ret >= 0) {
-+		group->query_id = ret;
-+		ret = 0;
-+	}
-+	return ret;
++	return (ret > 0) ? 0 : ret;
 +}
 +
 +static void join_group(struct mcast_group *group, struct mcast_member *member,
@@ -5409,8 +5489,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	if (status)
 +		process_join_error(group, status);
 +	else {
-+		ib_find_pkey(group->port->dev->device, group->port->port_num,
-+			     be16_to_cpu(rec->pkey), &pkey_index);
++
++		if (ib_find_pkey(group->port->dev->device,
++				 group->port->port_num, be16_to_cpu(rec->pkey),
++				 &pkey_index))
++			pkey_index = MCAST_INVALID_PKEY_INDEX;
 +
 +		spin_lock_irq(&group->port->lock);
 +		group->rec = *rec;
@@ -7134,22 +7217,20 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +module_exit(ib_sa_cleanup);
 --- /dev/null
 +++ b/ib_srpt/Makefile
-@@ -0,0 +1,31 @@
+@@ -0,0 +1,29 @@
 +#
-+# Ib_srpt module
++# ib_srpt module
 +#
 +#
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE) -include $(src)/../ifs-kernel-updates-conf.h
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND_SRPT) += ib_srpt.o
-+
 +
 +else
 +#normal makefile
@@ -7310,7 +7391,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#endif
 --- /dev/null
 +++ b/ib_srpt/ib_srpt.c
-@@ -0,0 +1,4050 @@
+@@ -0,0 +1,3991 @@
 +/*
 + * Copyright (c) 2006 - 2009 Mellanox Technology Inc.  All rights reserved.
 + * Copyright (C) 2008 - 2011 Bart Van Assche <bvanassche@acm.org>.
@@ -8271,8 +8352,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		return -ENOMEM;
 +
 +	attr->qp_state = IB_QPS_INIT;
-+	attr->qp_access_flags = IB_ACCESS_LOCAL_WRITE | IB_ACCESS_REMOTE_READ |
-+	    IB_ACCESS_REMOTE_WRITE;
++	attr->qp_access_flags = IB_ACCESS_LOCAL_WRITE;
 +	attr->port_num = ch->sport->port;
 +	attr->pkey_index = 0;
 +
@@ -9057,47 +9137,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	return -1;
 +}
 +
-+/**
-+ * srpt_rx_mgmt_fn_tag() - Process a task management function by tag.
-+ * @ch: RDMA channel of the task management request.
-+ * @fn: Task management function to perform.
-+ * @req_tag: Tag of the SRP task management request.
-+ * @mgmt_ioctx: I/O context of the task management request.
-+ *
-+ * Returns zero if the target core will process the task management
-+ * request asynchronously.
-+ *
-+ * Note: It is assumed that the initiator serializes tag-based task management
-+ * requests.
-+ */
-+static int srpt_rx_mgmt_fn_tag(struct srpt_send_ioctx *ioctx, u64 tag)
-+{
-+	struct srpt_device *sdev;
-+	struct srpt_rdma_ch *ch;
-+	struct srpt_send_ioctx *target;
-+	int ret, i;
-+
-+	ret = -EINVAL;
-+	ch = ioctx->ch;
-+	BUG_ON(!ch);
-+	BUG_ON(!ch->sport);
-+	sdev = ch->sport->sdev;
-+	BUG_ON(!sdev);
-+	spin_lock_irq(&sdev->spinlock);
-+	for (i = 0; i < ch->rq_size; ++i) {
-+		target = ch->ioctx_ring[i];
-+		if (target->cmd.se_lun == ioctx->cmd.se_lun &&
-+		    target->tag == tag &&
-+		    srpt_get_cmd_state(target) != SRPT_STATE_DONE) {
-+			ret = 0;
-+			/* now let the target core abort &target->cmd; */
-+			break;
-+		}
-+	}
-+	spin_unlock_irq(&sdev->spinlock);
-+	return ret;
-+}
-+
 +static int srp_tmr_to_tcm(int fn)
 +{
 +	switch (fn) {
@@ -9132,7 +9171,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	struct se_cmd *cmd;
 +	struct se_session *sess = ch->sess;
 +	uint64_t unpacked_lun;
-+	uint32_t tag = 0;
 +	int tcm_tmr;
 +	int rc;
 +
@@ -9148,25 +9186,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	srpt_set_cmd_state(send_ioctx, SRPT_STATE_MGMT);
 +	send_ioctx->tag = srp_tsk->tag;
 +	tcm_tmr = srp_tmr_to_tcm(srp_tsk->tsk_mgmt_func);
-+	if (tcm_tmr < 0) {
-+		send_ioctx->cmd.se_tmr_req->response =
-+			TMR_TASK_MGMT_FUNCTION_NOT_SUPPORTED;
-+		goto fail;
-+	}
 +	unpacked_lun = srpt_unpack_lun((uint8_t *)&srp_tsk->lun,
 +				       sizeof(srp_tsk->lun));
-+
-+	if (srp_tsk->tsk_mgmt_func == SRP_TSK_ABORT_TASK) {
-+		rc = srpt_rx_mgmt_fn_tag(send_ioctx, srp_tsk->task_tag);
-+		if (rc < 0) {
-+			send_ioctx->cmd.se_tmr_req->response =
-+					TMR_TASK_DOES_NOT_EXIST;
-+			goto fail;
-+		}
-+		tag = srp_tsk->task_tag;
-+	}
 +	rc = target_submit_tmr(&send_ioctx->cmd, sess, NULL, unpacked_lun,
-+				srp_tsk, tcm_tmr, GFP_KERNEL, tag,
++				srp_tsk, tcm_tmr, GFP_KERNEL, srp_tsk->task_tag,
 +				TARGET_SCF_ACK_KREF);
 +	if (rc != 0) {
 +		send_ioctx->cmd.se_tmr_req->response = TMR_FUNCTION_REJECTED;
@@ -10891,7 +10914,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +{
 +	const char *p;
 +	unsigned len, count, leading_zero_bytes;
-+	int ret, rc;
++	int ret;
 +
 +	p = name;
 +	if (strnicmp(p, "0x", 2) == 0)
@@ -10903,10 +10926,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	count = min(len / 2, 16U);
 +	leading_zero_bytes = 16 - count;
 +	memset(i_port_id, 0, leading_zero_bytes);
-+	rc = hex2bin(i_port_id + leading_zero_bytes, p, count);
-+	if (rc < 0)
-+		pr_debug("hex2bin failed for srpt_parse_i_port_id: %d\n", rc);
-+	ret = 0;
++	ret = hex2bin(i_port_id + leading_zero_bytes, p, count);
++	if (ret < 0)
++		pr_debug("hex2bin failed for srpt_parse_i_port_id: %d\n", ret);
 +out:
 +	return ret;
 +}
@@ -11809,7 +11831,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#endif				/* IB_SRPT_H */
 --- /dev/null
 +++ b/ib_ucm/Makefile
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,31 @@
 +#
 +# Ib_ucm module
 +#
@@ -11817,12 +11839,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
-+ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND) += ib_ucm.o
 +
@@ -11845,7 +11865,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 --- /dev/null
 +++ b/ib_ucm/ucm.c
-@@ -0,0 +1,1377 @@
+@@ -0,0 +1,1374 @@
 +/*
 + * Copyright (c) 2005 Topspin Communications.  All rights reserved.
 + * Copyright (c) 2005 Intel Corporation.  All rights reserved.
@@ -11900,9 +11920,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#include <rdma/ib_cm.h>
 +#include <rdma/ib_user_cm.h>
 +#include <rdma/ib_marshall.h>
-+
-+#include "core_compat.h"
-+
 +
 +MODULE_AUTHOR("Libor Michalek");
 +MODULE_DESCRIPTION("InfiniBand userspace Connection Manager access");
@@ -13225,7 +13242,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +module_exit(ib_ucm_cleanup);
 --- /dev/null
 +++ b/ib_umad/Makefile
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,31 @@
 +#
 +# Ib_umad module
 +#
@@ -13233,12 +13250,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
-+ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND) += ib_umad.o
 +
@@ -13261,7 +13276,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 --- /dev/null
 +++ b/ib_umad/user_mad.c
-@@ -0,0 +1,1412 @@
+@@ -0,0 +1,1250 @@
 +/*
 + * Copyright (c) 2004 Topspin Communications.  All rights reserved.
 + * Copyright (c) 2005 Voltaire, Inc. All rights reserved.
@@ -13315,7 +13330,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#include <asm/uaccess.h>
 +
 +#include <rdma/ib_mad.h>
-+#include "update/ib_user_mad.h"
++#include <rdma/ib_user_mad.h>
 +
 +MODULE_AUTHOR("Roland Dreier");
 +MODULE_DESCRIPTION("InfiniBand userspace MAD packet access");
@@ -13525,27 +13540,20 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +{
 +	struct ib_mad_recv_buf *recv_buf;
 +	int left, seg_payload, offset, max_seg_payload;
-+	int seg_size;
-+
-+	recv_buf = &packet->recv_wc->recv_buf;
-+
-+	if (recv_buf->mad->mad_hdr.base_version == OPA_MGMT_BASE_VERSION)
-+		seg_size = sizeof(struct opa_mad);
-+	else
-+		seg_size = sizeof(struct ib_mad);
 +
 +	/* We need enough room to copy the first (or only) MAD segment. */
-+	if ((packet->length <= seg_size &&
++	recv_buf = &packet->recv_wc->recv_buf;
++	if ((packet->length <= sizeof (*recv_buf->mad) &&
 +	     count < hdr_size(file) + packet->length) ||
-+	    (packet->length > seg_size &&
-+	     count < hdr_size(file) + seg_size))
++	    (packet->length > sizeof (*recv_buf->mad) &&
++	     count < hdr_size(file) + sizeof (*recv_buf->mad)))
 +		return -EINVAL;
 +
 +	if (copy_to_user(buf, &packet->mad, hdr_size(file)))
 +		return -EFAULT;
 +
 +	buf += hdr_size(file);
-+	seg_payload = min_t(int, packet->length, seg_size);
++	seg_payload = min_t(int, packet->length, sizeof (*recv_buf->mad));
 +	if (copy_to_user(buf, recv_buf->mad, seg_payload))
 +		return -EFAULT;
 +
@@ -13562,7 +13570,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +			return -ENOSPC;
 +		}
 +		offset = ib_get_mad_data_offset(recv_buf->mad->mad_hdr.mgmt_class);
-+		max_seg_payload = seg_size - offset;
++		max_seg_payload = sizeof (struct ib_mad) - offset;
 +
 +		for (left = packet->length - seg_payload, buf += seg_payload;
 +		     left; left -= seg_payload, buf += seg_payload) {
@@ -13696,29 +13704,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		 * restrictive than required by the spec.
 +		 */
 +		if (!ib_response_mad((struct ib_mad *) hdr)) {
-+			if (!ib_response_mad((struct ib_mad *) sent_hdr)) {
-+				printk(KERN_ERR "user_mad: duplicate packet: "
-+					"both not response; "
-+					"TID 0x%016llx; "
-+					"base_ver 0x%x; mgmt_class 0x%x; "
-+					"class_ver 0x%x; "
-+					"method 0x%x; attr 0x%x\n",
-+					be64_to_cpu(hdr->tid),
-+					hdr->base_version,
-+					hdr->mgmt_class,
-+					hdr->class_version,
-+					hdr->method,
-+					be16_to_cpu(hdr->attr_id));
++			if (!ib_response_mad((struct ib_mad *) sent_hdr))
 +				return 1;
-+			}
 +			continue;
 +		} else if (!ib_response_mad((struct ib_mad *) sent_hdr))
 +			continue;
 +
-+		if (same_destination(&packet->mad.hdr, &sent_packet->mad.hdr)) {
-+			printk(KERN_ERR "user_mad: duplicate packet: same destination\n");
++		if (same_destination(&packet->mad.hdr, &sent_packet->mad.hdr))
 +			return 1;
-+		}
 +	}
 +
 +	return 0;
@@ -13735,7 +13728,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	struct ib_rmpp_mad *rmpp_mad;
 +	__be64 *tid;
 +	int ret, data_len, hdr_len, copy_offset, rmpp_active;
-+	u8 base_version;
 +
 +	if (count < hdr_size(file) + IB_MGMT_RMPP_HDR)
 +		return -EINVAL;
@@ -13790,23 +13782,19 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	}
 +
 +	rmpp_mad = (struct ib_rmpp_mad *) packet->mad.data;
-+	hdr_len = ib_get_mad_data_offset(rmpp_mad->base.mad_hdr.mgmt_class);
-+
-+	if (ib_is_mad_class_rmpp(rmpp_mad->base.mad_hdr.mgmt_class)
-+	    && ib_mad_kernel_rmpp_agent(agent)) {
-+		copy_offset = IB_MGMT_RMPP_HDR;
-+		rmpp_active = ib_get_rmpp_flags(&rmpp_mad->base.rmpp_hdr) &
-+						IB_MGMT_RMPP_FLAG_ACTIVE;
-+	} else {
++	hdr_len = ib_get_mad_data_offset(rmpp_mad->mad_hdr.mgmt_class);
++	if (!ib_is_mad_class_rmpp(rmpp_mad->mad_hdr.mgmt_class)) {
 +		copy_offset = IB_MGMT_MAD_HDR;
 +		rmpp_active = 0;
++	} else {
++		copy_offset = IB_MGMT_RMPP_HDR;
++		rmpp_active = ib_get_rmpp_flags(&rmpp_mad->rmpp_hdr) &
++			      IB_MGMT_RMPP_FLAG_ACTIVE;
 +	}
 +
-+	base_version = ((struct ib_mad_hdr*)&packet->mad.data)->base_version;
 +	data_len = count - hdr_size(file) - hdr_len;
 +	packet->msg = ib_create_send_mad(agent,
-+					 be32_to_cpu(packet->mad.hdr.qpn) |
-+					 (base_version << 24),
++					 be32_to_cpu(packet->mad.hdr.qpn),
 +					 packet->mad.hdr.pkey_index, rmpp_active,
 +					 hdr_len, data_len, GFP_KERNEL);
 +	if (IS_ERR(packet->msg)) {
@@ -13844,25 +13832,17 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		tid = &((struct ib_mad_hdr *) packet->msg->mad)->tid;
 +		*tid = cpu_to_be64(((u64) agent->hi_tid) << 32 |
 +				   (be64_to_cpup(tid) & 0xffffffff));
-+		rmpp_mad->base.mad_hdr.tid = *tid;
++		rmpp_mad->mad_hdr.tid = *tid;
 +	}
 +
-+	if (!ib_mad_kernel_rmpp_agent(agent)
-+	   && ib_is_mad_class_rmpp(rmpp_mad->base.mad_hdr.mgmt_class)
-+	   && (ib_get_rmpp_flags(&rmpp_mad->base.rmpp_hdr) & IB_MGMT_RMPP_FLAG_ACTIVE)) {
-+		spin_lock_irq(&file->send_lock);
++	spin_lock_irq(&file->send_lock);
++	ret = is_duplicate(file, packet);
++	if (!ret)
 +		list_add_tail(&packet->list, &file->send_list);
-+		spin_unlock_irq(&file->send_lock);
-+	} else {
-+		spin_lock_irq(&file->send_lock);
-+		ret = is_duplicate(file, packet);
-+		if (!ret)
-+			list_add_tail(&packet->list, &file->send_list);
-+		spin_unlock_irq(&file->send_lock);
-+		if (ret) {
-+			ret = -EINVAL;
-+			goto err_msg;
-+		}
++	spin_unlock_irq(&file->send_lock);
++	if (ret) {
++		ret = -EINVAL;
++		goto err_msg;
 +	}
 +
 +	ret = ib_post_send_mad(packet->msg, NULL);
@@ -13913,8 +13893,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	mutex_lock(&file->mutex);
 +
 +	if (!file->port->ib_dev) {
-+		printk(KERN_NOTICE
-+			   "ib_umad_reg_agent: invalid device\n");
 +		ret = -EPIPE;
 +		goto out;
 +	}
@@ -13925,9 +13903,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	}
 +
 +	if (ureq.qpn != 0 && ureq.qpn != 1) {
-+		printk(KERN_NOTICE
-+			   "ib_umad_reg_agent: invalid QPN %d specified\n",
-+			   ureq.qpn);
 +		ret = -EINVAL;
 +		goto out;
 +	}
@@ -13936,15 +13911,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		if (!__get_agent(file, agent_id))
 +			goto found;
 +
-+	printk(KERN_NOTICE
-+		   "ib_umad_reg_agent: Max Agents (%u) reached\n",
-+		   IB_UMAD_MAX_AGENTS);
 +	ret = -ENOMEM;
 +	goto out;
 +
 +found:
 +	if (ureq.mgmt_class) {
-+		memset(&req, 0, sizeof(req));
 +		req.mgmt_class         = ureq.mgmt_class;
 +		req.mgmt_class_version = ureq.mgmt_class_version;
 +		memcpy(req.oui, ureq.oui, sizeof req.oui);
@@ -13986,120 +13957,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +			printk(KERN_WARNING "user_mad:   Documentation/infiniband/user_mad.txt "
 +			       "has info on the new ABI.\n");
 +		}
-+	}
-+
-+	file->agent[agent_id] = agent;
-+	ret = 0;
-+
-+out:
-+	mutex_unlock(&file->mutex);
-+
-+	if (ret && agent)
-+		ib_unregister_mad_agent(agent);
-+
-+	mutex_unlock(&file->port->file_mutex);
-+
-+	return ret;
-+}
-+
-+static int ib_umad_reg_agent2(struct ib_umad_file *file, void __user *arg)
-+{
-+	struct ib_user_mad_reg_req2 ureq;
-+	struct ib_mad_reg_req req;
-+	struct ib_mad_agent *agent = NULL;
-+	int agent_id;
-+	u8 rmpp_flags;
-+	int ret;
-+
-+	mutex_lock(&file->port->file_mutex);
-+	mutex_lock(&file->mutex);
-+
-+	if (!file->port->ib_dev) {
-+		dev_notice(file->port->dev,
-+			   "ib_umad_reg_agent2: invalid device\n");
-+		ret = -EPIPE;
-+		goto out;
-+	}
-+
-+	if (copy_from_user(&ureq, arg, sizeof(ureq))) {
-+		ret = -EFAULT;
-+		goto out;
-+	}
-+
-+	if (ureq.qpn != 0 && ureq.qpn != 1) {
-+		dev_notice(file->port->dev,
-+			   "ib_umad_reg_agent2: invalid QPN %d specified\n",
-+			   ureq.qpn);
-+		ret = -EINVAL;
-+		goto out;
-+	}
-+
-+	if (ureq.flags & ~IB_USER_MAD_REG_FLAGS_CAP) {
-+		dev_notice(file->port->dev,
-+			   "ib_umad_reg_agent2 failed: invalid registration flags specified 0x%x; supported 0x%x\n",
-+			   ureq.flags, IB_USER_MAD_REG_FLAGS_CAP);
-+		ret = -EINVAL;
-+
-+		if (put_user((u32)IB_USER_MAD_REG_FLAGS_CAP,
-+				(u32 __user *) (arg + offsetof(struct
-+				ib_user_mad_reg_req2, flags))))
-+			ret = -EFAULT;
-+
-+		goto out;
-+	}
-+
-+	for (agent_id = 0; agent_id < IB_UMAD_MAX_AGENTS; ++agent_id)
-+		if (!__get_agent(file, agent_id))
-+			goto found;
-+
-+	dev_notice(file->port->dev,
-+		   "ib_umad_reg_agent2: Max Agents (%u) reached\n",
-+		   IB_UMAD_MAX_AGENTS);
-+	ret = -ENOMEM;
-+	goto out;
-+
-+found:
-+	if (ureq.mgmt_class) {
-+		memset(&req, 0, sizeof(req));
-+		req.mgmt_class         = ureq.mgmt_class;
-+		req.mgmt_class_version = ureq.mgmt_class_version;
-+		if (ureq.oui & 0xff000000) {
-+			dev_notice(file->port->dev,
-+				   "ib_umad_reg_agent2 failed: oui invalid 0x%08x\n",
-+				   ureq.oui);
-+			ret = -EINVAL;
-+			goto out;
-+		}
-+		req.oui[2] =  ureq.oui & 0x0000ff;
-+		req.oui[1] = (ureq.oui & 0x00ff00) >> 8;
-+		req.oui[0] = (ureq.oui & 0xff0000) >> 16;
-+		memcpy(req.method_mask, ureq.method_mask,
-+			sizeof(req.method_mask));
-+	}
-+
-+	rmpp_flags = SET_FLAGS_RMPP(ureq.rmpp_version, (u8)ureq.flags);
-+	agent = ib_register_mad_agent(file->port->ib_dev, file->port->port_num,
-+				      ureq.qpn ? IB_QPT_GSI : IB_QPT_SMI,
-+				      ureq.mgmt_class ? &req : NULL,
-+				      rmpp_flags,
-+				      send_handler, recv_handler, file);
-+
-+	if (IS_ERR(agent)) {
-+		ret = PTR_ERR(agent);
-+		agent = NULL;
-+		goto out;
-+	}
-+
-+	if (put_user(agent_id,
-+		     (u32 __user *)(arg +
-+				offsetof(struct ib_user_mad_reg_req2, id)))) {
-+		ret = -EFAULT;
-+		goto out;
-+	}
-+
-+	if (!file->already_used) {
-+		file->already_used = 1;
-+		file->use_pkey_index = 1;
 +	}
 +
 +	file->agent[agent_id] = agent;
@@ -14171,8 +14028,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		return ib_umad_unreg_agent(filp->private_data, (__u32 __user *) arg);
 +	case IB_USER_MAD_ENABLE_PKEY:
 +		return ib_umad_enable_pkey(filp->private_data);
-+	case IB_USER_MAD_REGISTER_AGENT2:
-+		return ib_umad_reg_agent2(filp->private_data, (void __user *) arg);
 +	default:
 +		return -ENOIOCTLCMD;
 +	}
@@ -14189,8 +14044,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		return ib_umad_unreg_agent(filp->private_data, compat_ptr(arg));
 +	case IB_USER_MAD_ENABLE_PKEY:
 +		return ib_umad_enable_pkey(filp->private_data);
-+	case IB_USER_MAD_REGISTER_AGENT2:
-+		return ib_umad_reg_agent2(filp->private_data, compat_ptr(arg));
 +	default:
 +		return -ENOIOCTLCMD;
 +	}
@@ -14409,7 +14262,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +static dev_t overflow_maj;
 +static DECLARE_BITMAP(overflow_map, IB_UMAD_MAX_PORTS);
-+static int find_overflow_devnum(struct ib_device *device)
++static int find_overflow_devnum(void)
 +{
 +	int ret;
 +
@@ -14440,7 +14293,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	devnum = find_first_zero_bit(dev_map, IB_UMAD_MAX_PORTS);
 +	if (devnum >= IB_UMAD_MAX_PORTS) {
 +		spin_unlock(&port_lock);
-+		devnum = find_overflow_devnum(device);
++		devnum = find_overflow_devnum();
 +		if (devnum < 0)
 +			return -1;
 +
@@ -14676,7 +14529,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +module_exit(ib_umad_cleanup);
 --- /dev/null
 +++ b/rdma_cm/Makefile
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,31 @@
 +#
 +# Rdma_cm module
 +#
@@ -14684,12 +14537,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
-+ccflags-y := -include $(src)/../ifs-kernel-updates-conf.h
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND) += rdma_cm.o
 +
@@ -14712,7 +14563,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 --- /dev/null
 +++ b/rdma_cm/cma.c
-@@ -0,0 +1,3710 @@
+@@ -0,0 +1,3716 @@
 +/*
 + * Copyright (c) 2005 Voltaire Inc.  All rights reserved.
 + * Copyright (c) 2002-2005, Network Appliance, Inc. All rights reserved.
@@ -15468,6 +15319,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +		} else
 +			ret = iw_cm_init_qp_attr(id_priv->cm_id.iw, qp_attr,
 +						 qp_attr_mask);
++		qp_attr->port_num = id_priv->id.port_num;
++		*qp_attr_mask |= IB_QP_PORT;
 +		break;
 +	default:
 +		ret = -ENOSYS;
@@ -17667,6 +17520,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	struct iw_cm_conn_param iw_param;
 +	int ret;
 +
++	if (!conn_param)
++		return -EINVAL;
++
 +	ret = cma_modify_qp_rtr(id_priv, conn_param);
 +	if (ret)
 +		return ret;
@@ -18394,7 +18250,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	if (ret)
 +		goto err;
 +
-+	if (ibnl_add_client(RDMA_NL_RDMA_CM, RDMA_NL_RDMA_CM_NUM_OPS, cma_cb_table))
++	if (ibnl_add_client(RDMA_NL_RDMA_CM, ARRAY_SIZE(cma_cb_table),
++			    cma_cb_table))
 +		printk(KERN_WARNING "RDMA CMA: failed to add netlink callback\n");
 +
 +	return 0;
@@ -18425,7 +18282,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +module_exit(cma_cleanup);
 --- /dev/null
 +++ b/rdma_ucm/Makefile
-@@ -0,0 +1,33 @@
+@@ -0,0 +1,31 @@
 +#
 +# Rdma_ucm module
 +#
@@ -18433,12 +18290,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +# Called from the kernel module build system.
 +#
 +
-+LINUXINCLUDE := -I$(src)/../include $(LINUXINCLUDE)
-+
 +ifneq ($(KERNELRELEASE),)
 +#kbuild part of makefile
 +
-+ccflags-y := -I$(src)/../ib_ucm -include $(src)/../ifs-kernel-updates-conf.h
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
 +
 +obj-$(CONFIG_INFINIBAND) += rdma_ucm.o
 +
@@ -18461,7 +18316,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 --- /dev/null
 +++ b/rdma_ucm/ucma.c
-@@ -0,0 +1,1641 @@
+@@ -0,0 +1,1638 @@
 +/*
 + * Copyright (c) 2005-2006 Intel Corporation.  All rights reserved.
 + *
@@ -18513,9 +18368,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#include <rdma/rdma_cm_ib.h>
 +#include <rdma/ib_addr.h>
 +#include <rdma/ib.h>
-+
-+#include "core_compat.h"
-+
 +
 +MODULE_AUTHOR("Sean Hefty");
 +MODULE_DESCRIPTION("RDMA Userspace Connection Manager Access");

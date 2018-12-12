@@ -9,9 +9,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib.h
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib.h
-@@ -132,6 +132,12 @@ struct ipoib_cb {
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -132,6 +132,12 @@
  	u8			hwaddr[INFINIBAND_ALEN];
  };
  
@@ -24,9 +24,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /* Used for all multicast joins (broadcast, IPv4 mcast and IPv6 mcast) */
  struct ipoib_mcast {
  	struct ib_sa_mcmember_rec mcmember;
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_main.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_main.c
-@@ -716,7 +716,7 @@ static int ipoib_start_xmit(struct sk_bu
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -758,7 +758,7 @@
  {
  	struct ipoib_dev_priv *priv = netdev_priv(dev);
  	struct ipoib_neigh *neigh;
@@ -35,7 +35,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	struct ipoib_header *header;
  	unsigned long flags;
  
-@@ -813,7 +813,7 @@ static int ipoib_hard_header(struct sk_b
+@@ -856,7 +856,7 @@
  			     const void *daddr, const void *saddr, unsigned len)
  {
  	struct ipoib_header *header;

@@ -10,9 +10,9 @@ Forwarded: not-needed
 Last-Update: <2017-12-14>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
---- ifs-kernel-updates-3.16.0.491.orig/ib_ipoib/ipoib_cm.c
-+++ ifs-kernel-updates-3.16.0.491/ib_ipoib/ipoib_cm.c
-@@ -386,8 +386,8 @@ static int ipoib_cm_nonsrq_init_rx(struc
+--- a/ib_ipoib/ipoib_cm.c
++++ b/ib_ipoib/ipoib_cm.c
+@@ -386,8 +386,8 @@
  					   rx->rx_ring[i].mapping,
  					   GFP_KERNEL)) {
  			ipoib_warn(priv, "failed to allocate receive buffer %d\n", i);

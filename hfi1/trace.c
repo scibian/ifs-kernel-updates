@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -48,7 +48,7 @@
 #include "trace.h"
 #include "user_sdma.h"
 
-u8 hfi1_trace_ib_hdr_len(struct ib_header *hdr)
+static u8 __get_ib_hdr_len(struct ib_header *hdr)
 {
 	struct ib_other_headers *ohdr;
 	u8 opcode;
@@ -62,9 +62,57 @@ u8 hfi1_trace_ib_hdr_len(struct ib_header *hdr)
 	       0 : hdr_len_by_opcode[opcode] - (12 + 8);
 }
 
-const char *hfi1_trace_get_packet_str(struct hfi1_packet *packet)
+static u8 __get_16b_hdr_len(struct hfi1_16b_header *hdr)
 {
-	return "IB";
+	struct ib_other_headers *ohdr;
+	u8 opcode;
+
+	if (hfi1_16B_get_l4(hdr) == OPA_16B_L4_IB_LOCAL)
+		ohdr = &hdr->u.oth;
+	else
+		ohdr = &hdr->u.l.oth;
+	opcode = ib_bth_get_opcode(ohdr);
+	return hdr_len_by_opcode[opcode] == 0 ?
+	       0 : hdr_len_by_opcode[opcode] - (12 + 8 + 8);
+}
+
+u8 hfi1_trace_packet_hdr_len(struct hfi1_packet *packet)
+{
+	if (packet->etype != RHF_RCV_TYPE_BYPASS)
+		return __get_ib_hdr_len(packet->hdr);
+	else
+		return __get_16b_hdr_len(packet->hdr);
+}
+
+u8 hfi1_trace_opa_hdr_len(struct hfi1_opa_header *opa_hdr)
+{
+	if (!opa_hdr->hdr_type)
+		return __get_ib_hdr_len(&opa_hdr->ibh);
+	else
+		return __get_16b_hdr_len(&opa_hdr->opah);
+}
+
+const char *hfi1_trace_get_packet_l4_str(u8 l4)
+{
+	if (l4)
+		return "16B";
+	else
+		return "9B";
+}
+
+const char *hfi1_trace_get_packet_l2_str(u8 l2)
+{
+	switch (l2) {
+	case 0:
+		return "0";
+	case 1:
+		return "1";
+	case 2:
+		return "16B";
+	case 3:
+		return "9B";
+	}
+	return "";
 }
 
 #define IMM_PRN  "imm:%d"
@@ -75,13 +123,14 @@ const char *hfi1_trace_get_packet_str(struct hfi1_packet *packet)
 #define ATOMICACKETH_PRN "origdata:%llx"
 #define ATOMICETH_PRN "vaddr:0x%llx rkey:0x%.8x sdata:%llx cdata:%llx"
 #define TID_RDMA_KDETH "kdeth0 0x%x kdeth1 0x%x"
-#define TID_RDMA_KDETH_DATA "kdeth0 0x%x: kver %u sh %u tidctrl %u tid %x offset %x kdeth1 0x%x: jkey %x"
+#define TID_RDMA_KDETH_DATA "kdeth0 0x%x: kver %u sh %u intr %u tidctrl %u tid %x offset %x kdeth1 0x%x: jkey %x"
 #define TID_WRITE_REQ_PRN "original_qp 0x%x"
 #define TID_WRITE_RSP_PRN "tid_flow_psn 0x%x tid_flow_qp 0x%x verbs_qp 0x%x"
 #define TID_WRITE_DATA_PRN "verbs_qp 0x%x"
 #define TID_READ_REQ_PRN "tid_flow_psn 0x%x tid_flow_qp 0x%x verbs_qp 0x%x"
 #define TID_READ_RSP_PRN "verbs_qp 0x%x"
-#define TID_ACK_PRN "verbs_psn 0x%x tid_flow_qp 0x%x verbs_qp 0x%x"
+#define TID_ACK_PRN "tid_flow_psn 0x%x verbs_psn 0x%x tid_flow_qp 0x%x verbs_qp 0x%x"
+#define TID_RESYNC_PRN "verbs_qp 0x%x"
 
 #define OP(transport, op) IB_OPCODE_## transport ## _ ## op
 
@@ -98,10 +147,10 @@ static const char *parse_syndrome(u8 syndrome)
 	return "";
 }
 
-void hfi1_trace_parse_bth(struct ib_other_headers *ohdr,
-			  u8 *ack, u8 *becn, u8 *fecn, u8 *mig,
-			  u8 *se, u8 *pad, u8 *opcode, u8 *tver,
-			  u16 *pkey, u32 *psn, u32 *qpn)
+void hfi1_trace_parse_9b_bth(struct ib_other_headers *ohdr,
+			     u8 *ack, bool *becn, bool *fecn, u8 *mig,
+			     u8 *se, u8 *pad, u8 *opcode, u8 *tver,
+			     u16 *pkey, u32 *psn, u32 *qpn)
 {
 	*ack = ib_bth_get_ackreq(ohdr);
 	*becn = ib_bth_get_becn(ohdr);
@@ -112,12 +161,26 @@ void hfi1_trace_parse_bth(struct ib_other_headers *ohdr,
 	*opcode = ib_bth_get_opcode(ohdr);
 	*tver = ib_bth_get_tver(ohdr);
 	*pkey = ib_bth_get_pkey(ohdr);
-	*psn = ib_bth_get_psn(ohdr);
+	*psn = mask_psn(ib_bth_get_psn(ohdr));
+	*qpn = ib_bth_get_qpn(ohdr);
+}
+
+void hfi1_trace_parse_16b_bth(struct ib_other_headers *ohdr,
+			      u8 *ack, u8 *mig, u8 *opcode,
+			      u8 *pad, u8 *se, u8 *tver,
+			      u32 *psn, u32 *qpn)
+{
+	*ack = ib_bth_get_ackreq(ohdr);
+	*mig = ib_bth_get_migreq(ohdr);
+	*opcode = ib_bth_get_opcode(ohdr);
+	*pad = ib_bth_get_pad(ohdr);
+	*se = ib_bth_get_se(ohdr);
+	*tver = ib_bth_get_tver(ohdr);
+	*psn = mask_psn(ib_bth_get_psn(ohdr));
 	*qpn = ib_bth_get_qpn(ohdr);
 }
 
 void hfi1_trace_parse_9b_hdr(struct ib_header *hdr, bool sc5,
-			     struct ib_other_headers **ohdr,
 			     u8 *lnh, u8 *lver, u8 *sl, u8 *sc,
 			     u16 *len, u32 *dlid, u32 *slid)
 {
@@ -128,11 +191,79 @@ void hfi1_trace_parse_9b_hdr(struct ib_header *hdr, bool sc5,
 	*len = ib_get_len(hdr);
 	*dlid = ib_get_dlid(hdr);
 	*slid = ib_get_slid(hdr);
+}
 
-	if (*lnh == HFI1_LRH_BTH)
-		*ohdr = &hdr->u.oth;
+void hfi1_trace_parse_16b_hdr(struct hfi1_16b_header *hdr,
+			      u8 *age, bool *becn, bool *fecn,
+			      u8 *l4, u8 *rc, u8 *sc,
+			      u16 *entropy, u16 *len, u16 *pkey,
+			      u32 *dlid, u32 *slid)
+{
+	*age = hfi1_16B_get_age(hdr);
+	*becn = hfi1_16B_get_becn(hdr);
+	*fecn = hfi1_16B_get_fecn(hdr);
+	*l4 = hfi1_16B_get_l4(hdr);
+	*rc = hfi1_16B_get_rc(hdr);
+	*sc = hfi1_16B_get_sc(hdr);
+	*entropy = hfi1_16B_get_entropy(hdr);
+	*len = hfi1_16B_get_len(hdr);
+	*pkey = hfi1_16B_get_pkey(hdr);
+	*dlid = hfi1_16B_get_dlid(hdr);
+	*slid = hfi1_16B_get_slid(hdr);
+}
+
+#define LRH_PRN "len:%d sc:%d dlid:0x%.4x slid:0x%.4x "
+#define LRH_9B_PRN "lnh:%d,%s lver:%d sl:%d"
+#define LRH_16B_PRN "age:%d becn:%d fecn:%d l4:%d " \
+		    "rc:%d sc:%d pkey:0x%.4x entropy:0x%.4x"
+const char *hfi1_trace_fmt_lrh(struct trace_seq *p, bool bypass,
+			       u8 age, bool becn, bool fecn, u8 l4,
+			       u8 lnh, const char *lnh_name, u8 lver,
+			       u8 rc, u8 sc, u8 sl, u16 entropy,
+			       u16 len, u16 pkey, u32 dlid, u32 slid)
+{
+	const char *ret = trace_seq_buffer_ptr(p);
+
+	trace_seq_printf(p, LRH_PRN, len, sc, dlid, slid);
+
+	if (bypass)
+		trace_seq_printf(p, LRH_16B_PRN,
+				 age, becn, fecn, l4, rc, sc, pkey, entropy);
+
 	else
-		*ohdr = &hdr->u.l.oth;
+		trace_seq_printf(p, LRH_9B_PRN,
+				 lnh, lnh_name, lver, sl);
+	trace_seq_putc(p, 0);
+
+	return ret;
+}
+
+#define BTH_9B_PRN \
+	"op:0x%.2x,%s se:%d m:%d pad:%d tver:%d pkey:0x%.4x " \
+	"f:%d b:%d qpn:0x%.6x a:%d psn:0x%.8x"
+#define BTH_16B_PRN \
+	"op:0x%.2x,%s se:%d m:%d pad:%d tver:%d " \
+	"qpn:0x%.6x a:%d psn:0x%.8x"
+const char *hfi1_trace_fmt_bth(struct trace_seq *p, bool bypass,
+			       u8 ack, bool becn, bool fecn, u8 mig,
+			       u8 se, u8 pad, u8 opcode, const char *opname,
+			       u8 tver, u16 pkey, u32 psn, u32 qpn)
+{
+	const char *ret = trace_seq_buffer_ptr(p);
+
+	if (bypass)
+		trace_seq_printf(p, BTH_16B_PRN,
+				 opcode, opname,
+				 se, mig, pad, tver, qpn, ack, psn);
+
+	else
+		trace_seq_printf(p, BTH_9B_PRN,
+				 opcode, opname,
+				 se, mig, pad, tver, pkey, fecn, becn,
+				 qpn, ack, psn);
+	trace_seq_putc(p, 0);
+
+	return ret;
 }
 
 const char *parse_everbs_hdrs(
@@ -187,18 +318,18 @@ const char *parse_everbs_hdrs(
 				 TID_WRITE_REQ_PRN,
 				 le32_to_cpu(eh->tid_rdma.w_req.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.w_req.kdeth1),
-				 ib_u64_get( &eh->tid_rdma.w_req.reth.vaddr),
+				 ib_u64_get(&eh->tid_rdma.w_req.reth.vaddr),
 				 be32_to_cpu(eh->tid_rdma.w_req.reth.rkey),
 				 be32_to_cpu(eh->tid_rdma.w_req.reth.length),
 				 be32_to_cpu(eh->tid_rdma.w_req.verbs_qp));
 		break;
 	case OP(TID_RDMA, WRITE_RESP):
-		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " "
 				 TID_WRITE_RSP_PRN,
 				 le32_to_cpu(eh->tid_rdma.w_rsp.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.w_rsp.kdeth1),
 				 be32_to_cpu(eh->tid_rdma.w_rsp.aeth) >> 24,
-				 parse_syndrome(
+				 parse_syndrome(/* aeth */
 					 be32_to_cpu(eh->tid_rdma.w_rsp.aeth)
 					 >> 24),
 				 (be32_to_cpu(eh->tid_rdma.w_rsp.aeth) &
@@ -213,6 +344,7 @@ const char *parse_everbs_hdrs(
 				 le32_to_cpu(eh->tid_rdma.w_data.kdeth0),
 				 KDETH_GET(eh->tid_rdma.w_data.kdeth0, KVER),
 				 KDETH_GET(eh->tid_rdma.w_data.kdeth0, SH),
+				 KDETH_GET(eh->tid_rdma.w_data.kdeth0, INTR),
 				 KDETH_GET(eh->tid_rdma.w_data.kdeth0, TIDCTRL),
 				 KDETH_GET(eh->tid_rdma.w_data.kdeth0, TID),
 				 KDETH_GET(eh->tid_rdma.w_data.kdeth0, OFFSET),
@@ -221,7 +353,7 @@ const char *parse_everbs_hdrs(
 				 be32_to_cpu(eh->tid_rdma.w_data.verbs_qp));
 		break;
 	case OP(TID_RDMA, READ_REQ):
-		trace_seq_printf(p, TID_RDMA_KDETH " " RETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH " " RETH_PRN " "
 				 TID_READ_REQ_PRN,
 				 le32_to_cpu(eh->tid_rdma.r_req.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.r_req.kdeth1),
@@ -233,18 +365,19 @@ const char *parse_everbs_hdrs(
 				 be32_to_cpu(eh->tid_rdma.r_req.verbs_qp));
 		break;
 	case OP(TID_RDMA, READ_RESP):
-		trace_seq_printf(p, TID_RDMA_KDETH_DATA " " AETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH_DATA " " AETH_PRN " "
 				 TID_READ_RSP_PRN,
 				 le32_to_cpu(eh->tid_rdma.r_rsp.kdeth0),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth0, KVER),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth0, SH),
+				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth0, INTR),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth0, TIDCTRL),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth0, TID),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth0, OFFSET),
 				 le32_to_cpu(eh->tid_rdma.r_rsp.kdeth1),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth1, JKEY),
 				 be32_to_cpu(eh->tid_rdma.r_rsp.aeth) >> 24,
-				 parse_syndrome(
+				 parse_syndrome(/* aeth */
 					 be32_to_cpu(eh->tid_rdma.r_rsp.aeth)
 					 >> 24),
 				 (be32_to_cpu(eh->tid_rdma.r_rsp.aeth) &
@@ -252,19 +385,26 @@ const char *parse_everbs_hdrs(
 				 be32_to_cpu(eh->tid_rdma.r_rsp.verbs_qp));
 		break;
 	case OP(TID_RDMA, ACK):
-		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " "
 				 TID_ACK_PRN,
 				 le32_to_cpu(eh->tid_rdma.ack.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.ack.kdeth1),
 				 be32_to_cpu(eh->tid_rdma.ack.aeth) >> 24,
-				 parse_syndrome(
+				 parse_syndrome(/* aeth */
 					 be32_to_cpu(eh->tid_rdma.ack.aeth)
 					 >> 24),
 				 (be32_to_cpu(eh->tid_rdma.ack.aeth) &
 				  IB_MSN_MASK),
+				 be32_to_cpu(eh->tid_rdma.ack.tid_flow_psn),
 				 be32_to_cpu(eh->tid_rdma.ack.verbs_psn),
 				 be32_to_cpu(eh->tid_rdma.ack.tid_flow_qp),
 				 be32_to_cpu(eh->tid_rdma.ack.verbs_qp));
+		break;
+	case OP(TID_RDMA, RESYNC):
+		trace_seq_printf(p, TID_RDMA_KDETH " " TID_RESYNC_PRN,
+				 le32_to_cpu(eh->tid_rdma.resync.kdeth0),
+				 le32_to_cpu(eh->tid_rdma.resync.kdeth1),
+				 be32_to_cpu(eh->tid_rdma.resync.verbs_qp));
 		break;
 	/* aeth + atomicacketh */
 	case OP(RC, ATOMIC_ACKNOWLEDGE):
@@ -337,6 +477,22 @@ const char *print_u32_array(
 	return ret;
 }
 
+u8 hfi1_trace_get_tid_ctrl(u32 ent)
+{
+	return EXP_TID_GET(ent, CTRL);
+}
+
+u16 hfi1_trace_get_tid_len(u32 ent)
+{
+	return EXP_TID_GET(ent, LEN);
+}
+
+u16 hfi1_trace_get_tid_idx(u32 ent)
+{
+	return EXP_TID_GET(ent, IDX);
+}
+
+__hfi1_trace_fn(AFFINITY);
 __hfi1_trace_fn(PKT);
 __hfi1_trace_fn(PROC);
 __hfi1_trace_fn(SDMA);
@@ -353,3 +509,4 @@ __hfi1_trace_fn(MMU);
 __hfi1_trace_fn(IOCTL);
 __hfi1_trace_fn(OPFN);
 __hfi1_trace_fn(TIDRDMA);
+__hfi1_trace_fn(SEL);

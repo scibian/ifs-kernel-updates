@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -49,17 +49,7 @@
 
 /* STL Verbs Extended */
 #define IB_BTHE_E_SHIFT           24
-#define IB_BTHE_E                 BIT(IB_BTHE_E_SHIFT)
 #define HFI1_VERBS_E_ATOMIC_VADDR U64_MAX
-
-/* OPFN flags */
-#define HFI1_S_STL_E_SENDING     0x1
-#define HFI1_S_STL_E_PENDING     0x2
-
-static inline bool hfi1_opfn_extended(u32 bth1)
-{
-	return !!(bth1 & IB_BTHE_E);
-}
 
 struct ib_atomic_eth;
 
@@ -82,15 +72,12 @@ struct hfi1_opfn_data {
 /* WR opcode for OPFN */
 #define IB_WR_OPFN IB_WR_RESERVED3
 
-#define OPFN_CODE(code) BIT((code - 1))
-#define OPFN_MASK(code) OPFN_CODE(STL_VERBS_EXTD_##code)
-
-void opfn_conn_request(struct rvt_qp *qp);
 void opfn_send_conn_request(struct work_struct *work);
-void opfn_schedule_conn_request(struct rvt_qp *qp);
 void opfn_conn_response(struct rvt_qp *qp, struct rvt_ack_entry *e,
 			struct ib_atomic_eth *ateth);
 void opfn_conn_reply(struct rvt_qp *qp, u64 data);
 void opfn_conn_error(struct rvt_qp *qp);
+void opfn_init(struct rvt_qp *qp, struct ib_qp_attr *attr, int attr_mask);
+void opfn_trigger_conn_request(struct rvt_qp *qp, u32 bth1);
 
 #endif /* _HFI1_OPFN_H */

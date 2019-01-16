@@ -280,7 +280,6 @@ static struct rvt_mr *__rvt_alloc_mr(int count, struct ib_pd *pd)
 	struct rvt_mr *mr;
 	int rval = -ENOMEM;
 	int m;
-	struct rvt_dev_info *dev = ib_to_rvt(pd->device);
 
 	/* Allocate struct plus pointers to first level page tables. */
 	m = (count + RVT_SEGSZ - 1) / RVT_SEGSZ;
@@ -288,10 +287,7 @@ static struct rvt_mr *__rvt_alloc_mr(int count, struct ib_pd *pd)
 	if (!mr)
 		goto bail;
 
-	rval = rvt_init_mregion(&mr->mr, pd, count,
-				ibpd_to_rvtpd(pd)->user &&
-				dev->dparms.no_user_mr_percpu ?
-					PERCPU_REF_INIT_ATOMIC : 0);
+	rval = rvt_init_mregion(&mr->mr, pd, count, 0);
 	if (rval)
 		goto bail;
 	/*
@@ -327,8 +323,8 @@ static void __rvt_free_mr(struct rvt_mr *mr)
  * @acc: access flags
  *
  * Return: the memory region on success, otherwise returns an errno.
- * Note that all DMA addresses should be created via the
- * struct ib_dma_mapping_ops functions (see dma.c).
+ * Note that all DMA addresses should be created via the functions in
+ * struct dma_virt_ops.
  */
 struct ib_mr *rvt_get_dma_mr(struct ib_pd *pd, int acc)
 {
@@ -396,7 +392,6 @@ struct ib_mr *rvt_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 			   mr_access_flags, 0);
 	if (IS_ERR(umem))
 		return (void *)umem;
-
 	n = umem->nmap;
 
 	mr = __rvt_alloc_mr(n, pd);
@@ -411,9 +406,12 @@ struct ib_mr *rvt_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	mr->mr.offset = ib_umem_offset(umem);
 	mr->mr.access_flags = mr_access_flags;
 	mr->umem = umem;
-
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+	mr->mr.page_shift = umem->page_shift;
+#else
 	if (is_power_of_2(umem->page_size))
 		mr->mr.page_shift = ilog2(umem->page_size);
+#endif
 	m = 0;
 	n = 0;
 	for_each_sg(umem->sg_head.sgl, sg, umem->nmap, entry) {
@@ -425,8 +423,15 @@ struct ib_mr *rvt_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 			goto bail_inval;
 		}
 		mr->mr.map[m]->segs[n].vaddr = vaddr;
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+		mr->mr.map[m]->segs[n].length = BIT(umem->page_shift);
+		trace_rvt_mr_user_seg(&mr->mr, m, n, vaddr,
+				      BIT(umem->page_shift));
+#else
 		mr->mr.map[m]->segs[n].length = umem->page_size;
-		trace_rvt_mr_user_seg(&mr->mr, m, n, vaddr, umem->page_size);
+		trace_rvt_mr_user_seg(&mr->mr, m, n, vaddr,
+				      umem->page_size);
+#endif
 		n++;
 		if (n == RVT_SEGSZ) {
 			m++;
@@ -628,6 +633,7 @@ static int rvt_set_page(struct ib_mr *ibmr, u64 addr)
 	return 0;
 }
 
+#if !defined(IFS_SLES12SP2)
 /**
  * rvt_map_mr_sg - map sg list and set it the memory region
  * @ibmr: memory region
@@ -647,7 +653,25 @@ int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
 	return ib_sg_to_pages(ibmr, sg, sg_nents, sg_offset,
 			      rvt_set_page);
 }
+#else
+/**
+ * rvt_map_mr_sg - map sg list and set it the memory region
+ * @ibmr: memory region
+ * @sg: dma mapped scatterlist
+ * @sg_nents: number of entries in sg
+ *
+ * Return: number of sg elements mapped to the memory region
+ */
+int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
+		  int sg_nents)
+{
+	struct rvt_mr *mr = to_imr(ibmr);
 
+	mr->mr.length = 0;
+	mr->mr.page_shift = PAGE_SHIFT;
+	return ib_sg_to_pages(ibmr, sg, sg_nents, rvt_set_page);
+}
+#endif
 /**
  * rvt_fast_reg_mr - fast register physical MR
  * @qp: the queue pair where the work request comes from
@@ -922,7 +946,7 @@ int rvt_lkey_ok(struct rvt_lkey_table *rkt, struct rvt_pd *pd,
 
 	/*
 	 * We use LKEY == zero for kernel virtual addresses
-	 * (see rvt_get_dma_mr and dma.c).
+	 * (see rvt_get_dma_mr() and dma_virt_ops).
 	 */
 	if (sge->lkey == 0) {
 		struct rvt_dev_info *dev = ib_to_rvt(pd->ibpd.device);
@@ -1033,7 +1057,7 @@ int rvt_rkey_ok(struct rvt_qp *qp, struct rvt_sge *sge,
 
 	/*
 	 * We use RKEY == zero for kernel virtual addresses
-	 * (see rvt_get_dma_mr and dma.c).
+	 * (see rvt_get_dma_mr() and dma_virt_ops).
 	 */
 	rcu_read_lock();
 	if (rkey == 0) {

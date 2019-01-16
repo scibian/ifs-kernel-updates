@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015 - 2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -45,20 +45,14 @@
  *
  */
 
-/*Definitions for backport compatibility*/
-#ifndef TP_STRUCT__entry
-#define TP_STRUCT__entry(args...) args
-#endif
-
-#ifndef __get_dynamic_array
-#define __get_dynamic_array(field)      \
-		((void *)__entry + (__entry->__data_loc_##field & 0xffff))
-#endif
-
-#ifndef __get_dynamic_array_len
-#define __get_dynamic_array_len(field)  \
-		((__entry->__data_loc_##field >> 16) & 0xffff)
-#endif
+#define packettype_name(etype) { RHF_RCV_TYPE_##etype, #etype }
+#define show_packettype(etype)                  \
+__print_symbolic(etype,                         \
+	packettype_name(EXPECTED),              \
+	packettype_name(EAGER),                 \
+	packettype_name(IB),                    \
+	packettype_name(ERROR),                 \
+	packettype_name(BYPASS))
 
 #include "trace_dbg.h"
 #include "trace_misc.h"
@@ -67,4 +61,9 @@
 #include "trace_rc.h"
 #include "trace_rx.h"
 #include "trace_tx.h"
+#include "trace_mmu.h"
+#ifdef NVIDIA_GPU_DIRECT
+#include "trace_gpu.h"
+#endif
 #include "trace_iowait.h"
+#include "trace_tid.h"

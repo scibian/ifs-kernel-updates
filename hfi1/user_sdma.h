@@ -53,52 +53,75 @@
 #include "iowait.h"
 #include "user_exp_rcv.h"
 
-extern uint extended_psn;
-
+/* The maximum number of Data io vectors per message/request */
+#define MAX_VECTORS_PER_REQ 8
 /*
- * Define fields in the KDETH header so we can update the header
- * template.
+ * Maximum number of packet to send from each message/request
+ * before moving to the next one.
  */
-#define KDETH_OFFSET_SHIFT        0
-#define KDETH_OFFSET_MASK         0x7fff
-#define KDETH_OM_SHIFT            15
-#define KDETH_OM_MASK             0x1
-#define KDETH_TID_SHIFT           16
-#define KDETH_TID_MASK            0x3ff
-#define KDETH_TIDCTRL_SHIFT       26
-#define KDETH_TIDCTRL_MASK        0x3
-#define KDETH_INTR_SHIFT          28
-#define KDETH_INTR_MASK           0x1
-#define KDETH_SH_SHIFT            29
-#define KDETH_SH_MASK             0x1
-#define KDETH_KVER_SHIFT          30
-#define KDETH_KVER_MASK           0x3
-#define KDETH_JKEY_SHIFT          0x0
-#define KDETH_JKEY_MASK           0xff
-#define KDETH_HCRC_UPPER_SHIFT    16
-#define KDETH_HCRC_UPPER_MASK     0xff
-#define KDETH_HCRC_LOWER_SHIFT    24
-#define KDETH_HCRC_LOWER_MASK     0xff
+#define MAX_PKTS_PER_QUEUE 16
+
+#define num_pages(x) (1 + ((((x) - 1) & PAGE_MASK) >> PAGE_SHIFT))
+
+#define req_opcode(x) \
+	(((x) >> HFI1_SDMA_REQ_OPCODE_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
+#define req_version(x) \
+	(((x) >> HFI1_SDMA_REQ_VERSION_SHIFT) & HFI1_SDMA_REQ_OPCODE_MASK)
+#define req_iovcnt(x) \
+	(((x) >> HFI1_SDMA_REQ_IOVCNT_SHIFT) & HFI1_SDMA_REQ_IOVCNT_MASK)
+
+/* Number of BTH.PSN bits used for sequence number in expected rcvs */
+#define BTH_SEQ_MASK 0x7ffull
 
 #define AHG_KDETH_INTR_SHIFT 12
 #define AHG_KDETH_SH_SHIFT   13
 #define AHG_KDETH_ARRAY_SIZE  9
 
-#define KDETH_GET(val, field)						\
-	(((le32_to_cpu((val))) >> KDETH_##field##_SHIFT) & KDETH_##field##_MASK)
-#define KDETH_SET(dw, field, val) do {					\
-		u32 dwval = le32_to_cpu(dw);				\
-		dwval &= ~(KDETH_##field##_MASK << KDETH_##field##_SHIFT); \
-		dwval |= (((val) & KDETH_##field##_MASK) << \
-			  KDETH_##field##_SHIFT);			\
-		dw = cpu_to_le32(dwval);				\
-	} while (0)
-#define KDETH_RESET(dw, field, val) ({ dw = 0; KDETH_SET(dw, field, val); })
+#define PBC2LRH(x) ((((x) & 0xfff) << 2) - 4)
+#define LRH2PBC(x) ((((x) >> 2) + 1) & 0xfff)
 
-/* KDETH OM multipliers and switch over point */
-#define KDETH_OM_SMALL     4
-#define KDETH_OM_LARGE     64
-#define KDETH_OM_MAX_SIZE  (1 << ((KDETH_OM_LARGE / KDETH_OM_SMALL) + 1))
+/**
+ * Build an SDMA AHG header update descriptor and save it to an array.
+ * @arr        - Array to save the descriptor to.
+ * @idx        - Index of the array at which the descriptor will be saved.
+ * @array_size - Size of the array arr.
+ * @dw         - Update index into the header in DWs.
+ * @bit        - Start bit.
+ * @width      - Field width.
+ * @value      - 16 bits of immediate data to write into the field.
+ * Returns -ERANGE if idx is invalid. If successful, returns the next index
+ * (idx + 1) of the array to be used for the next descriptor.
+ */
+static inline int ahg_header_set(u32 *arr, int idx, size_t array_size,
+				 u8 dw, u8 bit, u8 width, u16 value)
+{
+	if ((size_t)idx >= array_size)
+		return -ERANGE;
+	arr[idx++] = sdma_build_ahg_descriptor(value, dw, bit, width);
+	return idx;
+}
+
+/* Tx request flag bits */
+#define TXREQ_FLAGS_REQ_ACK   BIT(0)      /* Set the ACK bit in the header */
+#define TXREQ_FLAGS_REQ_DISABLE_SH BIT(1) /* Disable header suppression */
+
+enum pkt_q_sdma_state {
+	SDMA_PKT_Q_ACTIVE,
+	SDMA_PKT_Q_DEFERRED,
+};
+
+/*
+ * Maximum retry attempts to submit a TX request
+ * before putting the process to sleep.
+ */
+#define MAX_DEFER_RETRY_COUNT 1
+
+#define SDMA_IOWAIT_TIMEOUT 1000 /* in milliseconds */
+
+#define SDMA_DBG(req, fmt, ...)				     \
+	hfi1_cdbg(SDMA, "[%u:%u:%u:%u] " fmt, (req)->pq->dd->unit, \
+		 (req)->pq->ctxt, (req)->pq->subctxt, (req)->info.comp_idx, \
+		 ##__VA_ARGS__)
 
 struct hfi1_user_sdma_pkt_q {
 	u16 ctxt;
@@ -111,10 +134,14 @@ struct hfi1_user_sdma_pkt_q {
 	struct user_sdma_request *reqs;
 	unsigned long *req_in_use;
 	struct iowait busy;
-	unsigned state;
+	enum pkt_q_sdma_state state;
 	wait_queue_head_t wait;
 	unsigned long unpinned;
 	struct mmu_rb_handler *handler;
+#ifdef NVIDIA_GPU_DIRECT
+	struct mmu_rb_handler *handler_gpu;
+	atomic_t n_gpu_locked;
+#endif
 	atomic_t n_locked;
 	struct mm_struct *mm;
 };
@@ -122,6 +149,123 @@ struct hfi1_user_sdma_pkt_q {
 struct hfi1_user_sdma_comp_q {
 	u16 nentries;
 	struct hfi1_sdma_comp_entry *comps;
+};
+
+struct sdma_mmu_node {
+	struct mmu_rb_node rb;
+	struct hfi1_user_sdma_pkt_q *pq;
+	atomic_t refcount;
+#ifndef NVIDIA_GPU_DIRECT
+	struct page **pages;
+#else
+	union {
+		struct nvidia_p2p_page_table *gpu;
+		struct page **host;
+	} pages;
+	bool ongpu;
+#endif
+	unsigned int npages;
+};
+
+struct user_sdma_iovec {
+	struct list_head list;
+	struct iovec iov;
+	/* number of pages in this vector */
+	unsigned int npages;
+	/* array of pinned pages for this vector */
+#ifndef NVIDIA_GPU_DIRECT
+	struct page **pages;
+#else
+	union {
+		struct nvidia_p2p_page_table *gpu;
+		struct page **host;
+	} pages;
+#endif
+	/*
+	 * offset into the virtual address space of the vector at
+	 * which we last left off.
+	 */
+	u64 offset;
+	struct sdma_mmu_node *node;
+};
+
+/* evict operation argument */
+struct evict_data {
+	u32 cleared;	/* count evicted so far */
+	u32 target;	/* target count to evict */
+};
+
+struct user_sdma_request {
+	/* This is the original header from user space */
+	struct hfi1_pkt_header hdr;
+
+	/* Read mostly fields */
+	struct hfi1_user_sdma_pkt_q *pq ____cacheline_aligned_in_smp;
+	struct hfi1_user_sdma_comp_q *cq;
+	/*
+	 * Pointer to the SDMA engine for this request.
+	 * Since different request could be on different VLs,
+	 * each request will need it's own engine pointer.
+	 */
+	struct sdma_engine *sde;
+	struct sdma_req_info info;
+	/* TID array values copied from the tid_iov vector */
+	u32 *tids;
+	/* total length of the data in the request */
+	u32 data_len;
+	/* number of elements copied to the tids array */
+	u16 n_tids;
+	/*
+	 * We copy the iovs for this request (based on
+	 * info.iovcnt). These are only the data vectors
+	 */
+	u8 data_iovs;
+	s8 ahg_idx;
+
+	/* Writeable fields shared with interrupt */
+	u64 seqcomp ____cacheline_aligned_in_smp;
+	u64 seqsubmitted;
+
+	/* Send side fields */
+	struct list_head txps ____cacheline_aligned_in_smp;
+	u64 seqnum;
+	/*
+	 * KDETH.OFFSET (TID) field
+	 * The offset can cover multiple packets, depending on the
+	 * size of the TID entry.
+	 */
+	u32 tidoffset;
+	/*
+	 * KDETH.Offset (Eager) field
+	 * We need to remember the initial value so the headers
+	 * can be updated properly.
+	 */
+	u32 koffset;
+	u32 sent;
+	/* TID index copied from the tid_iov vector */
+	u16 tididx;
+	/* progress index moving along the iovs array */
+	u8 iov_idx;
+	u8 has_error;
+
+	struct user_sdma_iovec iovs[MAX_VECTORS_PER_REQ];
+} ____cacheline_aligned_in_smp;
+
+/*
+ * A single txreq could span up to 3 physical pages when the MTU
+ * is sufficiently large (> 4K). Each of the IOV pointers also
+ * needs it's own set of flags so the vector has been handled
+ * independently of each other.
+ */
+struct user_sdma_txreq {
+	/* Packet header for the txreq */
+	struct hfi1_pkt_header hdr;
+	struct sdma_txreq txreq;
+	struct list_head list;
+	struct user_sdma_request *req;
+	u16 flags;
+	unsigned int busycount;
+	u64 seqnum;
 };
 
 int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,

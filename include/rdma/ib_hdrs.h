@@ -48,14 +48,10 @@
 #ifndef IB_HDRS_H
 #define IB_HDRS_H
 
+#include "compat.h"
 #include <linux/types.h>
 #include <asm/unaligned.h>
 #include <rdma/ib_verbs.h>
-
-/*For backport compatibility*/
-#ifndef IB_QPN_MASK
-#define IB_QPN_MASK	0xFFFFFF
-#endif
 
 #define IB_SEQ_NAK	(3 << 29)
 
@@ -135,6 +131,7 @@ union ib_ehdrs {
 		struct tid_rdma_write_data w_data;
 		struct tid_rdma_read_req r_req;
 		struct tid_rdma_read_resp r_rsp;
+		struct tid_rdma_resync resync;
 		struct tid_rdma_ack ack;
 	} tid_rdma;
 }  __packed;
@@ -333,16 +330,14 @@ static inline u32 ib_bth_get_qpn(struct ib_other_headers *ohdr)
 	return (u32)((be32_to_cpu(ohdr->bth[1])) & IB_QPN_MASK);
 }
 
-static inline u8 ib_bth_get_becn(struct ib_other_headers *ohdr)
+static inline bool ib_bth_get_becn(struct ib_other_headers *ohdr)
 {
-	return (u8)((be32_to_cpu(ohdr->bth[1]) >> IB_BECN_SHIFT) &
-		     IB_BECN_MASK);
+	return !!((ohdr->bth[1]) & cpu_to_be32(IB_BECN_SMASK));
 }
 
-static inline u8 ib_bth_get_fecn(struct ib_other_headers *ohdr)
+static inline bool ib_bth_get_fecn(struct ib_other_headers *ohdr)
 {
-	return (u8)((be32_to_cpu(ohdr->bth[1]) >> IB_FECN_SHIFT) &
-		    IB_FECN_MASK);
+	return !!((ohdr->bth[1]) & cpu_to_be32(IB_FECN_SMASK));
 }
 
 static inline u8 ib_bth_get_tver(struct ib_other_headers *ohdr)
@@ -351,4 +346,13 @@ static inline u8 ib_bth_get_tver(struct ib_other_headers *ohdr)
 		    IB_BTH_TVER_MASK);
 }
 
+static inline bool ib_bth_is_solicited(struct ib_other_headers *ohdr)
+{
+	return !!(ohdr->bth[0] & cpu_to_be32(IB_BTH_SOLICITED));
+}
+
+static inline bool ib_bth_is_migration(struct ib_other_headers *ohdr)
+{
+	return !!(ohdr->bth[0] & cpu_to_be32(IB_BTH_MIG_REQ));
+}
 #endif                          /* IB_HDRS_H */

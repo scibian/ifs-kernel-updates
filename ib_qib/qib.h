@@ -1,7 +1,7 @@
 #ifndef _QIB_KERNEL_H
 #define _QIB_KERNEL_H
 /*
- * Copyright (c) 2012, 2013 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2012 - 2017 Intel Corporation.  All rights reserved.
  * Copyright (c) 2006 - 2012 QLogic Corporation. All rights reserved.
  * Copyright (c) 2003, 2004, 2005, 2006 PathScale, Inc. All rights reserved.
  *
@@ -55,6 +55,7 @@
 #include <rdma/ib_hdrs.h>
 #include <rdma/rdma_vt.h>
 
+#include "compat.h"
 #include "qib_common.h"
 #include "qib_verbs.h"
 
@@ -443,14 +444,12 @@ struct qib_irq_notify;
 #endif
 
 struct qib_msix_entry {
-	struct msix_entry msix;
 	void *arg;
 #ifdef CONFIG_INFINIBAND_QIB_DCA
 	int dca;
 	int rcv;
 	struct qib_irq_notify *notifier;
 #endif
-	char name[MAX_NAME_SIZE];
 	cpumask_var_t mask;
 };
 
@@ -902,7 +901,7 @@ struct qib_devdata {
 	/* PCI Device ID (here for NodeInfo) */
 	u16 deviceid;
 	/* for write combining settings */
-	unsigned long wc_cookie;
+	int wc_cookie;
 	unsigned long wc_base;
 	unsigned long wc_len;
 
@@ -1132,7 +1131,6 @@ extern spinlock_t qib_devs_lock;
 extern struct qib_devdata *qib_lookup(int unit);
 extern u32 qib_cpulist_count;
 extern unsigned long *qib_cpulist;
-extern unsigned qib_wc_pat;
 extern unsigned qib_cc_table_size;
 
 int qib_init(struct qib_devdata *, int);
@@ -1251,6 +1249,7 @@ static inline struct qib_ibport *to_iport(struct ib_device *ibdev, u8 port)
 #define QIB_BADINTR           0x8000 /* severe interrupt problems */
 #define QIB_DCA_ENABLED       0x10000 /* Direct Cache Access enabled */
 #define QIB_HAS_QSFP          0x20000 /* device (card instance) has QSFP */
+#define QIB_SHUTDOWN          0x40000 /* device is shutting down */
 
 /*
  * values for ppd->lflags (_ib_port_ related flags)
@@ -1434,11 +1433,9 @@ int qib_pcie_init(struct pci_dev *, const struct pci_device_id *);
 int qib_pcie_ddinit(struct qib_devdata *, struct pci_dev *,
 		    const struct pci_device_id *);
 void qib_pcie_ddcleanup(struct qib_devdata *);
-int qib_pcie_params(struct qib_devdata *, u32, u32 *, struct qib_msix_entry *);
-int qib_reinit_intr(struct qib_devdata *);
-void qib_enable_intx(struct pci_dev *);
-void qib_nomsi(struct qib_devdata *);
-void qib_nomsix(struct qib_devdata *);
+int qib_pcie_params(struct qib_devdata *dd, u32 minw, u32 *nent);
+void qib_free_irq(struct qib_devdata *dd);
+int qib_reinit_intr(struct qib_devdata *dd);
 void qib_pcie_getcmd(struct qib_devdata *, u16 *, u8 *, u8 *);
 void qib_pcie_reenable(struct qib_devdata *, u16, u8, u8);
 /* interrupts for device */
@@ -1451,8 +1448,6 @@ u64 qib_sps_ints(void);
  */
 dma_addr_t qib_map_page(struct pci_dev *, struct page *, unsigned long,
 			  size_t, int);
-const char *qib_get_unit_name(int unit);
-const char *qib_get_card_name(struct rvt_dev_info *rdi);
 struct pci_dev *qib_get_pci_dev(struct rvt_dev_info *rdi);
 
 /*
@@ -1511,15 +1506,15 @@ extern struct mutex qib_mutex;
 
 #define qib_dev_err(dd, fmt, ...) \
 	dev_err(&(dd)->pcidev->dev, "%s: " fmt, \
-		qib_get_unit_name((dd)->unit), ##__VA_ARGS__)
+		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), ##__VA_ARGS__)
 
 #define qib_dev_warn(dd, fmt, ...) \
 	dev_warn(&(dd)->pcidev->dev, "%s: " fmt, \
-		qib_get_unit_name((dd)->unit), ##__VA_ARGS__)
+		 rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), ##__VA_ARGS__)
 
 #define qib_dev_porterr(dd, port, fmt, ...) \
 	dev_err(&(dd)->pcidev->dev, "%s: IB%u:%u " fmt, \
-		qib_get_unit_name((dd)->unit), (dd)->unit, (port), \
+		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), (dd)->unit, (port), \
 		##__VA_ARGS__)
 
 #define qib_devinfo(pcidev, fmt, ...) \

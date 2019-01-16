@@ -1,5 +1,0 @@
-%defattr(644,root,root,755)
-/lib/modules/%2-%1/extra/ifs-kernel-updates/rdmavt.ko
-/lib/modules/%2-%1/extra/ifs-kernel-updates/hfi1.ko
-/lib/modules/%2-%1/extra/ifs-kernel-updates/ib_qib.ko
-/etc/depmod.d/ifs-kernel-updates.conf

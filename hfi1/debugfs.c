@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016, 2017 Intel Corporation.
+ * Copyright(c) 2015-2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -60,63 +60,13 @@
 #include "device.h"
 #include "qp.h"
 #include "sdma.h"
+#include "fault.h"
 
 static struct dentry *hfi1_dbg_root;
 
-extern struct srcu_struct debugfs_srcu;
-DEFINE_SRCU(debugfs_srcu);
-
-/**
- * debugfs_use_file_start - mark the beginning of file data access
- * @dentry: the dentry object whose data is being accessed.
- * @srcu_idx: a pointer to some memory to store a SRCU index in.
- *
- * Up to a matching call to debugfs_use_file_finish(), any
- * successive call into the file removing functions debugfs_remove()
- * and debugfs_remove_recursive() will block. Since associated private
- * file data may only get freed after a successful return of any of
- * the removal functions, you may safely access it after a successful
- * call to debugfs_use_file_start() without worrying about
- * lifetime issues.
- *
- * If -%EIO is returned, the file has already been removed and thus,
- * it is not safe to access any of its data. If, on the other hand,
- * it is allowed to access the file data, zero is returned.
- *
- * Regardless of the return code, any call to
- * debugfs_use_file_start() must be followed by a matching call
- * to debugfs_use_file_finish().
- */
-static int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
-        __acquires(&debugfs_srcu)
-{
-        *srcu_idx = srcu_read_lock(&debugfs_srcu);
-        barrier();
-        if (d_unlinked(dentry))
-                return -EIO;
-        return 0;
-}
-
-/**
- * debugfs_use_file_finish - mark the end of file data access
- * @srcu_idx: the SRCU index "created" by a former call to
- *            debugfs_use_file_start().
- *
- * Allow any ongoing concurrent call into debugfs_remove() or
- * debugfs_remove_recursive() blocked by a former call to
- * debugfs_use_file_start() to proceed and return to its caller.
- */
-static void debugfs_use_file_finish(int srcu_idx) __releases(&debugfs_srcu)
-{
-        srcu_read_unlock(&debugfs_srcu, srcu_idx);
-}
-
 /* wrappers to enforce srcu in seq file */
-static ssize_t hfi1_seq_read(
-	struct file *file,
-	char __user *buf,
-	size_t size,
-	loff_t *ppos)
+ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
+		      loff_t *ppos)
 {
 	struct dentry *d = file->f_path.dentry;
 	int srcu_idx;
@@ -129,10 +79,7 @@ static ssize_t hfi1_seq_read(
 	return r;
 }
 
-static loff_t hfi1_seq_lseek(
-	struct file *file,
-	loff_t offset,
-	int whence)
+loff_t hfi1_seq_lseek(struct file *file, loff_t offset, int whence)
 {
 	struct dentry *d = file->f_path.dentry;
 	int srcu_idx;
@@ -147,48 +94,6 @@ static loff_t hfi1_seq_lseek(
 
 #define private2dd(file) (file_inode(file)->i_private)
 #define private2ppd(file) (file_inode(file)->i_private)
-
-#define DEBUGFS_SEQ_FILE_OPS(name) \
-static const struct seq_operations _##name##_seq_ops = { \
-	.start = _##name##_seq_start, \
-	.next  = _##name##_seq_next, \
-	.stop  = _##name##_seq_stop, \
-	.show  = _##name##_seq_show \
-}
-
-#define DEBUGFS_SEQ_FILE_OPEN(name) \
-static int _##name##_open(struct inode *inode, struct file *s) \
-{ \
-	struct seq_file *seq; \
-	int ret; \
-	ret =  seq_open(s, &_##name##_seq_ops); \
-	if (ret) \
-		return ret; \
-	seq = s->private_data; \
-	seq->private = inode->i_private; \
-	return 0; \
-}
-
-#define DEBUGFS_FILE_OPS(name) \
-static const struct file_operations _##name##_file_ops = { \
-	.owner   = THIS_MODULE, \
-	.open    = _##name##_open, \
-	.read    = hfi1_seq_read, \
-	.llseek  = hfi1_seq_lseek, \
-	.release = seq_release \
-}
-
-#define DEBUGFS_FILE_CREATE(name, parent, data, ops, mode)	\
-do { \
-	struct dentry *ent; \
-	ent = debugfs_create_file(name, mode, parent, \
-		data, ops); \
-	if (!ent) \
-		pr_warn("create of %s failed\n", name); \
-} while (0)
-
-#define DEBUGFS_SEQ_FILE_CREATE(name, parent, data) \
-	DEBUGFS_FILE_CREATE(#name, parent, data, &_##name##_file_ops, S_IRUGO)
 
 static void *_opcode_stats_seq_start(struct seq_file *s, loff_t *pos)
 {
@@ -213,6 +118,17 @@ static void _opcode_stats_seq_stop(struct seq_file *s, void *v)
 {
 }
 
+static int opcode_stats_show(struct seq_file *s, u8 i, u64 packets, u64 bytes)
+{
+	if (!packets && !bytes)
+		return SEQ_SKIP;
+	seq_printf(s, "%02x %llu/%llu\n", i,
+		   (unsigned long long)packets,
+		   (unsigned long long)bytes);
+
+	return 0;
+}
+
 static int _opcode_stats_seq_show(struct seq_file *s, void *v)
 {
 	loff_t *spos = v;
@@ -220,25 +136,58 @@ static int _opcode_stats_seq_show(struct seq_file *s, void *v)
 	u64 n_packets = 0, n_bytes = 0;
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_ctxtdata *rcd;
 
-	for (j = 0; j < dd->first_user_ctxt; j++) {
-		if (!dd->rcd[j])
-			continue;
-		n_packets += dd->rcd[j]->opstats->stats[i].n_packets;
-		n_bytes += dd->rcd[j]->opstats->stats[i].n_bytes;
+	for (j = 0; j < dd->first_dyn_alloc_ctxt; j++) {
+		rcd = hfi1_rcd_get_by_index(dd, j);
+		if (rcd) {
+			n_packets += rcd->opstats->stats[i].n_packets;
+			n_bytes += rcd->opstats->stats[i].n_bytes;
+		}
+		hfi1_rcd_put(rcd);
 	}
-	if (!n_packets && !n_bytes)
-		return SEQ_SKIP;
-	seq_printf(s, "%02llx %llu/%llu\n", i,
-		   (unsigned long long)n_packets,
-		   (unsigned long long)n_bytes);
-
-	return 0;
+	return opcode_stats_show(s, i, n_packets, n_bytes);
 }
 
 DEBUGFS_SEQ_FILE_OPS(opcode_stats);
 DEBUGFS_SEQ_FILE_OPEN(opcode_stats)
 DEBUGFS_FILE_OPS(opcode_stats);
+
+static void *_tx_opcode_stats_seq_start(struct seq_file *s, loff_t *pos)
+{
+	return _opcode_stats_seq_start(s, pos);
+}
+
+static void *_tx_opcode_stats_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+	return _opcode_stats_seq_next(s, v, pos);
+}
+
+static void _tx_opcode_stats_seq_stop(struct seq_file *s, void *v)
+{
+}
+
+static int _tx_opcode_stats_seq_show(struct seq_file *s, void *v)
+{
+	loff_t *spos = v;
+	loff_t i = *spos;
+	int j;
+	u64 n_packets = 0, n_bytes = 0;
+	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
+	struct hfi1_devdata *dd = dd_from_dev(ibd);
+
+	for_each_possible_cpu(j) {
+		struct hfi1_opcode_stats_perctx *s =
+			per_cpu_ptr(dd->tx_opstats, j);
+		n_packets += s->stats[i].n_packets;
+		n_bytes += s->stats[i].n_bytes;
+	}
+	return opcode_stats_show(s, i, n_packets, n_bytes);
+}
+
+DEBUGFS_SEQ_FILE_OPS(tx_opcode_stats);
+DEBUGFS_SEQ_FILE_OPEN(tx_opcode_stats)
+DEBUGFS_FILE_OPS(tx_opcode_stats);
 
 static void *_ctx_stats_seq_start(struct seq_file *s, loff_t *pos)
 {
@@ -247,7 +196,7 @@ static void *_ctx_stats_seq_start(struct seq_file *s, loff_t *pos)
 
 	if (!*pos)
 		return SEQ_START_TOKEN;
-	if (*pos >= dd->first_user_ctxt)
+	if (*pos >= dd->first_dyn_alloc_ctxt)
 		return NULL;
 	return pos;
 }
@@ -261,7 +210,7 @@ static void *_ctx_stats_seq_next(struct seq_file *s, void *v, loff_t *pos)
 		return pos;
 
 	++*pos;
-	if (*pos >= dd->first_user_ctxt)
+	if (*pos >= dd->first_dyn_alloc_ctxt)
 		return NULL;
 	return pos;
 }
@@ -278,6 +227,7 @@ static int _ctx_stats_seq_show(struct seq_file *s, void *v)
 	u64 n_packets = 0;
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_ctxtdata *rcd;
 
 	if (v == SEQ_START_TOKEN) {
 		seq_puts(s, "Ctx:npkts\n");
@@ -287,11 +237,14 @@ static int _ctx_stats_seq_show(struct seq_file *s, void *v)
 	spos = v;
 	i = *spos;
 
-	if (!dd->rcd[i])
+	rcd = hfi1_rcd_get_by_index_safe(dd, i);
+	if (!rcd)
 		return SEQ_SKIP;
 
-	for (j = 0; j < ARRAY_SIZE(dd->rcd[i]->opstats->stats); j++)
-		n_packets += dd->rcd[i]->opstats->stats[j].n_packets;
+	for (j = 0; j < ARRAY_SIZE(rcd->opstats->stats); j++)
+		n_packets += rcd->opstats->stats[j].n_packets;
+
+	hfi1_rcd_put(rcd);
 
 	if (!n_packets)
 		return SEQ_SKIP;
@@ -439,10 +392,14 @@ static int _rcds_seq_show(struct seq_file *s, void *v)
 {
 	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct hfi1_ctxtdata *rcd;
 	loff_t *spos = v;
 	loff_t i = *spos;
 
-	seqfile_dump_rcd(s, dd->rcd[i]);
+	rcd = hfi1_rcd_get_by_index_safe(dd, i);
+	if (rcd)
+		seqfile_dump_rcd(s, rcd);
+	hfi1_rcd_put(rcd);
 	return 0;
 }
 
@@ -1156,244 +1113,6 @@ DEBUGFS_SEQ_FILE_OPS(sdma_cpu_list);
 DEBUGFS_SEQ_FILE_OPEN(sdma_cpu_list)
 DEBUGFS_FILE_OPS(sdma_cpu_list);
 
-#ifdef CONFIG_FAULT_INJECTION
-#define HFI1_FAULT_DIR_TX   BIT(0)
-#define HFI1_FAULT_DIR_RX   BIT(1)
-#define HFI1_FAULT_DIR_TXRX (HFI1_FAULT_DIR_TX | HFI1_FAULT_DIR_RX)
-
-static void *_fault_stats_seq_start(struct seq_file *s, loff_t *pos)
-{
-	struct hfi1_opcode_stats_perctx *opstats;
-
-	if (*pos >= ARRAY_SIZE(opstats->stats))
-		return NULL;
-	return pos;
-}
-
-static void *_fault_stats_seq_next(struct seq_file *s, void *v, loff_t *pos)
-{
-	struct hfi1_opcode_stats_perctx *opstats;
-
-	++*pos;
-	if (*pos >= ARRAY_SIZE(opstats->stats))
-		return NULL;
-	return pos;
-}
-
-static void _fault_stats_seq_stop(struct seq_file *s, void *v)
-{
-}
-
-static int _fault_stats_seq_show(struct seq_file *s, void *v)
-{
-	loff_t *spos = v;
-	loff_t i = *spos, j;
-	u64 n_packets = 0, n_bytes = 0;
-	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
-	struct hfi1_devdata *dd = dd_from_dev(ibd);
-
-	for (j = 0; j < dd->first_user_ctxt; j++) {
-		if (!dd->rcd[j])
-			continue;
-		n_packets += dd->rcd[j]->opstats->stats[i].n_packets;
-		n_bytes += dd->rcd[j]->opstats->stats[i].n_bytes;
-	}
-	if (!n_packets && !n_bytes)
-		return SEQ_SKIP;
-	if (!ibd->fault_opcode->n_rxfaults[i] &&
-	    !ibd->fault_opcode->n_txfaults[i])
-		return SEQ_SKIP;
-	seq_printf(s, "%02llx %llu/%llu (faults rx:%llu faults: tx:%llu)\n", i,
-		   (unsigned long long)n_packets,
-		   (unsigned long long)n_bytes,
-		   (unsigned long long)ibd->fault_opcode->n_rxfaults[i],
-		   (unsigned long long)ibd->fault_opcode->n_txfaults[i]);
-	return 0;
-}
-
-DEBUGFS_SEQ_FILE_OPS(fault_stats);
-DEBUGFS_SEQ_FILE_OPEN(fault_stats);
-DEBUGFS_FILE_OPS(fault_stats);
-
-static void fault_exit_opcode_debugfs(struct hfi1_ibdev *ibd)
-{
-	debugfs_remove_recursive(ibd->fault_opcode->dir);
-	kfree(ibd->fault_opcode);
-	ibd->fault_opcode = NULL;
-}
-
-static int fault_init_opcode_debugfs(struct hfi1_ibdev *ibd)
-{
-	struct dentry *parent = ibd->hfi1_ibdev_dbg;
-
-	ibd->fault_opcode = kzalloc(sizeof(*ibd->fault_opcode), GFP_KERNEL);
-	if (!ibd->fault_opcode)
-		return -ENOMEM;
-
-	ibd->fault_opcode->attr.interval = 1;
-	ibd->fault_opcode->attr.require_end = ULONG_MAX;
-	ibd->fault_opcode->attr.stacktrace_depth = 32;
-	ibd->fault_opcode->attr.dname = NULL;
-	ibd->fault_opcode->attr.verbose = 0;
-	ibd->fault_opcode->fault_by_opcode = false;
-	ibd->fault_opcode->opcode = 0;
-	ibd->fault_opcode->mask = 0xff;
-	ibd->fault_opcode->fault_skip = 0;
-	ibd->fault_opcode->skip = 0;
-	ibd->fault_opcode->direction = HFI1_FAULT_DIR_TXRX;
-
-	ibd->fault_opcode->dir =
-		fault_create_debugfs_attr("fault_opcode",
-					  parent,
-					  &ibd->fault_opcode->attr);
-	if (IS_ERR(ibd->fault_opcode->dir)) {
-		kfree(ibd->fault_opcode);
-		return -ENOENT;
-	}
-
-	DEBUGFS_SEQ_FILE_CREATE(fault_stats, ibd->fault_opcode->dir, ibd);
-	if (!debugfs_create_bool("fault_by_opcode", 0600,
-				 ibd->fault_opcode->dir,
-				 &ibd->fault_opcode->fault_by_opcode))
-		goto fail;
-	if (!debugfs_create_x8("opcode", 0600, ibd->fault_opcode->dir,
-			       &ibd->fault_opcode->opcode))
-		goto fail;
-	if (!debugfs_create_x8("mask", 0600, ibd->fault_opcode->dir,
-			       &ibd->fault_opcode->mask))
-		goto fail;
-	if (!debugfs_create_u64("fault_skip", 0600,
-				ibd->fault_opcode->dir,
-				&ibd->fault_opcode->fault_skip))
-		goto fail;
-	if (!debugfs_create_u8("direction", 0600, ibd->fault_opcode->dir,
-			       &ibd->fault_opcode->direction))
-		goto fail;
-
-	return 0;
-fail:
-	fault_exit_opcode_debugfs(ibd);
-	return -ENOMEM;
-}
-
-static void fault_exit_packet_debugfs(struct hfi1_ibdev *ibd)
-{
-	debugfs_remove_recursive(ibd->fault_packet->dir);
-	kfree(ibd->fault_packet);
-	ibd->fault_packet = NULL;
-}
-
-static int fault_init_packet_debugfs(struct hfi1_ibdev *ibd)
-{
-	struct dentry *parent = ibd->hfi1_ibdev_dbg;
-
-	ibd->fault_packet = kzalloc(sizeof(*ibd->fault_packet), GFP_KERNEL);
-	if (!ibd->fault_packet)
-		return -ENOMEM;
-
-	ibd->fault_packet->attr.interval = 1;
-	ibd->fault_packet->attr.require_end = ULONG_MAX;
-	ibd->fault_packet->attr.stacktrace_depth = 32;
-	ibd->fault_packet->attr.dname = NULL;
-	ibd->fault_packet->attr.verbose = 0;
-	ibd->fault_packet->fault_by_packet = false;
-
-	ibd->fault_packet->dir =
-		fault_create_debugfs_attr("fault_packet",
-					  parent,
-					  &ibd->fault_opcode->attr);
-	if (IS_ERR(ibd->fault_packet->dir)) {
-		kfree(ibd->fault_packet);
-		return -ENOENT;
-	}
-
-	if (!debugfs_create_bool("fault_by_packet", 0600,
-				 ibd->fault_packet->dir,
-				 &ibd->fault_packet->fault_by_packet))
-		goto fail;
-	if (!debugfs_create_u64("fault_stats", 0400,
-				ibd->fault_packet->dir,
-				&ibd->fault_packet->n_faults))
-		goto fail;
-
-	return 0;
-fail:
-	fault_exit_packet_debugfs(ibd);
-	return -ENOMEM;
-}
-
-static void fault_exit_debugfs(struct hfi1_ibdev *ibd)
-{
-	fault_exit_opcode_debugfs(ibd);
-	fault_exit_packet_debugfs(ibd);
-}
-
-static int fault_init_debugfs(struct hfi1_ibdev *ibd)
-{
-	int ret = 0;
-
-	ret = fault_init_opcode_debugfs(ibd);
-	if (ret)
-		return ret;
-
-	ret = fault_init_packet_debugfs(ibd);
-	if (ret)
-		fault_exit_opcode_debugfs(ibd);
-
-	return ret;
-}
-
-bool hfi1_dbg_fault_suppress_err(struct hfi1_ibdev *ibd)
-{
-	return ibd->fault_suppress_err;
-}
-
-bool hfi1_dbg_fault_opcode(struct rvt_qp *qp, u32 opcode, bool rx)
-{
-	bool ret = false;
-	struct hfi1_ibdev *ibd = to_idev(qp->ibqp.device);
-
-	if (!ibd->fault_opcode || !ibd->fault_opcode->fault_by_opcode)
-		return false;
-	if ((rx && !(ibd->fault_opcode->direction & HFI1_FAULT_DIR_RX)) ||
-	    (!rx && !(ibd->fault_opcode->direction & HFI1_FAULT_DIR_TX)))
-		return false;
-	if (ibd->fault_opcode->opcode != (opcode & ibd->fault_opcode->mask))
-		return false;
-	if (ibd->fault_opcode->fault_skip && ibd->fault_opcode->skip) {
-		ibd->fault_opcode->skip--;
-		return false;
-	}
-	ret = should_fail(&ibd->fault_opcode->attr, 1);
-	if (ret) {
-		ibd->fault_opcode->skip = ibd->fault_opcode->fault_skip;
-		trace_hfi1_fault_opcode(qp, opcode);
-		if (rx)
-			ibd->fault_opcode->n_rxfaults[opcode]++;
-		else
-			ibd->fault_opcode->n_txfaults[opcode]++;
-	}
-	return ret;
-}
-
-bool hfi1_dbg_fault_packet(struct hfi1_packet *packet)
-{
-	struct rvt_dev_info *rdi = &packet->rcd->ppd->dd->verbs_dev.rdi;
-	struct hfi1_ibdev *ibd = dev_from_rdi(rdi);
-	bool ret = false;
-
-	if (!ibd->fault_packet || !ibd->fault_packet->fault_by_packet)
-		return false;
-
-	ret = should_fail(&ibd->fault_packet->attr, 1);
-	if (ret) {
-		++ibd->fault_packet->n_faults;
-		trace_hfi1_fault_packet(packet);
-	}
-	return ret;
-}
-#endif
-
 void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 {
 	char name[sizeof("port0counters") + 1];
@@ -1419,6 +1138,7 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 		return;
 	}
 	DEBUGFS_SEQ_FILE_CREATE(opcode_stats, ibd->hfi1_ibdev_dbg, ibd);
+	DEBUGFS_SEQ_FILE_CREATE(tx_opcode_stats, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(ctx_stats, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(qp_stats, ibd->hfi1_ibdev_dbg, ibd);
 	DEBUGFS_SEQ_FILE_CREATE(sdes, ibd->hfi1_ibdev_dbg, ibd);
@@ -1445,25 +1165,16 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 					    S_IRUGO : S_IRUGO | S_IWUSR);
 		}
 
-#ifdef CONFIG_FAULT_INJECTION
-	debugfs_create_bool("fault_suppress_err", 0600,
-			    ibd->hfi1_ibdev_dbg,
-			    &ibd->fault_suppress_err);
-	fault_init_debugfs(ibd);
-#endif
+	hfi1_fault_init_debugfs(ibd);
 }
 
 void hfi1_dbg_ibdev_exit(struct hfi1_ibdev *ibd)
 {
 	if (!hfi1_dbg_root)
 		goto out;
-#ifdef CONFIG_FAULT_INJECTION
-	fault_exit_debugfs(ibd);
-#endif
+	hfi1_fault_exit_debugfs(ibd);
 	debugfs_remove(ibd->hfi1_ibdev_link);
-	synchronize_srcu(&debugfs_srcu);
 	debugfs_remove_recursive(ibd->hfi1_ibdev_dbg);
-	synchronize_srcu(&debugfs_srcu);
 out:
 	ibd->hfi1_ibdev_dbg = NULL;
 }
@@ -1590,6 +1301,5 @@ void hfi1_dbg_init(void)
 void hfi1_dbg_exit(void)
 {
 	debugfs_remove_recursive(hfi1_dbg_root);
-	synchronize_srcu(&debugfs_srcu);
 	hfi1_dbg_root = NULL;
 }

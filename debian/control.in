@@ -1,5 +1,5 @@
 Source: ifs-kernel-updates
-Maintainer: Maintainer: Scibian Project <packaging@scibian.org>
+Maintainer: Scibian Project <packaging@scibian.org>
 Section: kernel
 Priority: extra
 Standards-Version: 3.9.6

@@ -420,6 +420,7 @@ struct sdma_engine {
 int sdma_init(struct hfi1_devdata *dd, u8 port);
 void sdma_start(struct hfi1_devdata *dd);
 void sdma_exit(struct hfi1_devdata *dd);
+void sdma_clean(struct hfi1_devdata *dd, size_t num_engines);
 void sdma_all_running(struct hfi1_devdata *dd);
 void sdma_all_idle(struct hfi1_devdata *dd);
 void sdma_freeze_notify(struct hfi1_devdata *dd, int go_idle);
@@ -849,6 +850,7 @@ static inline int sdma_txadd_kvaddr(
 }
 
 struct iowait_work;
+
 int sdma_send_txreq(struct sdma_engine *sde,
 		    struct iowait_work *wait,
 		    struct sdma_txreq *tx,

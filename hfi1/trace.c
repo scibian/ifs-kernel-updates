@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -148,7 +148,7 @@ static const char *parse_syndrome(u8 syndrome)
 }
 
 void hfi1_trace_parse_9b_bth(struct ib_other_headers *ohdr,
-			     u8 *ack, u8 *becn, u8 *fecn, u8 *mig,
+			     u8 *ack, bool *becn, bool *fecn, u8 *mig,
 			     u8 *se, u8 *pad, u8 *opcode, u8 *tver,
 			     u16 *pkey, u32 *psn, u32 *qpn)
 {
@@ -194,7 +194,7 @@ void hfi1_trace_parse_9b_hdr(struct ib_header *hdr, bool sc5,
 }
 
 void hfi1_trace_parse_16b_hdr(struct hfi1_16b_header *hdr,
-			      u8 *age, u8 *becn, u8 *fecn,
+			      u8 *age, bool *becn, bool *fecn,
 			      u8 *l4, u8 *rc, u8 *sc,
 			      u16 *entropy, u16 *len, u16 *pkey,
 			      u32 *dlid, u32 *slid)
@@ -217,7 +217,7 @@ void hfi1_trace_parse_16b_hdr(struct hfi1_16b_header *hdr,
 #define LRH_16B_PRN "age:%d becn:%d fecn:%d l4:%d " \
 		    "rc:%d sc:%d pkey:0x%.4x entropy:0x%.4x"
 const char *hfi1_trace_fmt_lrh(struct trace_seq *p, bool bypass,
-			       u8 age, u8 becn, u8 fecn, u8 l4,
+			       u8 age, bool becn, bool fecn, u8 l4,
 			       u8 lnh, const char *lnh_name, u8 lver,
 			       u8 rc, u8 sc, u8 sl, u16 entropy,
 			       u16 len, u16 pkey, u32 dlid, u32 slid)
@@ -245,7 +245,7 @@ const char *hfi1_trace_fmt_lrh(struct trace_seq *p, bool bypass,
 	"op:0x%.2x,%s se:%d m:%d pad:%d tver:%d " \
 	"qpn:0x%.6x a:%d psn:0x%.8x"
 const char *hfi1_trace_fmt_bth(struct trace_seq *p, bool bypass,
-			       u8 ack, u8 becn, u8 fecn, u8 mig,
+			       u8 ack, bool becn, bool fecn, u8 mig,
 			       u8 se, u8 pad, u8 opcode, const char *opname,
 			       u8 tver, u16 pkey, u32 psn, u32 qpn)
 {
@@ -318,18 +318,18 @@ const char *parse_everbs_hdrs(
 				 TID_WRITE_REQ_PRN,
 				 le32_to_cpu(eh->tid_rdma.w_req.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.w_req.kdeth1),
-				 ib_u64_get( &eh->tid_rdma.w_req.reth.vaddr),
+				 ib_u64_get(&eh->tid_rdma.w_req.reth.vaddr),
 				 be32_to_cpu(eh->tid_rdma.w_req.reth.rkey),
 				 be32_to_cpu(eh->tid_rdma.w_req.reth.length),
 				 be32_to_cpu(eh->tid_rdma.w_req.verbs_qp));
 		break;
 	case OP(TID_RDMA, WRITE_RESP):
-		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " "
 				 TID_WRITE_RSP_PRN,
 				 le32_to_cpu(eh->tid_rdma.w_rsp.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.w_rsp.kdeth1),
 				 be32_to_cpu(eh->tid_rdma.w_rsp.aeth) >> 24,
-				 parse_syndrome(
+				 parse_syndrome(/* aeth */
 					 be32_to_cpu(eh->tid_rdma.w_rsp.aeth)
 					 >> 24),
 				 (be32_to_cpu(eh->tid_rdma.w_rsp.aeth) &
@@ -353,7 +353,7 @@ const char *parse_everbs_hdrs(
 				 be32_to_cpu(eh->tid_rdma.w_data.verbs_qp));
 		break;
 	case OP(TID_RDMA, READ_REQ):
-		trace_seq_printf(p, TID_RDMA_KDETH " " RETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH " " RETH_PRN " "
 				 TID_READ_REQ_PRN,
 				 le32_to_cpu(eh->tid_rdma.r_req.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.r_req.kdeth1),
@@ -365,7 +365,7 @@ const char *parse_everbs_hdrs(
 				 be32_to_cpu(eh->tid_rdma.r_req.verbs_qp));
 		break;
 	case OP(TID_RDMA, READ_RESP):
-		trace_seq_printf(p, TID_RDMA_KDETH_DATA " " AETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH_DATA " " AETH_PRN " "
 				 TID_READ_RSP_PRN,
 				 le32_to_cpu(eh->tid_rdma.r_rsp.kdeth0),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth0, KVER),
@@ -377,7 +377,7 @@ const char *parse_everbs_hdrs(
 				 le32_to_cpu(eh->tid_rdma.r_rsp.kdeth1),
 				 KDETH_GET(eh->tid_rdma.r_rsp.kdeth1, JKEY),
 				 be32_to_cpu(eh->tid_rdma.r_rsp.aeth) >> 24,
-				 parse_syndrome(
+				 parse_syndrome(/* aeth */
 					 be32_to_cpu(eh->tid_rdma.r_rsp.aeth)
 					 >> 24),
 				 (be32_to_cpu(eh->tid_rdma.r_rsp.aeth) &
@@ -385,12 +385,12 @@ const char *parse_everbs_hdrs(
 				 be32_to_cpu(eh->tid_rdma.r_rsp.verbs_qp));
 		break;
 	case OP(TID_RDMA, ACK):
-		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " " \
+		trace_seq_printf(p, TID_RDMA_KDETH " " AETH_PRN " "
 				 TID_ACK_PRN,
 				 le32_to_cpu(eh->tid_rdma.ack.kdeth0),
 				 le32_to_cpu(eh->tid_rdma.ack.kdeth1),
 				 be32_to_cpu(eh->tid_rdma.ack.aeth) >> 24,
-				 parse_syndrome(
+				 parse_syndrome(/* aeth */
 					 be32_to_cpu(eh->tid_rdma.ack.aeth)
 					 >> 24),
 				 (be32_to_cpu(eh->tid_rdma.ack.aeth) &
@@ -492,6 +492,7 @@ u16 hfi1_trace_get_tid_idx(u32 ent)
 	return EXP_TID_GET(ent, IDX);
 }
 
+__hfi1_trace_fn(AFFINITY);
 __hfi1_trace_fn(PKT);
 __hfi1_trace_fn(PROC);
 __hfi1_trace_fn(SDMA);
@@ -508,3 +509,4 @@ __hfi1_trace_fn(MMU);
 __hfi1_trace_fn(IOCTL);
 __hfi1_trace_fn(OPFN);
 __hfi1_trace_fn(TIDRDMA);
+__hfi1_trace_fn(SEL);

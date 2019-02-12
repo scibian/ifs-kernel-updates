@@ -32,7 +32,7 @@
  */
 
 #include <linux/mm.h>
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 #include <linux/sched/signal.h>
 #else
 #include <linux/sched.h>

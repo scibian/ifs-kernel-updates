@@ -960,7 +960,8 @@ void sc_disable(struct send_context *sc)
 /* return SendEgressCtxtStatus.PacketOccupancy */
 static u64 packet_occupancy(u64 reg)
 {
-	return (reg & SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_PACKET_OCCUPANCY_SMASK)
+	return (reg &
+		SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_PACKET_OCCUPANCY_SMASK)
 		>> SEND_EGRESS_CTXT_STATUS_CTXT_EGRESS_PACKET_OCCUPANCY_SHIFT;
 }
 
@@ -1003,8 +1004,8 @@ static void sc_wait_for_packet_egress(struct send_context *sc, int pause)
 		reg = read_csr(dd, sc->hw_context * 8 +
 			       SEND_EGRESS_CTXT_STATUS);
 		/* done if any halt bits, SW or HW are set */
-		if (sc->flags & SCF_HALTED || is_sc_halted(dd, sc->hw_context) ||
-		    egress_halted(reg))
+		if (sc->flags & SCF_HALTED ||
+		    is_sc_halted(dd, sc->hw_context) || egress_halted(reg))
 			break;
 		reg = packet_occupancy(reg);
 		if (reg == 0)

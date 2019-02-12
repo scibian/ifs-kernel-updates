@@ -1,3 +1,9 @@
+Description: Port hfi1 to kernel 4.9.0
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2018-10-17>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
 +++ b/Makefile
 @@ -8,7 +8,8 @@
@@ -16,28 +22,28 @@
  #include <linux/cdev.h>
  #include <linux/vmalloc.h>
  #include <linux/io.h>
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)\
 +	&& !defined(IFS_DEB9)
  #include <linux/sched/mm.h>
  #else
  #include <linux/aio.h>
-@@ -125,7 +126,8 @@
+@@ -142,7 +143,8 @@
  static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
  static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
  		       unsigned long arg);
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
 +	&& !defined(IFS_DEB9)
  static int vma_fault(struct vm_fault *vmf);
  #else
  static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
-@@ -667,7 +669,8 @@
+@@ -685,7 +687,8 @@
   * Local (non-chip) user memory is not mapped right away but as it is
   * accessed by the user-level code.
   */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
 +	&& !defined(IFS_DEB9)
  static int vma_fault(struct vm_fault *vmf)
  #else
@@ -48,8 +54,8 @@
  	int ret = -EINVAL;
  
  	memset(&attr, 0, sizeof(attr));
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
 +	&& !defined(IFS_DEB9)
  	attr.type = ah->ibah.type;
  #endif
@@ -58,8 +64,8 @@
  	struct rdma_ah_attr attr;
  	struct ib_ah *ah = ERR_PTR(-EINVAL);
  	struct rvt_qp *qp0;
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
 +	&& !defined(IFS_DEB9)
  	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
  	struct hfi1_devdata *dd = dd_from_ppd(ppd);
@@ -78,7 +84,7 @@
  #include <linux/sched.h>
 --- a/hfi1/verbs.c
 +++ b/hfi1/verbs.c
-@@ -1850,7 +1850,8 @@
+@@ -1873,7 +1873,8 @@
  	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
  	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
  }
@@ -88,7 +94,7 @@
  static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
  {
  	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
-@@ -1860,7 +1861,7 @@
+@@ -1883,7 +1884,7 @@
  	snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u.%u", dc8051_ver_maj(ver),
  		 dc8051_ver_min(ver), dc8051_ver_patch(ver));
  }
@@ -97,8 +103,8 @@
  static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str,
  				size_t str_len)
  {
-@@ -2078,7 +2079,8 @@
- 	strlcpy(ibdev->name + lcpysz, "_%d", IB_DEVICE_NAME_MAX - lcpysz);
+@@ -2098,7 +2099,8 @@
+ 		ib_hfi1_sys_image_guid = ibdev->node_guid;
  	ibdev->owner = THIS_MODULE;
  	ibdev->phys_port_cnt = dd->num_pports;
 -#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
@@ -107,23 +113,22 @@
  	ibdev->dev.parent = &dd->pcidev->dev;
  #else
  	ibdev->dma_device = &dd->pcidev->dev;
-@@ -2088,7 +2090,8 @@
+@@ -2108,7 +2110,7 @@
  	ibdev->alloc_hw_stats = alloc_hw_stats;
  	ibdev->get_hw_stats = get_hw_stats;
  #endif
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_SLES15)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_SLES15) && !defined(IFS_DEB9)
  	ibdev->alloc_rdma_netdev = hfi1_vnic_alloc_rn;
  #endif
  	/* keep process mad in the driver */
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -50,6 +50,7 @@
+@@ -49,6 +49,7 @@
+ 
  #include "compat_common.h"
  
- #define OPA_CAP_MASK3_IsEthOnFabricSupported      BIT(13)
 +#define OPA_SM_CLASS_VERSION			0x80
  
- #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
- #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
+ #define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
+ 

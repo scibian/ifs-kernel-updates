@@ -65,6 +65,7 @@
 #include "aspm.h"
 #include "affinity.h"
 #include "debugfs.h"
+#include "fault.h"
 
 #define NUM_IB_PORTS 1
 
@@ -6370,8 +6371,9 @@ static void handle_8051_request(struct hfi1_pportdata *ppd)
 	case HREQ_LCB_RESET:
 		/* Put the LCB, RX FPE and TX FPE into reset */
 		write_csr(dd, DCC_CFG_RESET, LCB_RX_FPE_TX_FPE_INTO_RESET);
-		/* make sure the write completed */
+		/* Make sure the write completed */
 		(void)read_csr(dd, DCC_CFG_RESET);
+		/* Hold the reset long enough to take effect */
 		udelay(1);
 		/* Take the LCB, RX FPE and TX FPE out of reset */
 		write_csr(dd, DCC_CFG_RESET, LCB_RX_FPE_TX_FPE_OUT_OF_RESET);
@@ -6862,7 +6864,7 @@ static void rxe_kernel_unfreeze(struct hfi1_devdata *dd)
 		}
 		rcvmask = HFI1_RCVCTRL_CTXT_ENB;
 		/* HFI1_RCVCTRL_TAILUPD_[ENB|DIS] needs to be set explicitly */
-		rcvmask |= HFI1_CAP_KGET_MASK(rcd->flags, DMA_RTAIL) ?
+		rcvmask |= rcd->rcvhdrtail_kvaddr ?
 			HFI1_RCVCTRL_TAILUPD_ENB : HFI1_RCVCTRL_TAILUPD_DIS;
 		hfi1_rcvctrl(dd, rcvmask, rcd);
 		hfi1_rcd_put(rcd);
@@ -8416,7 +8418,7 @@ static inline int check_packet_present(struct hfi1_ctxtdata *rcd)
 	u32 tail;
 	int present;
 
-	if (!HFI1_CAP_IS_KSET(DMA_RTAIL))
+	if (!rcd->rcvhdrtail_kvaddr)
 		present = (rcd->seq_cnt ==
 				rhf_rcv_seq(rhf_to_cpu(get_rhf_addr(rcd))));
 	else /* is RDMA rtail */
@@ -9890,9 +9892,9 @@ void hfi1_quiet_serdes(struct hfi1_pportdata *ppd)
 	cancel_delayed_work_sync(&ppd->start_link_work);
 
 	ppd->offline_disabled_reason =
-			HFI1_ODR_MASK(OPA_LINKDOWN_REASON_SMA_DISABLED);
-	set_link_down_reason(ppd, OPA_LINKDOWN_REASON_SMA_DISABLED, 0,
-			     OPA_LINKDOWN_REASON_SMA_DISABLED);
+			HFI1_ODR_MASK(OPA_LINKDOWN_REASON_REBOOT);
+	set_link_down_reason(ppd, OPA_LINKDOWN_REASON_REBOOT, 0,
+			     OPA_LINKDOWN_REASON_REBOOT);
 	set_link_state(ppd, HLS_DN_OFFLINE);
 
 	/* disable the port */
@@ -10218,7 +10220,7 @@ static const char *state_completed_string(u32 completed)
 }
 
 static const char all_lanes_dead_timeout_expired[] =
-	"All lanes were inactive â was the interconnect media removed?";
+	"All lanes were inactive – was the interconnect media removed?";
 static const char tx_out_of_policy[] =
 	"Passing lanes on local port do not meet the local link width policy";
 static const char no_state_complete[] =
@@ -10578,9 +10580,9 @@ u32 driver_pstate(struct hfi1_pportdata *ppd)
 	case HLS_DN_OFFLINE:
 		return OPA_PORTPHYSSTATE_OFFLINE;
 	case HLS_VERIFY_CAP:
-		return IB_PORTPHYSSTATE_POLLING;
+		return IB_PORTPHYSSTATE_TRAINING;
 	case HLS_GOING_UP:
-		return IB_PORTPHYSSTATE_POLLING;
+		return IB_PORTPHYSSTATE_TRAINING;
 	case HLS_GOING_OFFLINE:
 		return OPA_PORTPHYSSTATE_OFFLINE;
 	case HLS_LINK_COOLDOWN:
@@ -11906,7 +11908,7 @@ void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 		/* reset the tail and hdr addresses, and sequence count */
 		write_kctxt_csr(dd, ctxt, RCV_HDR_ADDR,
 				rcd->rcvhdrq_dma);
-		if (HFI1_CAP_KGET_MASK(rcd->flags, DMA_RTAIL))
+		if (rcd->rcvhdrtail_kvaddr)
 			write_kctxt_csr(dd, ctxt, RCV_HDR_TAIL_ADDR,
 					rcd->rcvhdrqtailaddr_dma);
 		rcd->seq_cnt = 1;
@@ -11986,7 +11988,7 @@ void hfi1_rcvctrl(struct hfi1_devdata *dd, unsigned int op,
 		rcvctrl |= RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
 	if (op & HFI1_RCVCTRL_INTRAVAIL_DIS)
 		rcvctrl &= ~RCV_CTXT_CTRL_INTR_AVAIL_SMASK;
-	if (op & HFI1_RCVCTRL_TAILUPD_ENB && rcd->rcvhdrqtailaddr_dma)
+	if ((op & HFI1_RCVCTRL_TAILUPD_ENB) && rcd->rcvhdrtail_kvaddr)
 		rcvctrl |= RCV_CTXT_CTRL_TAIL_UPD_SMASK;
 	if (op & HFI1_RCVCTRL_TAILUPD_DIS) {
 		/* See comment on RcvCtxtCtrl.TailUpd above */
@@ -13493,6 +13495,7 @@ static int set_up_context_variables(struct hfi1_devdata *dd)
 	unsigned ngroups;
 	int qos_rmt_count;
 	int user_rmt_reduced;
+	u32 n_usr_ctxts;
 
 	/*
 	 * Kernel receive contexts:
@@ -13535,42 +13538,42 @@ static int set_up_context_variables(struct hfi1_devdata *dd)
 	 *	  num_user_contexts is negative
 	 */
 	if (num_user_contexts < 0)
-		num_user_contexts =
-			cpumask_weight(&node_affinity.real_cpu_mask);
-
+		n_usr_ctxts = cpumask_weight(&node_affinity.real_cpu_mask);
+	else
+		n_usr_ctxts = num_user_contexts;
 	/*
 	 * Adjust the counts given a global max.
 	 */
-	if (total_contexts + num_user_contexts > dd->chip_rcv_contexts) {
+	if (total_contexts + n_usr_ctxts > dd->chip_rcv_contexts) {
 		dd_dev_err(dd,
-			   "Reducing # user receive contexts to: %d, from %d\n",
+			   "Reducing # user receive contexts to: %d, from %u\n",
 			   (int)(dd->chip_rcv_contexts - total_contexts),
-			   (int)num_user_contexts);
+			   n_usr_ctxts);
 		/* recalculate */
-		num_user_contexts = dd->chip_rcv_contexts - total_contexts;
+		n_usr_ctxts = dd->chip_rcv_contexts - total_contexts;
 	}
 
 	/* each user context requires an entry in the RMT */
 	qos_rmt_count = qos_rmt_entries(dd, NULL, NULL);
-	if (qos_rmt_count + num_user_contexts > NUM_MAP_ENTRIES) {
+	if (qos_rmt_count + n_usr_ctxts > NUM_MAP_ENTRIES) {
 		user_rmt_reduced = NUM_MAP_ENTRIES - qos_rmt_count;
 		dd_dev_err(dd,
-			   "RMT size is reducing the number of user receive contexts from %d to %d\n",
-			   (int)num_user_contexts,
+			   "RMT size is reducing the number of user receive contexts from %u to %d\n",
+			   n_usr_ctxts,
 			   user_rmt_reduced);
 		/* recalculate */
-		num_user_contexts = user_rmt_reduced;
+		n_usr_ctxts = user_rmt_reduced;
 	}
 
-	total_contexts += num_user_contexts;
+	total_contexts += n_usr_ctxts;
 
 	/* the first N are kernel contexts, the rest are user/vnic contexts */
 	dd->num_rcv_contexts = total_contexts;
 	dd->n_krcv_queues = num_kernel_contexts;
 	dd->first_dyn_alloc_ctxt = num_kernel_contexts;
 	dd->num_vnic_contexts = num_vnic_contexts;
-	dd->num_user_contexts = num_user_contexts;
-	dd->freectxts = num_user_contexts;
+	dd->num_user_contexts = n_usr_ctxts;
+	dd->freectxts = n_usr_ctxts;
 	dd_dev_info(dd,
 		    "rcv contexts: chip %d, used %d (kernel %d, vnic %u, user %u)\n",
 		    (int)dd->chip_rcv_contexts,
@@ -14800,9 +14803,17 @@ int hfi1_set_ctxt_jkey(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd,
 	reg = SEND_CTXT_CHECK_JOB_KEY_MASK_SMASK | /* mask is always 1's */
 		((jkey & SEND_CTXT_CHECK_JOB_KEY_VALUE_MASK) <<
 		 SEND_CTXT_CHECK_JOB_KEY_VALUE_SHIFT);
-	/* JOB_KEY_ALLOW_PERMISSIVE is not allowed by default */
-	if (HFI1_CAP_KGET_MASK(rcd->flags, ALLOW_PERM_JKEY))
-		reg |= SEND_CTXT_CHECK_JOB_KEY_ALLOW_PERMISSIVE_SMASK;
+
+	/*
+	 * JOB_KEY_ALLOW_PERMISSIVE is not allowed by default and we never want
+	 * to allow it when SELinux is active. When SELinux is not in play use
+	 * the cap mask to determine what to do.
+	 */
+	if (!rcd->security) {
+		if (HFI1_CAP_KGET_MASK(rcd->flags, ALLOW_PERM_JKEY))
+			reg |= SEND_CTXT_CHECK_JOB_KEY_ALLOW_PERMISSIVE_SMASK;
+	}
+
 	write_kctxt_csr(dd, hw_ctxt, SEND_CTXT_CHECK_JOB_KEY, reg);
 	/*
 	 * Enable send-side J_KEY integrity check, unless this is A0 h/w
@@ -15068,9 +15079,8 @@ struct hfi1_devdata *hfi1_init_dd(struct pci_dev *pdev,
 
 		if (num_vls < HFI1_MIN_VLS_SUPPORTED ||
 		    num_vls > HFI1_MAX_VLS_SUPPORTED) {
-			hfi1_early_err(&pdev->dev,
-				       "Invalid num_vls %u, using %u VLs\n",
-				    num_vls, HFI1_MAX_VLS_SUPPORTED);
+			dd_dev_err(dd, "Invalid num_vls %u, using %u VLs\n",
+				   num_vls, HFI1_MAX_VLS_SUPPORTED);
 			num_vls = HFI1_MAX_VLS_SUPPORTED;
 		}
 		ppd->vls_supported = num_vls;
@@ -15109,13 +15119,6 @@ struct hfi1_devdata *hfi1_init_dd(struct pci_dev *pdev,
 	if (ret < 0)
 		goto bail_cleanup;
 
-	/* verify that reads actually work, save revision for reset check */
-	dd->revision = read_csr(dd, CCE_REVISION);
-	if (dd->revision == ~(u64)0) {
-		dd_dev_err(dd, "cannot read chip CSRs\n");
-		ret = -EINVAL;
-		goto bail_cleanup;
-	}
 	dd->majrev = (dd->revision >> CCE_REVISION_CHIP_REV_MAJOR_SHIFT)
 			& CCE_REVISION_CHIP_REV_MAJOR_MASK;
 	dd->minrev = (dd->revision >> CCE_REVISION_CHIP_REV_MINOR_SHIFT)
@@ -15311,6 +15314,10 @@ struct hfi1_devdata *hfi1_init_dd(struct pci_dev *pdev,
 	if (ret)
 		goto bail_cleanup;
 
+	ret = hfi1_comp_vectors_set_up(dd);
+	if (ret)
+		goto bail_clear_intr;
+
 	/* set up LCB access - must be after set_up_interrupts() */
 	init_lcb_access(dd);
 
@@ -15353,6 +15360,7 @@ bail_free_rcverr:
 bail_free_cntrs:
 	free_cntrs(dd);
 bail_clear_intr:
+	hfi1_comp_vectors_clean_up(dd);
 	hfi1_clean_up_interrupts(dd);
 bail_cleanup:
 	hfi1_pcie_ddcleanup(dd);

@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015-2017 Intel Corporation.
+ * Copyright(c) 2015-2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -61,6 +61,7 @@
 #include "sdma.h"
 #include "debugfs.h"
 #include "vnic.h"
+#include "fault.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -160,23 +161,6 @@ static int hfi1_caps_get(char *buffer, const struct kernel_param *kp)
 	return scnprintf(buffer, PAGE_SIZE, "0x%lx", cap_mask);
 }
 
-#if 0
-const char *get_unit_name(int unit)
-{
-	static char iname[16];
-
-	snprintf(iname, sizeof(iname), DRIVER_NAME "_%u", unit);
-	return iname;
-}
-#endif
-const char *get_card_name(struct rvt_dev_info *rdi)
-{
-	struct hfi1_ibdev *ibdev = container_of(rdi, struct hfi1_ibdev, rdi);
-	struct hfi1_devdata *dd = container_of(ibdev,
-					       struct hfi1_devdata, verbs_dev);
-	return get_unit_name(dd->unit);
-}
-
 struct pci_dev *get_pci_dev(struct rvt_dev_info *rdi)
 {
 	struct hfi1_ibdev *ibdev = container_of(rdi, struct hfi1_ibdev, rdi);
@@ -274,7 +258,12 @@ static void rcv_hdrerr(struct hfi1_ctxtdata *rcd, struct hfi1_pportdata *ppd,
 	u32 mlid_base;
 	struct hfi1_ibport *ibp = rcd_to_iport(rcd);
 	struct hfi1_devdata *dd = ppd->dd;
-	struct rvt_dev_info *rdi = &dd->verbs_dev.rdi;
+	struct hfi1_ibdev *verbs_dev = &dd->verbs_dev;
+	struct rvt_dev_info *rdi = &verbs_dev->rdi;
+
+	if ((packet->rhf & RHF_DC_ERR) &&
+	    hfi1_dbg_fault_suppress_err(verbs_dev))
+		return;
 
 	if (packet->rhf & (RHF_VCRC_ERR | RHF_ICRC_ERR))
 		return;
@@ -657,9 +646,10 @@ next:
 	}
 }
 
-static void process_rcv_qp_work(struct hfi1_ctxtdata *rcd)
+static void process_rcv_qp_work(struct hfi1_packet *packet)
 {
 	struct rvt_qp *qp, *nqp;
+	struct hfi1_ctxtdata *rcd = packet->rcd;
 
 	/*
 	 * Iterate over all QPs waiting to respond.
@@ -669,7 +659,8 @@ static void process_rcv_qp_work(struct hfi1_ctxtdata *rcd)
 		list_del_init(&qp->rspwait);
 		if (qp->r_flags & RVT_R_RSP_NAK) {
 			qp->r_flags &= ~RVT_R_RSP_NAK;
-			hfi1_send_rc_ack(rcd, qp, 0);
+			packet->qp = qp;
+			hfi1_send_rc_ack(packet, 0);
 		}
 		if (qp->r_flags & RVT_R_RSP_SEND) {
 			unsigned long flags;
@@ -690,7 +681,7 @@ static noinline int max_packet_exceeded(struct hfi1_packet *packet, int thread)
 	if (thread) {
 		if ((packet->numpkt & (MAX_PKT_RECV_THREAD - 1)) == 0)
 			/* allow defered processing */
-			process_rcv_qp_work(packet->rcd);
+			process_rcv_qp_work(packet);
 		cond_resched();
 		return RCV_PKT_OK;
 	} else {
@@ -832,7 +823,7 @@ int handle_receive_interrupt_nodma_rtail(struct hfi1_ctxtdata *rcd, int thread)
 			last = RCV_PKT_DONE;
 		process_rcv_update(last, &packet);
 	}
-	process_rcv_qp_work(rcd);
+	process_rcv_qp_work(&packet);
 	rcd->head = packet.rhqoff;
 bail:
 	finish_packet(&packet);
@@ -861,7 +852,7 @@ int handle_receive_interrupt_dma_rtail(struct hfi1_ctxtdata *rcd, int thread)
 			last = RCV_PKT_DONE;
 		process_rcv_update(last, &packet);
 	}
-	process_rcv_qp_work(rcd);
+	process_rcv_qp_work(&packet);
 	rcd->head = packet.rhqoff;
 bail:
 	finish_packet(&packet);
@@ -1091,7 +1082,7 @@ int handle_receive_interrupt(struct hfi1_ctxtdata *rcd, int thread)
 		process_rcv_update(last, &packet);
 	}
 
-	process_rcv_qp_work(rcd);
+	process_rcv_qp_work(&packet);
 	rcd->head = packet.rhqoff;
 
 bail:
@@ -1462,8 +1453,8 @@ static int hfi1_setup_9B_packet(struct hfi1_packet *packet)
 	packet->sc = hfi1_9B_get_sc5(hdr, packet->rhf);
 	packet->pad = ib_bth_get_pad(packet->ohdr);
 	packet->extra_byte = 0;
-	packet->fecn = ib_bth_get_fecn(packet->ohdr);
-	packet->becn = ib_bth_get_becn(packet->ohdr);
+	packet->pkey = ib_bth_get_pkey(packet->ohdr);
+	packet->migrated = ib_bth_is_migration(packet->ohdr);
 
 	return 0;
 drop:
@@ -1516,8 +1507,10 @@ static int hfi1_setup_bypass_packet(struct hfi1_packet *packet)
 
 	/* Query commonly used fields from packet header */
 	packet->opcode = ib_bth_get_opcode(packet->ohdr);
-	packet->hlen = hdr_len_by_opcode[packet->opcode] + 8 + grh_len;
-	packet->payload = packet->ebuf + packet->hlen - (4 * sizeof(u32));
+	/* hdr_len_by_opcode already has an IB LRH factored in */
+	packet->hlen = hdr_len_by_opcode[packet->opcode] +
+		(LRH_16B_BYTES - LRH_9B_BYTES) + grh_len;
+	packet->payload = packet->ebuf + packet->hlen - LRH_16B_BYTES;
 	packet->slid = hfi1_16B_get_slid(packet->hdr);
 	packet->dlid = hfi1_16B_get_dlid(packet->hdr);
 	if (unlikely(hfi1_is_16B_mcast(packet->dlid)))
@@ -1528,8 +1521,8 @@ static int hfi1_setup_bypass_packet(struct hfi1_packet *packet)
 	packet->sl = ibp->sc_to_sl[packet->sc];
 	packet->pad = hfi1_16B_bth_get_pad(packet->ohdr);
 	packet->extra_byte = SIZE_OF_LT;
-	packet->fecn = hfi1_16B_get_fecn(packet->hdr);
-	packet->becn = hfi1_16B_get_becn(packet->hdr);
+	packet->pkey = hfi1_16B_get_pkey(packet->hdr);
+	packet->migrated = opa_bth_is_migration(packet->ohdr);
 
 	if (hfi1_bypass_ingress_pkt_check(packet))
 		goto drop;
@@ -1575,25 +1568,13 @@ void handle_eflags(struct hfi1_packet *packet)
  */
 int process_receive_ib(struct hfi1_packet *packet)
 {
-	if (unlikely(hfi1_dbg_fault_packet(packet)))
-		return RHF_RCV_CONTINUE;
-
 	if (hfi1_setup_9B_packet(packet))
 		return RHF_RCV_CONTINUE;
 
-	trace_hfi1_rcvhdr(packet->rcd->ppd->dd,
-			  packet->rcd->ctxt,
-			  rhf_err_flags(packet->rhf),
-			  RHF_RCV_TYPE_IB,
-			  packet->hlen,
-			  packet->tlen,
-			  packet->updegr,
-			  rhf_egr_index(packet->rhf));
-
-	if (unlikely(
-		 (hfi1_dbg_fault_suppress_err(&packet->rcd->dd->verbs_dev) &&
-		 (packet->rhf & RHF_DC_ERR))))
+	if (unlikely(hfi1_dbg_should_fault_rx(packet)))
 		return RHF_RCV_CONTINUE;
+
+	trace_hfi1_rcvhdr(packet);
 
 	if (unlikely(rhf_err_flags(packet->rhf))) {
 		handle_eflags(packet);
@@ -1629,6 +1610,8 @@ int process_receive_bypass(struct hfi1_packet *packet)
 	if (hfi1_setup_bypass_packet(packet))
 		return RHF_RCV_CONTINUE;
 
+	trace_hfi1_rcvhdr(packet);
+
 	if (unlikely(rhf_err_flags(packet->rhf))) {
 		handle_eflags(packet);
 		return RHF_RCV_CONTINUE;
@@ -1662,7 +1645,8 @@ int process_receive_error(struct hfi1_packet *packet)
 	/* KHdrHCRCErr -- KDETH packet with a bad HCRC */
 	if (unlikely(
 		 hfi1_dbg_fault_suppress_err(&packet->rcd->dd->verbs_dev) &&
-		 rhf_rcv_type_err(packet->rhf) == 3))
+		 (rhf_rcv_type_err(packet->rhf) == RHF_RCV_TYPE_ERROR ||
+		  packet->rhf & RHF_DC_ERR)))
 		return RHF_RCV_CONTINUE;
 
 	hfi1_setup_ib_header(packet);
@@ -1677,10 +1661,10 @@ int process_receive_error(struct hfi1_packet *packet)
 
 int kdeth_process_expected(struct hfi1_packet *packet)
 {
-	if (unlikely(hfi1_dbg_fault_packet(packet)))
+	hfi1_setup_9B_packet(packet);
+	if (unlikely(hfi1_dbg_should_fault_rx(packet)))
 		return RHF_RCV_CONTINUE;
 
-	hfi1_setup_9B_packet(packet);
 	if (unlikely(rhf_err_flags(packet->rhf))) {
 		struct hfi1_ctxtdata *rcd = packet->rcd;
 
@@ -1694,18 +1678,11 @@ int kdeth_process_expected(struct hfi1_packet *packet)
 
 int kdeth_process_eager(struct hfi1_packet *packet)
 {
-	if (unlikely(hfi1_dbg_fault_packet(packet)))
+	hfi1_setup_9B_packet(packet);
+	if (unlikely(hfi1_dbg_should_fault_rx(packet)))
 		return RHF_RCV_CONTINUE;
 
-	hfi1_setup_9B_packet(packet);
-	trace_hfi1_rcvhdr(packet->rcd->ppd->dd,
-			  packet->rcd->ctxt,
-			  rhf_err_flags(packet->rhf),
-			  RHF_RCV_TYPE_IB,
-			  packet->hlen,
-			  packet->tlen,
-			  packet->updegr,
-			  rhf_egr_index(packet->rhf));
+	trace_hfi1_rcvhdr(packet);
 	if (unlikely(rhf_err_flags(packet->rhf))) {
 		struct hfi1_ctxtdata *rcd = packet->rcd;
 

@@ -957,7 +957,6 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 				goto bail_rq_wq;
 			}
 		}
-
 		break;
 
 	default:
@@ -1898,7 +1897,7 @@ static int rvt_post_one_wr(struct rvt_qp *qp,
 					0);
 	}
 
-		/* general part of wqe valid - allow for driver checks */
+	/* general part of wqe valid - allow for driver checks */
 	if (rdi->driver_f.setup_wqe) {
 		ret = rdi->driver_f.setup_wqe(qp, wqe);
 		if (ret < 0)
@@ -2132,8 +2131,9 @@ void rvt_add_rnr_timer(struct rvt_qp *qp, u32 aeth)
 	lockdep_assert_held(&qp->s_lock);
 	qp->s_flags |= RVT_S_WAIT_RNR;
 	to = rvt_aeth_to_usec(aeth);
+	trace_rvt_rnrnak_add(qp, to);
 	hrtimer_start(&qp->s_rnr_timer,
-		      ns_to_ktime(1000 * to), HRTIMER_MODE_REL);
+		      ns_to_ktime(1000 * to), HRTIMER_MODE_REL_PINNED);
 }
 EXPORT_SYMBOL(rvt_add_rnr_timer);
 
@@ -2161,15 +2161,12 @@ EXPORT_SYMBOL(rvt_stop_rc_timers);
  * stop an rnr timer and return if the timer
  * had been pending.
  */
-static int rvt_stop_rnr_timer(struct rvt_qp *qp)
+static void rvt_stop_rnr_timer(struct rvt_qp *qp)
 {
-	int rval = 0;
-
 	lockdep_assert_held(&qp->s_lock);
 	/* Remove QP from rnr timer */
 	if (qp->s_flags & RVT_S_WAIT_RNR)
 		qp->s_flags &= ~RVT_S_WAIT_RNR;
-	return rval;
 }
 
 /**
@@ -2222,6 +2219,7 @@ enum hrtimer_restart rvt_rc_rnr_retry(struct hrtimer *t)
 
 	spin_lock_irqsave(&qp->s_lock, flags);
 	rvt_stop_rnr_timer(qp);
+	trace_rvt_rnrnak_timeout(qp, 0);
 	rdi->driver_f.schedule_send(qp);
 	spin_unlock_irqrestore(&qp->s_lock, flags);
 	return HRTIMER_NORESTART;

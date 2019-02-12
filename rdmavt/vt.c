@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -49,6 +49,7 @@
 #include <linux/kernel.h>
 #include <linux/dma-mapping.h>
 #include "vt.h"
+#include "cq.h"
 #include "trace.h"
 
 #define RVT_UVERBS_ABI_VERSION 2
@@ -58,21 +59,18 @@ MODULE_DESCRIPTION("RDMA Verbs Transport Library");
 
 static int rvt_init(void)
 {
-	/*
-	 * rdmavt does not need to do anything special when it starts up. All it
-	 * needs to do is sit and wait until a driver attempts registration.
-	 */
-	return 0;
+	int ret = rvt_driver_cq_init();
+
+	if (ret)
+		pr_err("Error in driver CQ init.\n");
+
+	return ret;
 }
 module_init(rvt_init);
 
 static void rvt_cleanup(void)
 {
-	/*
-	 * Nothing to do at exit time either. The module won't be able to be
-	 * removed until all drivers are gone which means all the dev structs
-	 * are gone so there is really nothing to do.
-	 */
+	rvt_cq_exit();
 }
 module_exit(rvt_cleanup);
 
@@ -413,7 +411,6 @@ static noinline int check_support(struct rvt_dev_info *rdi, int verb)
 		 * required for rdmavt to function.
 		 */
 		if ((!rdi->driver_f.port_callback) ||
-		    (!rdi->driver_f.get_card_name) ||
 		    (!rdi->driver_f.get_pci_dev))
 			return -EINVAL;
 		break;
@@ -777,15 +774,14 @@ int rvt_register_device(struct rvt_dev_info *rdi)
 	}
 
 	/* Completion queues */
-	ret = rvt_driver_cq_init(rdi);
-	if (ret) {
-		pr_err("Error in driver CQ init.\n");
-		goto bail_mr;
-	}
+	spin_lock_init(&rdi->n_cqs_lock);
 
 	/* DMA Operations */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
+#elif defined(IFS_RH75)
+	rdi->ibdev.dev.device_rh->dma_ops =
+		rdi->ibdev.dev.device_rh->dma_ops ? : &dma_virt_ops;
 #else
 	rdi->ibdev.dma_ops =
 		rdi->ibdev.dma_ops ? : &rvt_default_dma_mapping_ops;
@@ -833,22 +829,20 @@ int rvt_register_device(struct rvt_dev_info *rdi)
 		(1ull << IB_USER_VERBS_CMD_DESTROY_SRQ)         |
 		(1ull << IB_USER_VERBS_CMD_POST_SRQ_RECV);
 	rdi->ibdev.node_type = RDMA_NODE_IB_CA;
-	rdi->ibdev.num_comp_vectors = 1;
+	if (!rdi->ibdev.num_comp_vectors)
+		rdi->ibdev.num_comp_vectors = 1;
 
 	/* We are now good to announce we exist */
 	ret =  ib_register_device(&rdi->ibdev, rdi->driver_f.port_callback);
 	if (ret) {
 		rvt_pr_err(rdi, "Failed to register driver with ib core.\n");
-		goto bail_cq;
+		goto bail_mr;
 	}
 
 	rvt_create_mad_agents(rdi);
 
 	rvt_pr_info(rdi, "Registration with rdmavt done.\n");
 	return ret;
-
-bail_cq:
-	rvt_cq_exit(rdi);
 
 bail_mr:
 	rvt_mr_exit(rdi);
@@ -873,7 +867,6 @@ void rvt_unregister_device(struct rvt_dev_info *rdi)
 	rvt_free_mad_agents(rdi);
 
 	ib_unregister_device(&rdi->ibdev);
-	rvt_cq_exit(rdi);
 	rvt_mr_exit(rdi);
 	rvt_qp_exit(rdi);
 }

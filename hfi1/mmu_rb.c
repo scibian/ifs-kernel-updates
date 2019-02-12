@@ -54,7 +54,11 @@
 
 struct mmu_rb_handler {
 	struct mmu_notifier mn;
+#if defined(IFS_SLES15)
+	struct rb_root root;
+#else
 	struct rb_root_cached root;
+#endif
 	void *ops_arg;
 	spinlock_t lock;        /* protect the RB tree */
 	struct mmu_rb_ops *ops;
@@ -67,12 +71,9 @@ struct mmu_rb_handler {
 
 static unsigned long mmu_node_start(struct mmu_rb_node *);
 static unsigned long mmu_node_last(struct mmu_rb_node *);
-static inline void mmu_notifier_range_start(struct mmu_notifier *,
-					    struct mm_struct *,
-					    unsigned long, unsigned long);
-static void mmu_notifier_mem_invalidate(struct mmu_notifier *,
-					struct mm_struct *,
-					unsigned long, unsigned long);
+static void mmu_notifier_range_start(struct mmu_notifier *,
+				     struct mm_struct *,
+				     unsigned long, unsigned long);
 static struct mmu_rb_node *__mmu_rb_search(struct mmu_rb_handler *,
 					   unsigned long, unsigned long);
 static void do_remove(struct mmu_rb_handler *handler,
@@ -107,8 +108,11 @@ int hfi1_mmu_rb_register(void *ops_arg, struct mm_struct *mm,
 	handlr = kmalloc(sizeof(*handlr), GFP_KERNEL);
 	if (!handlr)
 		return -ENOMEM;
-
+#if defined(IFS_SLES15)
+	handlr->root = RB_ROOT;
+#else
 	handlr->root = RB_ROOT_CACHED;
+#endif
 	handlr->ops = ops;
 	handlr->ops_arg = ops_arg;
 	INIT_HLIST_NODE(&handlr->mn.hlist);
@@ -153,9 +157,17 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	INIT_LIST_HEAD(&del_list);
 
 	spin_lock_irqsave(&handler->lock, flags);
+#if defined(IFS_SLES15)
+	while ((node = rb_first(&handler->root))) {
+#else
 	while ((node = rb_first_cached(&handler->root))) {
+#endif
 		rbnode = rb_entry(node, struct mmu_rb_node, node);
+#if defined(IFS_SLES15)
+		rb_erase(node, &handler->root);
+#else
 		rb_erase_cached(node, &handler->root);
+#endif
 		/* move from LRU list to delete list */
 		list_move(&rbnode->list, &del_list);
 	}
@@ -290,21 +302,18 @@ void hfi1_mmu_rb_remove(struct mmu_rb_handler *handler,
 	handler->ops->remove(handler->ops_arg, node);
 }
 
-static inline void mmu_notifier_range_start(struct mmu_notifier *mn,
-					    struct mm_struct *mm,
-					    unsigned long start,
-					    unsigned long end)
-{
-	mmu_notifier_mem_invalidate(mn, mm, start, end);
-}
-
-static void mmu_notifier_mem_invalidate(struct mmu_notifier *mn,
-					struct mm_struct *mm,
-					unsigned long start, unsigned long end)
+static void mmu_notifier_range_start(struct mmu_notifier *mn,
+				     struct mm_struct *mm,
+				     unsigned long start,
+				     unsigned long end)
 {
 	struct mmu_rb_handler *handler =
 		container_of(mn, struct mmu_rb_handler, mn);
+#if defined(IFS_SLES15)
+	struct rb_root *root = &handler->root;
+#else
 	struct rb_root_cached *root = &handler->root;
+#endif
 	struct mmu_rb_node *node, *ptr = NULL;
 	unsigned long flags;
 	bool added = false;

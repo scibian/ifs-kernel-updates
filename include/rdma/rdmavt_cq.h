@@ -1,10 +1,14 @@
+#ifndef DEF_RDMAVT_INCCQ_H
+#define DEF_RDMAVT_INCCQ_H
+
 /*
- * Copyright(c) 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
  *
  * GPL LICENSE SUMMARY
+ *
+ * Copyright(c) 2016 - 2018 Intel Corporation.
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of version 2 of the GNU General Public License as
@@ -16,6 +20,8 @@
  * General Public License for more details.
  *
  * BSD LICENSE
+ *
+ * Copyright(c) 2015 Intel Corporation.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -44,67 +50,51 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-#if !defined(RH75_COMPAT_H)
-#define RH75_COMPAT_H
 
-#include "compat_common.h"
+#include <linux/kthread.h>
+#include <rdma/ib_user_verbs.h>
 
-#define __GFP_RECLAIM	(__GFP_WAIT)
+/*
+ * Define an ib_cq_notify value that is not valid so we know when CQ
+ * notifications are armed.
+ */
+#define RVT_CQ_NONE      (IB_CQ_NEXT_COMP + 1)
 
-#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
+/*
+ * This structure is used to contain the head pointer, tail pointer,
+ * and completion queue entries as a single memory allocation so
+ * it can be mmap'ed into user space.
+ */
+struct rvt_cq_wc {
+	u32 head;               /* index of next entry to fill */
+	u32 tail;               /* index of next ib_poll_cq() entry */
+	union {
+		/* these are actually size ibcq.cqe + 1 */
+		struct ib_uverbs_wc uqueue[0];
+		struct ib_wc kqueue[0];
+	};
+};
 
+/*
+ * The completion queue structure.
+ */
+struct rvt_cq {
+	struct ib_cq ibcq;
+	struct work_struct comptask;
+	spinlock_t lock; /* protect changes in this struct */
+	u8 notify;
+	u8 triggered;
+	int comp_vector_cpu;
+	struct rvt_dev_info *rdi;
+	struct rvt_cq_wc *queue;
+	struct rvt_mmap_info *ip;
+};
 
-#define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
-#define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
-
-struct hfi1_msix_entry;
-struct hfi1_devdata;
-
-void pcie_flr(struct pci_dev *dev);
-
-void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
-		struct hfi1_msix_entry *hfi1_msix_entry);
-int bitmap_print_to_pagebuf(bool list, char *buf,
-			    const unsigned long *maskp, int nmaskbits);
-int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
-__acquires(&debugfs_srcu);
-
-void debugfs_use_file_finish(int srcu_idx) __releases(&debugfs_srcu);
-struct ib_umem *ib_umem_get_hfi(struct ib_ucontext *context, unsigned long addr,
-				size_t size, int access, int dmasync);
-
-static inline long compat_get_user_pages(unsigned long start,
-					 unsigned long nr_pages,
-					 unsigned int gup_flags,
-					 struct page **pages,
-					 struct vm_area_struct **vmas)
+static inline struct rvt_cq *ibcq_to_rvtcq(struct ib_cq *ibcq)
 {
-	return get_user_pages(current, current->mm, start,
-			      nr_pages, 1, 1, pages, vmas);
+	return container_of(ibcq, struct rvt_cq, ibcq);
 }
 
-#define get_user_pages(start, nr_pages, gup_flags, pages, vmas) \
-	compat_get_user_pages(start, nr_pages, gup_flags, pages, vmas)
+void rvt_cq_enter(struct rvt_cq *cq, struct ib_wc *entry, bool solicited);
 
-static inline int simple_positive(struct dentry *dentry)
-{
-	return !d_unhashed(dentry) && dentry->d_inode;
-}
-
-static inline void hfi1_enable_intx(struct pci_dev *pdev)
-{
-	/* first, turn on INTx */
-	pci_intx(pdev, 1);
-	/* then turn off MSI-X */
-	pci_disable_msix(pdev);
-}
-
-/* Helpers to hide struct msi_desc implementation details */
-#define msi_desc_to_dev(desc)           ((desc)->dev)
-#define dev_to_msi_list(dev)            (&(dev)->msi_list)
-#define first_msi_entry(dev)            \
-	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
-#define for_each_msi_entry(desc, dev)   \
-	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
-
-#endif //RH75_COMPAT
+#endif          /* DEF_RDMAVT_INCCQH */

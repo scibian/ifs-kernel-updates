@@ -345,7 +345,6 @@
 #define MAX_EAGER_BUFFER       (256 * 1024)
 #define MAX_EAGER_BUFFER_TOTAL (64 * (1 << 20)) /* max per ctxt 64MB */
 #define MAX_EXPECTED_BUFFER    (2048 * 1024)
-#define MAX_EXPECTED_PAGES     (MAX_EXPECTED_BUFFER / PAGE_SIZE)
 
 /*
  * Receive expected base and count and eager base and count increment -
@@ -572,7 +571,7 @@ enum {
 /* timeouts */
 #define LINK_RESTART_DELAY 1000		/* link restart delay, in ms */
 #define TIMEOUT_8051_START 5000         /* 8051 start timeout, in ms */
-#define DC8051_COMMAND_TIMEOUT 20000	/* DC8051 command timeout, in ms */
+#define DC8051_COMMAND_TIMEOUT 1000	/* DC8051 command timeout, in ms */
 #define FREEZE_STATUS_TIMEOUT 20	/* wait for freeze indicators, in ms */
 #define VL_STATUS_CLEAR_TIMEOUT 5000	/* per-VL status clear, in ms */
 #define CCE_STATUS_TIMEOUT 10		/* time to clear CCE Status, in ms */

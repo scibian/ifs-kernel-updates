@@ -1249,6 +1249,7 @@ static inline struct qib_ibport *to_iport(struct ib_device *ibdev, u8 port)
 #define QIB_BADINTR           0x8000 /* severe interrupt problems */
 #define QIB_DCA_ENABLED       0x10000 /* Direct Cache Access enabled */
 #define QIB_HAS_QSFP          0x20000 /* device (card instance) has QSFP */
+#define QIB_SHUTDOWN          0x40000 /* device is shutting down */
 
 /*
  * values for ppd->lflags (_ib_port_ related flags)
@@ -1447,8 +1448,6 @@ u64 qib_sps_ints(void);
  */
 dma_addr_t qib_map_page(struct pci_dev *, struct page *, unsigned long,
 			  size_t, int);
-const char *qib_get_unit_name(int unit);
-const char *qib_get_card_name(struct rvt_dev_info *rdi);
 struct pci_dev *qib_get_pci_dev(struct rvt_dev_info *rdi);
 
 /*
@@ -1507,15 +1506,15 @@ extern struct mutex qib_mutex;
 
 #define qib_dev_err(dd, fmt, ...) \
 	dev_err(&(dd)->pcidev->dev, "%s: " fmt, \
-		qib_get_unit_name((dd)->unit), ##__VA_ARGS__)
+		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), ##__VA_ARGS__)
 
 #define qib_dev_warn(dd, fmt, ...) \
 	dev_warn(&(dd)->pcidev->dev, "%s: " fmt, \
-		qib_get_unit_name((dd)->unit), ##__VA_ARGS__)
+		 rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), ##__VA_ARGS__)
 
 #define qib_dev_porterr(dd, port, fmt, ...) \
 	dev_err(&(dd)->pcidev->dev, "%s: IB%u:%u " fmt, \
-		qib_get_unit_name((dd)->unit), (dd)->unit, (port), \
+		rvt_get_ibdev_name(&(dd)->verbs_dev.rdi), (dd)->unit, (port), \
 		##__VA_ARGS__)
 
 #define qib_devinfo(pcidev, fmt, ...) \

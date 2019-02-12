@@ -78,23 +78,72 @@
 ((__entry->__data_loc_##field >> 16) & 0xffff)
 
 #define  IB_PORT_OPA_MASK_CHG			  BIT(4)
+
+#if !defined(IFS_SLES15)
 #define  current_time(inode)			  CURRENT_TIME
+#endif
 
 /* Address format                       0x000FF000 */
+#if !defined RDMA_CORE_CAP_AF_IB
 #define RDMA_CORE_CAP_AF_IB             0x00001000
+#endif
+#if !defined RDMA_CORE_CAP_ETH_AH
 #define RDMA_CORE_CAP_ETH_AH            0x00002000
+#endif
+#if !defined RDMA_CORE_CAP_OPA_AH
 #define RDMA_CORE_CAP_OPA_AH            0x00000000
+#endif
 
+#if !defined(kthread_init_work)
 #define kthread_init_work(work, fn) init_kthread_work(work, fn)
+#endif
 
+#if !defined(RB_ROOT_CACHED)
 #define rb_root_cached			rb_root
 #define RB_ROOT_CACHED			RB_ROOT
 #define rb_erase_cached(node, root)	rb_erase(node, root)
 #define rb_first_cached(root)		rb_first(root)
+#endif
 
 extern struct srcu_struct debugfs_srcu;
 extern struct ib_dma_mapping_ops rvt_default_dma_mapping_ops;
 
+const char *get_unit_name(int unit);
+void cdev_set_parent(struct cdev *p, struct kobject *kobj);
+int pci_request_irq(struct pci_dev *dev, unsigned int nr,
+		    irq_handler_t handler, irq_handler_t thread_fn,
+		    void *dev_id, const char *fmt, ...);
+void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id);
+
+#define NEED_MM_HELPER_FUNCTIONS (!defined(IFS_SLES15))
+
+#if NEED_MM_HELPER_FUNCTIONS
+/**
+ * mmgrab() - Pin a &struct mm_struct.
+ * @mm: The &struct mm_struct to pin.
+ *
+ * Make sure that @mm will not get freed even after the owning task
+ * exits. This doesn't guarantee that the associated address space
+ * will still exist later on and mmget_not_zero() has to be used before
+ * accessing it.
+ *
+ * This is a preferred way to to pin @mm for a longer/unbounded amount
+ * of time.
+ *
+ * Use mmdrop() to release the reference acquired by mmgrab().
+ *
+ * See also <Documentation/vm/active_mm.txt> for an in-depth explanation
+ * of &mm_struct.mm_count vs &mm_struct.mm_users.
+ */
+static inline void mmgrab(struct mm_struct *mm)
+{
+	atomic_inc(&mm->mm_count);
+}
+#endif
+
+#define NEED_IB_HELPER_FUNCTIONS (!defined(IFS_RH75) && !defined(IFS_SLES15))
+
+#if NEED_IB_HELPER_FUNCTIONS
 struct opa_class_port_info {
 	u8 base_version;
 	u8 class_version;
@@ -164,35 +213,6 @@ struct opa_ah_attr {
 };
 
 #define rdma_ah_attr ib_ah_attr
-
-const char *get_unit_name(int unit);
-void cdev_set_parent(struct cdev *p, struct kobject *kobj);
-int pci_request_irq(struct pci_dev *dev, unsigned int nr,
-		    irq_handler_t handler, irq_handler_t thread_fn,
-		    void *dev_id, const char *fmt, ...);
-void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id);
-
-/**
- * mmgrab() - Pin a &struct mm_struct.
- * @mm: The &struct mm_struct to pin.
- *
- * Make sure that @mm will not get freed even after the owning task
- * exits. This doesn't guarantee that the associated address space
- * will still exist later on and mmget_not_zero() has to be used before
- * accessing it.
- *
- * This is a preferred way to to pin @mm for a longer/unbounded amount
- * of time.
- *
- * Use mmdrop() to release the reference acquired by mmgrab().
- *
- * See also <Documentation/vm/active_mm.txt> for an in-depth explanation
- * of &mm_struct.mm_count vs &mm_struct.mm_users.
- */
-static inline void mmgrab(struct mm_struct *mm)
-{
-	atomic_inc(&mm->mm_count);
-}
 
 static inline void rdma_ah_set_sl(struct rdma_ah_attr *attr, u8 sl)
 {
@@ -383,6 +403,10 @@ static inline enum rdma_ah_attr_type rdma_ah_find_type(struct ib_device *dev,
 	return RDMA_AH_ATTR_TYPE_IB;
 }
 
+#endif /* NEED_IB_HELPER_FUNCTIONS */
+#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15))
+
+#if NEED_KTHREAD_HELPER_FUNCTIONS
 static inline bool kthread_queue_work(struct kthread_worker *worker,
 				      struct kthread_work *work)
 {
@@ -439,5 +463,15 @@ static inline void kthread_destroy_worker(struct kthread_worker *worker)
 	kthread_stop(worker->task);
 	kfree(worker);
 }
+#endif
 
+/*
+ *  For SELinux until our patches are accepted by the distro
+ */
+
+#if defined(IFS_RH75) || defined(IFS_SLES15)
+int ib_get_cached_subnet_prefix(struct ib_device *device,
+				u8                port_num,
+				u64              *sn_pfx);
+#endif
 #endif

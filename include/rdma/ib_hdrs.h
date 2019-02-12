@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016, 2017 Intel Corporation.
+ * Copyright(c) 2016 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -330,16 +330,14 @@ static inline u32 ib_bth_get_qpn(struct ib_other_headers *ohdr)
 	return (u32)((be32_to_cpu(ohdr->bth[1])) & IB_QPN_MASK);
 }
 
-static inline u8 ib_bth_get_becn(struct ib_other_headers *ohdr)
+static inline bool ib_bth_get_becn(struct ib_other_headers *ohdr)
 {
-	return (u8)((be32_to_cpu(ohdr->bth[1]) >> IB_BECN_SHIFT) &
-		     IB_BECN_MASK);
+	return !!((ohdr->bth[1]) & cpu_to_be32(IB_BECN_SMASK));
 }
 
-static inline u8 ib_bth_get_fecn(struct ib_other_headers *ohdr)
+static inline bool ib_bth_get_fecn(struct ib_other_headers *ohdr)
 {
-	return (u8)((be32_to_cpu(ohdr->bth[1]) >> IB_FECN_SHIFT) &
-		    IB_FECN_MASK);
+	return !!((ohdr->bth[1]) & cpu_to_be32(IB_FECN_SMASK));
 }
 
 static inline u8 ib_bth_get_tver(struct ib_other_headers *ohdr)
@@ -348,4 +346,13 @@ static inline u8 ib_bth_get_tver(struct ib_other_headers *ohdr)
 		    IB_BTH_TVER_MASK);
 }
 
+static inline bool ib_bth_is_solicited(struct ib_other_headers *ohdr)
+{
+	return !!(ohdr->bth[0] & cpu_to_be32(IB_BTH_SOLICITED));
+}
+
+static inline bool ib_bth_is_migration(struct ib_other_headers *ohdr)
+{
+	return !!(ohdr->bth[0] & cpu_to_be32(IB_BTH_MIG_REQ));
+}
 #endif                          /* IB_HDRS_H */

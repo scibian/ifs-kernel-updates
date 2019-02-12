@@ -76,19 +76,16 @@ inline void iowait_clear_flag(struct iowait *wait, u32 flag)
  * structure embedded in the QP or PQ.
  *
  */
-void iowait_init(
-	struct iowait *wait,
-	u32 tx_limit,
-	void (*func)(struct work_struct *work),
-	void (*tidfunc)(struct work_struct *work),
-	int (*sleep)(
-		struct sdma_engine *sde,
-		struct iowait_work *wait,
-		struct sdma_txreq *tx,
-		uint seq,
-		bool pkts_sent),
-	void (*wakeup)(struct iowait *wait, int reason),
-	void (*sdma_drained)(struct iowait *wait))
+void iowait_init(struct iowait *wait, u32 tx_limit,
+		 void (*func)(struct work_struct *work),
+		 void (*tidfunc)(struct work_struct *work),
+		 int (*sleep)(struct sdma_engine *sde,
+			      struct iowait_work *wait,
+			      struct sdma_txreq *tx,
+			      uint seq,
+			      bool pkts_sent),
+		 void (*wakeup)(struct iowait *wait, int reason),
+		 void (*sdma_drained)(struct iowait *wait))
 {
 	int i;
 

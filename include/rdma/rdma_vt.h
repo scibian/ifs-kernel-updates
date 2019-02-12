@@ -2,7 +2,7 @@
 #define DEF_RDMA_VT_H
 
 /*
- * Copyright(c) 2016,2017 Intel Corporation.
+ * Copyright(c) 2016 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -168,7 +168,6 @@ struct rvt_driver_params {
 	int qpn_res_end;
 	int nports;
 	int npkeys;
-	char cq_name[RVT_CQN_MAX];
 	int node;
 	int psn_mask;
 	int psn_shift;
@@ -198,9 +197,9 @@ struct rvt_ah {
 
 
 #define HAVE_IB_QP_CREATE_USE_GFP_NOIO \
-	(LINUX_VERSION_CODE <= KERNEL_VERSION(4,13,0) || \
-	defined(IFS_RH73) || \
+	(defined(IFS_RH73) || \
 	defined(IFS_RH74) || \
+	defined(IFS_RH75) || \
 	defined(IFS_SLES12SP2) || \
 	defined(IFS_SLES12SP3))
 
@@ -248,13 +247,6 @@ struct rvt_driver_provided {
 
 	/* Passed to ib core registration. Callback to create syfs files */
 	int (*port_callback)(struct ib_device *, u8, struct kobject *);
-
-	/*
-	 * Returns a string to represent the device for which is being
-	 * registered. This is primarily used for error and debug messages on
-	 * the console.
-	 */
-	const char * (*get_card_name)(struct rvt_dev_info *rdi);
 
 	/*
 	 * Returns a pointer to the undelying hardware's PCI device. This is
@@ -391,6 +383,9 @@ struct rvt_driver_provided {
 
 	/* Notify driver to restart rc */
 	void (*notify_restart_rc)(struct rvt_qp *qp, u32 psn, int wait);
+
+	/* Get and return CPU to pin CQ processing thread */
+	int (*comp_vect_cpu_lookup)(struct rvt_dev_info *rdi, int comp_vect);
 };
 
 struct rvt_dev_info {
@@ -446,7 +441,6 @@ struct rvt_dev_info {
 	spinlock_t pending_lock; /* protect pending mmap list */
 
 	/* CQ */
-	struct kthread_worker *worker; /* per device cq worker */
 	u32 n_cqs_allocated;    /* number of CQs allocated for device */
 	spinlock_t n_cqs_lock; /* protect count of in use cqs */
 
@@ -455,6 +449,30 @@ struct rvt_dev_info {
 	spinlock_t n_mcast_grps_lock;
 
 };
+
+/**
+ * rvt_set_ibdev_name - Craft an IB device name from client info
+ * @rdi: pointer to the client rvt_dev_info structure
+ * @name: client specific name
+ * @unit: client specific unit number.
+ */
+static inline void rvt_set_ibdev_name(struct rvt_dev_info *rdi,
+				      const char *fmt, const char *name,
+				      const int unit)
+{
+	snprintf(rdi->ibdev.name, sizeof(rdi->ibdev.name), fmt, name, unit);
+}
+
+/**
+ * rvt_get_ibdev_name - return the IB name
+ * @rdi: rdmavt device
+ *
+ * Return the registered name of the device.
+ */
+static inline const char *rvt_get_ibdev_name(const struct rvt_dev_info *rdi)
+{
+	return rdi->ibdev.name;
+}
 
 static inline struct rvt_pd *ibpd_to_rvtpd(struct ib_pd *ibpd)
 {

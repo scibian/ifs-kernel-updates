@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -108,6 +108,11 @@ enum {
 	HFI1_HAS_GRH = (1 << 0),
 };
 
+#define LRH_16B_BYTES (FIELD_SIZEOF(struct hfi1_16b_header, lrh))
+#define LRH_16B_DWORDS (LRH_16B_BYTES / sizeof(u32))
+#define LRH_9B_BYTES (FIELD_SIZEOF(struct ib_header, lrh))
+#define LRH_9B_DWORDS (LRH_9B_BYTES / sizeof(u32))
+
 struct hfi1_16b_header {
 	u32 lrh[4];
 	union {
@@ -148,19 +153,21 @@ struct hfi1_qp_priv {
 	struct sdma_engine *s_sde;                /* current sde */
 	struct send_context *s_sendcontext;       /* current sendcontext */
 	struct hfi1_ctxtdata *rcd;                /* QP's receive context */
+	struct page **pages;                      /* for TID page scan */
 	u32 tid_enqueue;	                  /* saved when tid waited */
 	u8 s_sc;		                  /* SC[0..4] for next packet */
 	struct iowait s_iowait;
-	struct timer_list s_tid_timer;		  /* for timing tid wait */
-	struct timer_list s_tid_retry_timer;	  /* for timing tid ack */
+	struct timer_list s_tid_timer;            /* for timing tid wait */
+	struct timer_list s_tid_retry_timer;      /* for timing tid ack */
 	struct list_head tid_wait;                /* for queueing tid space */
 	struct hfi1_opfn_data opfn;
 	struct tid_flow_state flow_state;
 	struct tid_rdma_qp_params tid_rdma;
 	struct rvt_qp *owner;
 	u8 hdr_type; /* 9B or 16B */
-	struct rvt_sge_state tid_ss;       /* SGE state pointer for second leg */
-	atomic_t n_requests;                /* # of TID RDMA requests in the queue */
+	struct rvt_sge_state tid_ss;       /* SGE state pointer for 2nd leg */
+	atomic_t n_requests;               /* # of TID RDMA requests in the */
+					   /* queue */
 	atomic_t n_tid_requests;            /* # of sent TID RDMA requests */
 	unsigned long tid_timer_timeout_jiffies;
 	unsigned long tid_retry_timeout_jiffies;
@@ -179,24 +186,22 @@ struct hfi1_qp_priv {
 	u32 r_tid_alloc;    /* Request for which we are allocating resources */
 	u32 pending_tid_w_segs; /* Num of pending tid write segments */
 	u32 pending_tid_w_resp; /* Num of pending tid write responses */
+	u32 alloc_w_segs;       /* Number of segments for which write */
+				/* resources have been allocated for this QP */
 	/* For TID RDMA READ */
 	u32 tid_r_reqs;         /* Num of tid reads requested */
 	u32 tid_r_comp;         /* Num of tid reads completed */
 	u32 pending_tid_r_segs; /* Num of pending tid read segments */
-	u32 alloc_w_segs;	/* Number of segments for which write */
-				/* resources have been allocated for this QP */
 	u16 pkts_ps;            /* packets per segment */
-	bool sync_pt;		/* Set when QP reaches sync point */
-	u8 rnr_nak_state;	/* RNR NAK state */
 	u8 timeout_shift;       /* account for number of packets per segment */
+	u8 rnr_nak_state;       /* RNR NAK state */
 	u32 r_next_psn_ib;
 	u32 r_next_psn_kdeth;
+	bool sync_pt;           /* Set when QP reaches sync point */
+	u32 r_next_psn_kdeth_save;
+	u32 s_resync_psn;
 	bool resync;
 };
-
-/* Flags used by hfi1_swqe_priv->flags */
-#define HFI1_USE_TID_RDMA     BIT(0)  /* Request is suitable for TID RDMA */
-#define HFI1_TID_RDMA_IN_USE  BIT(1)  /* Protocol has switched to TID RDMA */
 
 #define HFI1_QP_WQE_INVALID   ((u32)-1)
 
@@ -222,7 +227,7 @@ struct hfi1_pkt_state {
 	struct hfi1_ibport *ibp;
 	struct hfi1_pportdata *ppd;
 	struct verbs_txreq *s_txreq;
-	struct iowait_work  *wait;
+	struct iowait_work *wait;
 	unsigned long flags;
 	unsigned long timeout;
 	unsigned long timeout_int;
@@ -287,9 +292,7 @@ struct hfi1_ibdev {
 	/* per HFI symlinks to above */
 	struct dentry *hfi1_ibdev_link;
 #ifdef CONFIG_FAULT_INJECTION
-	struct fault_opcode *fault_opcode;
-	struct fault_packet *fault_packet;
-	bool fault_suppress_err;
+	struct fault *fault;
 #endif
 #endif
 };
@@ -363,8 +366,6 @@ static inline u32 delta_psn(u32 a, u32 b)
 	return (((int)a - (int)b) << PSN_SHIFT) >> PSN_SHIFT;
 }
 
-#define KDETH_INVALID_PSN  0x80000000
-
 static inline struct tid_rdma_request *wqe_to_tid_req(struct rvt_swqe *wqe)
 {
 	return &((struct hfi1_swqe_priv *)wqe->priv)->tid_req;
@@ -378,8 +379,6 @@ static inline struct tid_rdma_request *ack_to_tid_req(struct rvt_ack_entry *e)
 /*
  * Look through all the active flows for a TID RDMA request and find
  * the one (if it exists) that contains the specified PSN.
- * The function works for both IB PSNs and KDETH PSNs, depending on
- * the value of the ib argument.
  */
 static inline u32 __full_flow_psn(struct flow_state *state, u32 psn)
 {
@@ -390,55 +389,6 @@ static inline u32 __full_flow_psn(struct flow_state *state, u32 psn)
 static inline u32 full_flow_psn(struct tid_rdma_flow *flow, u32 psn)
 {
 	return __full_flow_psn(&flow->flow_state, psn);
-}
-
-static inline struct tid_rdma_flow *
-__find_flow_ranged(struct tid_rdma_request *req, u16 head, u16 tail,
-		   u32 psn, u16 *fidx)
-{
-	for ( ; CIRC_CNT(head, tail, req->n_max_flows);
-	      tail = CIRC_NEXT(tail, req->n_max_flows)) {
-		struct tid_rdma_flow *flow = &req->flows[tail];
-		u32 spsn, lpsn;
-
-		spsn = full_flow_psn(flow, flow->flow_state.spsn);
-		lpsn = full_flow_psn(flow, flow->flow_state.lpsn);
-
-		if (cmp_psn(psn, spsn) >= 0 && cmp_psn(psn, lpsn) <= 0) {
-			if (fidx)
-				*fidx = tail;
-			return flow;
-		}
-	}
-	return NULL;
-}
-
-static inline struct tid_rdma_flow *find_flow(struct tid_rdma_request *req,
-					      u32 psn, u16 *fidx)
-{
-	return __find_flow_ranged(req, ACCESS_ONCE(req->setup_head),
-				  ACCESS_ONCE(req->clear_tail), psn, fidx);
-}
-
-static inline struct tid_rdma_flow *find_flow_ib(struct tid_rdma_request *req,
-						 u32 psn, u16 *fidx)
-{
-	u16 head, tail;
-	struct tid_rdma_flow *flow;
-
-	head = READ_ONCE(req->setup_head);
-	tail = READ_ONCE(req->clear_tail);
-	for ( ; CIRC_CNT(head, tail, req->n_max_flows);
-	     tail = CIRC_NEXT(tail, req->n_max_flows)) {
-		flow = &req->flows[tail];
-		if (cmp_psn(psn, flow->flow_state.ib_spsn) >= 0 &&
-		    cmp_psn(psn, flow->flow_state.ib_lpsn) <= 0) {
-			if (fidx)
-				*fidx = tail;
-			return flow;
-		}
-	}
-	return NULL;
 }
 
 struct verbs_txreq;
@@ -502,17 +452,12 @@ void hfi1_do_send_from_rvt(struct rvt_qp *qp);
 
 void hfi1_do_send(struct rvt_qp *qp, bool in_thread);
 
-void hfi1_do_send_from_rvt(struct rvt_qp *qp);
-
 void hfi1_send_complete(struct rvt_qp *qp, struct rvt_swqe *wqe,
 			enum ib_wc_status status);
 
-void hfi1_send_rc_ack(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp,
-		      bool is_fecn);
+void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn);
 
 int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
-
-int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
 
 int hfi1_make_uc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
 
@@ -543,6 +488,8 @@ void hfi1_wss_exit(void);
 
 void hfi1_wait_kmem(struct rvt_qp *qp);
 
+int hfi1_get_verbs_subnet_prefix(struct hfi1_devdata *dd, int port, u64 *subn);
+
 /* platform specific: return the lowest level cache (llc) size, in KiB */
 static inline int wss_llc_size(void)
 {
@@ -562,6 +509,11 @@ static inline void cacheless_memcpy(void *dst, void *src, size_t n)
 	__copy_user_nocache(dst, (void __user *)src, n, 0);
 }
 
+static inline bool opa_bth_is_migration(struct ib_other_headers *ohdr)
+{
+	return !!(ohdr->bth[1] & cpu_to_be32(OPA_BTH_MIG_REQ));
+}
+
 extern const enum ib_wc_opcode ib_hfi1_wc_opcode[];
 
 extern const u8 hdr_len_by_opcode[];
@@ -569,8 +521,6 @@ extern const u8 hdr_len_by_opcode[];
 extern const int ib_rvt_state_ops[];
 
 extern __be64 ib_hfi1_sys_image_guid;    /* in network order */
-
-extern unsigned int hfi1_lkey_table_size;
 
 extern unsigned int hfi1_max_cqes;
 

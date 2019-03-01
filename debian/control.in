@@ -27,8 +27,17 @@ Depends: linux-image-@KERNEL_VER@,
 Conflicts: compat-rdma,
 Replaces: compat-rdma,
 Description: Extra kernel modules for IFS
- Updated kernel modules for OPA IFS, compiled for kernel
+ Updated binary kernel modules for OPA IFS, compiled for kernel
  @KERNEL_VER@. This includes the hfi1 driver for
  Omni-Path hardware, patched ib_ipoib for performance and stability
  improvements, ib_mad with OPA MAD enhancements and core IB modules
  recompiled against the OPA MAD headers.
+
+Package: kmod-ifs-kernel-updates
+Architecture: amd64
+Depends: ${misc:Depends}, kmod-ifs-kernel-updates-@KERNEL_VER@
+Description: Updated kernel modules for Omni-Path
+ This is a metapackage that will depend on the latest version of the
+ kernel modules for Omni-Path.
+ Install this package to automatically install the latest OPA module
+ when new versions of the kernel are released.

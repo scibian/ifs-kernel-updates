@@ -47,6 +47,7 @@
 #define CREATE_TRACE_POINTS
 #include "trace.h"
 #include "user_sdma.h"
+#include "compat_common.h"
 
 static u8 __get_ib_hdr_len(struct ib_header *hdr)
 {
@@ -64,13 +65,20 @@ static u8 __get_ib_hdr_len(struct ib_header *hdr)
 
 static u8 __get_16b_hdr_len(struct hfi1_16b_header *hdr)
 {
-	struct ib_other_headers *ohdr;
+	struct ib_other_headers *ohdr = NULL;
 	u8 opcode;
+	u8 l4 = hfi1_16B_get_l4(hdr);
 
-	if (hfi1_16B_get_l4(hdr) == OPA_16B_L4_IB_LOCAL)
+	if (l4 == OPA_16B_L4_FM) {
+		opcode = IB_OPCODE_UD_SEND_ONLY;
+		return (8 + 8); /* No BTH */
+	}
+
+	if (l4 == OPA_16B_L4_IB_LOCAL)
 		ohdr = &hdr->u.oth;
 	else
 		ohdr = &hdr->u.l.oth;
+
 	opcode = ib_bth_get_opcode(ohdr);
 	return hdr_len_by_opcode[opcode] == 0 ?
 	       0 : hdr_len_by_opcode[opcode] - (12 + 8 + 8);
@@ -119,6 +127,7 @@ const char *hfi1_trace_get_packet_l2_str(u8 l2)
 #define RETH_PRN "reth vaddr:0x%.16llx rkey:0x%.8x dlen:0x%.8x"
 #define AETH_PRN "aeth syn:0x%.2x %s msn:0x%.8x"
 #define DETH_PRN "deth qkey:0x%.8x sqpn:0x%.6x"
+#define DETH_ENTROPY_PRN "deth qkey:0x%.8x sqpn:0x%.6x entropy:0x%.2x"
 #define IETH_PRN "ieth rkey:0x%.8x"
 #define ATOMICACKETH_PRN "origdata:%llx"
 #define ATOMICETH_PRN "vaddr:0x%llx rkey:0x%.8x sdata:%llx cdata:%llx"
@@ -244,17 +253,24 @@ const char *hfi1_trace_fmt_lrh(struct trace_seq *p, bool bypass,
 #define BTH_16B_PRN \
 	"op:0x%.2x,%s se:%d m:%d pad:%d tver:%d " \
 	"qpn:0x%.6x a:%d psn:0x%.8x"
-const char *hfi1_trace_fmt_bth(struct trace_seq *p, bool bypass,
-			       u8 ack, bool becn, bool fecn, u8 mig,
-			       u8 se, u8 pad, u8 opcode, const char *opname,
-			       u8 tver, u16 pkey, u32 psn, u32 qpn)
+#define L4_FM_16B_PRN \
+	"op:0x%.2x,%s dest_qpn:0x%.6x src_qpn:0x%.6x"
+const char *hfi1_trace_fmt_rest(struct trace_seq *p, bool bypass, u8 l4,
+				u8 ack, bool becn, bool fecn, u8 mig,
+				u8 se, u8 pad, u8 opcode, const char *opname,
+				u8 tver, u16 pkey, u32 psn, u32 qpn,
+				u32 dest_qpn, u32 src_qpn)
 {
 	const char *ret = trace_seq_buffer_ptr(p);
 
 	if (bypass)
-		trace_seq_printf(p, BTH_16B_PRN,
-				 opcode, opname,
-				 se, mig, pad, tver, qpn, ack, psn);
+		if (l4 == OPA_16B_L4_FM)
+			trace_seq_printf(p, L4_FM_16B_PRN,
+					 opcode, opname, dest_qpn, src_qpn);
+		else
+			trace_seq_printf(p, BTH_16B_PRN,
+					 opcode, opname,
+					 se, mig, pad, tver, qpn, ack, psn);
 
 	else
 		trace_seq_printf(p, BTH_9B_PRN,
@@ -268,11 +284,16 @@ const char *hfi1_trace_fmt_bth(struct trace_seq *p, bool bypass,
 
 const char *parse_everbs_hdrs(
 	struct trace_seq *p,
-	u8 opcode,
+	u8 opcode, u8 l4, u32 dest_qpn, u32 src_qpn,
 	void *ehdrs)
 {
 	union ib_ehdrs *eh = ehdrs;
 	const char *ret = trace_seq_buffer_ptr(p);
+
+	if (l4 == OPA_16B_L4_FM) {
+		trace_seq_printf(p, "mgmt pkt");
+		goto out;
+	}
 
 	switch (opcode) {
 	/* imm */
@@ -425,6 +446,12 @@ const char *parse_everbs_hdrs(
 		break;
 	/* deth */
 	case OP(UD, SEND_ONLY):
+		trace_seq_printf(p, DETH_ENTROPY_PRN,
+				 be32_to_cpu(eh->ud.deth[0]),
+				 be32_to_cpu(eh->ud.deth[1]) & RVT_QPN_MASK,
+				 be32_to_cpu(eh->ud.deth[1]) >>
+					     RVT_AIP_ENTROPY_SHIFT);
+		break;
 	case OP(UD, SEND_ONLY_WITH_IMMEDIATE):
 		trace_seq_printf(p, DETH_PRN,
 				 be32_to_cpu(eh->ud.deth[0]),
@@ -437,6 +464,7 @@ const char *parse_everbs_hdrs(
 				 be32_to_cpu(eh->ieth));
 		break;
 	}
+out:
 	trace_seq_putc(p, 0);
 	return ret;
 }
@@ -491,6 +519,47 @@ u16 hfi1_trace_get_tid_idx(u32 ent)
 {
 	return EXP_TID_GET(ent, IDX);
 }
+
+struct hfi1_ctxt_hist {
+	atomic_t count;
+	atomic_t data[255];
+};
+
+struct hfi1_ctxt_hist hist = {
+	.count = ATOMIC_INIT(0)
+};
+
+#ifdef AIP
+const char *hfi1_trace_print_rsm_hist(struct trace_seq *p, unsigned int ctxt)
+{
+	int i, len = ARRAY_SIZE(hist.data);
+	const char *ret = trace_seq_buffer_ptr(p);
+#ifdef atomic_fetch_inc
+	unsigned long packet_count = atomic_fetch_inc(&hist.count);
+#else
+	unsigned long packet_count = atomic_inc_return(&hist.count) - 1;
+#endif
+	trace_seq_printf(p, "packet[%lu]", packet_count);
+	for (i = 0; i < len; ++i) {
+		unsigned long val;
+		atomic_t *count = &hist.data[i];
+
+		if (ctxt == i)
+#ifdef atomic_fetch_inc
+			val = atomic_fetch_inc(count);
+#else
+			val = atomic_inc_return(count) - 1;
+#endif
+		else
+			val = atomic_read(count);
+
+		if (val)
+			trace_seq_printf(p, "(%d:%lu)", i, val);
+	}
+	trace_seq_putc(p, 0);
+	return ret;
+}
+#endif
 
 __hfi1_trace_fn(AFFINITY);
 __hfi1_trace_fn(PKT);

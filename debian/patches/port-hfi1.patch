@@ -3,12 +3,12 @@ Description: Port hfi1 module
  3.16.0.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2018-10-02>
+Last-Update: <2019-04-24>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/hfi1/verbs.h
 +++ b/hfi1/verbs.h
-@@ -322,10 +322,8 @@
+@@ -329,10 +329,8 @@
  void hfi1_sys_guid_chg(struct hfi1_ibport *ibp);
  void hfi1_node_desc_chg(struct hfi1_ibport *ibp);
  int hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
@@ -34,7 +34,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #include "sdma.h"
 --- a/hfi1/hfi.h
 +++ b/hfi1/hfi.h
-@@ -1893,6 +1893,9 @@
+@@ -2061,6 +2061,9 @@
  	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
  
  	WARN_ON(index >= HFI1_GUIDS_PER_PORT);
@@ -44,7 +44,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	return cpu_to_be64(ppd->guids[index]);
  }
  
-@@ -2393,7 +2396,9 @@
+@@ -2585,7 +2588,9 @@
  
  static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
  {
@@ -66,18 +66,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (ret)
  		goto err;
  	trace_hfi1_opfn_state_conn_request(qp);
---- a/Makefile
-+++ b/Makefile
-@@ -18,7 +18,8 @@
- 	rdma_cm/ \
- 	rdma_ucm/ \
- 	ib_ipoib/ \
--	rdmavt/
-+	rdmavt/ \
-+	hfi1/
- 
- else
- #normal makefile
 --- a/hfi1/Makefile
 +++ b/hfi1/Makefile
 @@ -7,7 +7,7 @@
@@ -89,29 +77,29 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
  
-@@ -15,7 +15,8 @@
- 	file_ops.o firmware.o init.o intr.o mad.o mmu_rb.o pcie.o pio.o \
+@@ -16,7 +16,8 @@
  	pio_copy.o platform.o qp.o qsfp.o rc.o ruc.o sdma.o sysfs.o trace.o \
  	uc.o ud.o user_exp_rcv.o exp_rcv.o user_pages.o user_sdma.o verbs.o \
--	verbs_txreq.o diag.o tid_rdma.o opfn.o iowait.o
-+	verbs_txreq.o diag.o tid_rdma.o opfn.o iowait.o \
+ 	verbs_txreq.o diag.o tid_rdma.o opfn.o iowait.o \
+-	ipoib_main.o ipoib_tx.o rcva.o msix.o ipoib_rx.o netdev_rx.o
++	ipoib_main.o ipoib_tx.o rcva.o msix.o ipoib_rx.o netdev_rx.o \
 +	compat.o rhashtable.o
  hfi1-$(CONFIG_DEBUG_FS) += debugfs.o
  
- CFLAGS_trace.o = -I$(src)
+ #ccflags-y += -DCONFIG_INFINIBAND_OPA_VNIC=1
 --- a/hfi1/verbs.c
 +++ b/hfi1/verbs.c
-@@ -1595,7 +1595,8 @@
+@@ -1609,7 +1609,8 @@
  			IB_DEVICE_SYS_IMAGE_GUID | IB_DEVICE_RC_RNR_NAK_GEN |
  			IB_DEVICE_PORT_ACTIVE_EVENT | IB_DEVICE_SRQ_RESIZE |
  			IB_DEVICE_MEM_MGT_EXTENSIONS |
--			IB_DEVICE_RDMA_NETDEV_OPA_VNIC;
-+			IB_DEVICE_RDMA_NETDEV_OPA_VNIC |
-+			IB_DEVICE_OPA_MAD_SUPPORT;
+-			IB_DEVICE_RDMA_NETDEV;
++			IB_DEVICE_RDMA_NETDEV |
++		    IB_DEVICE_OPA_MAD_SUPPORT;
  	rdi->dparms.props.page_size_cap = PAGE_SIZE;
  	rdi->dparms.props.vendor_id = dd->oui1 << 16 | dd->oui2 << 8 | dd->oui3;
  	rdi->dparms.props.vendor_part_id = dd->pcidev->device;
-@@ -1694,6 +1695,7 @@
+@@ -1708,6 +1709,7 @@
  	props->active_mtu = !valid_ib_mtu(ppd->ibmtu) ? props->max_mtu :
  		mtu_to_enum(ppd->ibmtu, IB_MTU_4096);
  
@@ -119,7 +107,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	/*
  	 * sm_lid of 0xFFFF needs special handling so that it can
  	 * be differentiated from a permissve LID of 0xFFFF.
-@@ -1702,6 +1704,7 @@
+@@ -1716,6 +1718,7 @@
  	 */
  	if (props->sm_lid == be16_to_cpu(IB_LID_PERMISSIVE))
  		props->grh_required = true;
@@ -127,7 +115,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	return 0;
  }
-@@ -1873,7 +1876,8 @@
+@@ -1893,7 +1896,8 @@
  	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
  	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
  }
@@ -137,22 +125,25 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
  {
  	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
-@@ -1896,7 +1900,7 @@
+@@ -1916,7 +1920,11 @@
  }
  #endif
  
 -#if !defined(IFS_SLES12SP2)
++#if defined(IFS_DEB8)
++int num_driver_cntrs = 0;
++#endif
++
 +#if !defined(IFS_SLES12SP2) && !defined(IFS_DEB8)
  static const char * const driver_cntr_names[] = {
  	/* must be element 0*/
  	"DRIVER_KernIntr",
-@@ -2098,22 +2102,24 @@
+@@ -2160,13 +2168,13 @@
  		ib_hfi1_sys_image_guid = ibdev->node_guid;
  	ibdev->owner = THIS_MODULE;
  	ibdev->phys_port_cnt = dd->num_pports;
 -#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB8)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
  	ibdev->dev.parent = &dd->pcidev->dev;
  #else
  	ibdev->dma_device = &dd->pcidev->dev;
@@ -163,10 +154,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ibdev->alloc_hw_stats = alloc_hw_stats;
  	ibdev->get_hw_stats = get_hw_stats;
  #endif
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_SLES15)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_SLES15) \
-+	&& !defined(IFS_DEB8)
- 	ibdev->alloc_rdma_netdev = hfi1_vnic_alloc_rn;
+@@ -2176,7 +2184,7 @@
  #endif
  	/* keep process mad in the driver */
  	ibdev->process_mad = hfi1_process_mad;
@@ -175,7 +163,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ibdev->get_dev_fw_str = hfi1_get_dev_fw_str;
  #endif
  	strncpy(ibdev->node_desc, init_utsname()->nodename,
-@@ -2229,7 +2235,7 @@
+@@ -2291,7 +2299,7 @@
  
  	del_timer_sync(&dev->mem_timer);
  	verbs_txreq_exit(dev);
@@ -237,7 +225,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (IS_ERR(send_buf))
  		return;
  
-@@ -4836,14 +4839,14 @@
+@@ -4837,14 +4840,14 @@
  				u8 port, const struct ib_wc *in_wc,
  				const struct ib_grh *in_grh,
  				const struct opa_mad *in_mad,
@@ -248,13 +236,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	int ret;
  	int pkey_idx;
  	int local_mad = 0;
- 	u32 resp_len = 0;
+ 	u32 resp_len = in_wc->byte_len - sizeof(*in_grh);
  	struct hfi1_ibport *ibp = to_iport(ibdev, port);
 +	struct ib_wc* in_out_wc = (struct ib_wc*) in_wc;
  
  	pkey_idx = hfi1_lookup_pkey_idx(ibp, LIM_MGMT_P_KEY);
  	if (pkey_idx < 0) {
-@@ -4851,7 +4854,6 @@
+@@ -4852,7 +4855,6 @@
  			hfi1_get_pkey(ibp, 1));
  		pkey_idx = 1;
  	}
@@ -262,7 +250,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	switch (in_mad->mad_hdr.mgmt_class) {
  	case IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE:
-@@ -4878,10 +4880,11 @@
+@@ -4879,10 +4881,11 @@
  	}
  
  bail:
@@ -276,7 +264,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	return ret;
  }
-@@ -4930,23 +4933,16 @@
+@@ -4931,23 +4934,16 @@
   * This is called by the ib_mad module.
   */
  int hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
@@ -319,7 +307,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #include <linux/sched.h>
 --- a/hfi1/ruc.c
 +++ b/hfi1/ruc.c
-@@ -241,6 +241,8 @@
+@@ -91,6 +91,8 @@
  			      IB_AH_GRH))
  				return 1;
  			grh = rdma_ah_read_grh(&qp->alt_ah_attr);
@@ -330,189 +318,22 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				    guid))
 --- a/compat/compat_common.h
 +++ b/compat/compat_common.h
-@@ -91,6 +91,26 @@
- #define IB_WR_REG_MR IB_WR_FAST_REG_MR
- #define IB_WC_REG_MR IB_WC_FAST_REG_MR
- 
-+#define IB_OPCODE_RC_SEND_LAST_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 1)
-+#define IB_OPCODE_RC_SEND_ONLY_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 2)
-+
+@@ -72,7 +72,15 @@
+ #define MAX_NICE        19
+ #define MIN_NICE        -20
+ #define NICE_WIDTH      (MAX_NICE - MIN_NICE + 1)
++#ifdef CONFIG_INFINIBAND_OPA_VNIC
+ #define IB_DEVICE_RDMA_NETDEV_OPA_VNIC	(1ULL << 35)
++#else
 +/*
-+ * Generic trap/notice M_Key violation flags in dr_trunc_hop (trap 256).
++ * kernel 3.x device_cap_flags is int and 0 is the pre-AIP value for
++ * IB_DEVICE_RDMA_NETDEV_OPA_VNIC.
 + */
-+#define IB_NOTICE_TRAP_DR_NOTICE        0x80
-+#define IB_NOTICE_TRAP_DR_TRUNC         0x40
-+
-+/* Define bits for the various functionality this port needs to be supported by
-+ * the core.
-+ */
-+/* Management                           0x00000FFF */
-+#define RDMA_CORE_CAP_IB_MAD            0x00000001
-+#define RDMA_CORE_CAP_IB_SMI            0x00000002
-+#define RDMA_CORE_CAP_IB_CM             0x00000004
-+#define RDMA_CORE_CAP_IW_CM             0x00000008
-+#define RDMA_CORE_CAP_IB_SA             0x00000010
-+#define RDMA_CORE_CAP_OPA_MAD           0x00000020
-+
- /* Address format                       0x000FF000 */
- #if !defined RDMA_CORE_CAP_AF_IB
- #define RDMA_CORE_CAP_AF_IB             0x00001000
-@@ -102,6 +122,34 @@
- #define RDMA_CORE_CAP_OPA_AH            0x00000000
- #endif
- 
-+/* Protocol                             0xFFF00000 */
-+#define RDMA_CORE_CAP_PROT_IB           0x00100000
-+#define RDMA_CORE_CAP_PROT_ROCE         0x00200000
-+#define RDMA_CORE_CAP_PROT_IWARP        0x00400000
-+#define RDMA_CORE_CAP_PROT_ROCE_UDP_ENCAP 0x00800000
-+
-+#define RDMA_CORE_PORT_IBA_IB          (RDMA_CORE_CAP_PROT_IB	\
-+										| RDMA_CORE_CAP_IB_MAD	\
-+										| RDMA_CORE_CAP_IB_SMI	\
-+										| RDMA_CORE_CAP_IB_CM	\
-+										| RDMA_CORE_CAP_IB_SA	\
-+										| RDMA_CORE_CAP_AF_IB)
-+#define RDMA_CORE_PORT_IBA_ROCE        (RDMA_CORE_CAP_PROT_ROCE \
-+										| RDMA_CORE_CAP_IB_MAD  \
-+										| RDMA_CORE_CAP_IB_CM   \
-+										| RDMA_CORE_CAP_AF_IB   \
-+										| RDMA_CORE_CAP_ETH_AH)
-+#define RDMA_CORE_PORT_IBA_ROCE_UDP_ENCAP		\
-+	(RDMA_CORE_CAP_PROT_ROCE_UDP_ENCAP			\
-+	 | RDMA_CORE_CAP_IB_MAD						\
-+	 | RDMA_CORE_CAP_IB_CM						\
-+	 | RDMA_CORE_CAP_AF_IB						\
-+	 | RDMA_CORE_CAP_ETH_AH)
-+#define RDMA_CORE_PORT_IWARP           (RDMA_CORE_CAP_PROT_IWARP	\
-+										| RDMA_CORE_CAP_IW_CM)
-+#define RDMA_CORE_PORT_INTEL_OPA       (RDMA_CORE_PORT_IBA_IB		\
-+										| RDMA_CORE_CAP_OPA_MAD)
-+
- #if !defined(kthread_init_work)
- #define kthread_init_work(work, fn) init_kthread_work(work, fn)
- #endif
-@@ -204,6 +252,21 @@
- 
- #define NEED_IB_HELPER_FUNCTIONS (!defined(IFS_RH75) && !defined(IFS_SLES15))
- 
-+struct ib_node_info {
-+	u8 base_version;
-+	u8 class_version;
-+	u8 node_type;
-+	u8 num_ports;
-+	__be64 sys_guid;
-+	__be64 node_guid;
-+	__be64 port_guid;
-+	__be16 partition_cap;
-+	__be16 device_id;
-+	__be32 revision;
-+	u8 local_port_num;
-+	u8 vendor_id[3];
-+} __packed;
-+
- #if NEED_IB_HELPER_FUNCTIONS
- struct opa_class_port_info {
- 	u8 base_version;
-@@ -236,6 +299,10 @@
- 	IB_MR_TYPE_SG_GAPS,
- };
- 
-+enum {
-+	IB_OPCODE_CNP                               = 0x80,
-+};
-+
- /* rdma netdev type - specifies protocol type */
- enum rdma_netdev_t {
- 	RDMA_NETDEV_OPA_VNIC,
-@@ -565,5 +632,87 @@
- 				u64              *sn_pfx);
- #endif
- 
-+extern void *memdup_user_nul(const void __user *, size_t);
-+
-+#ifdef __LINUX_BITMAP_H
-+/**
-+ * bitmap_print_to_pagebuf - convert bitmap to list or hex format ASCII string
-+ * @list: indicates whether the bitmap must be list
-+ * @buf: page aligned buffer into which string is placed
-+ * @maskp: pointer to bitmap to convert
-+ * @nmaskbits: size of bitmap, in bits
-+ *
-+ * Output format is a comma-separated list of decimal numbers and
-+ * ranges if list is specified or hex digits grouped into comma-separated
-+ * sets of 8 digits/set. Returns the number of characters written to buf.
-+ */
-+extern int bitmap_print_to_pagebuf(bool list, char *buf, const unsigned long *maskp,
-+								   int nmaskbits);
-+#endif /* __LINUX_BITMAP_H */
-+
-+#if defined(IFS_DEB8) && defined(_LINUX_PERCPU_REFCOUNT_H)
-+ 
-+#ifndef topology_sibling_cpumask
-+#define topology_sibling_cpumask(cpu)		cpumask_of(cpu)
++#define IB_DEVICE_RDMA_NETDEV_OPA_VNIC	0
 +#endif
-+
-+/**
-+ * cpumask_pr_args - printf args to output a cpumask
-+ * @maskp: cpumask to be printed
-+ *
-+ * Can be used to provide arguments for '%*pb[l]' when printing a cpumask.
-+ */
-+#ifndef cpumask_pr_args
-+#define cpumask_pr_args(maskp)		nr_cpu_ids, cpumask_bits(maskp)
-+#endif
-+
-+extern int bitmap_print_to_pagebuf(bool list, char *buf,
-+                                   const unsigned long *maskp, int nmaskbits);
-+
-+/**
-+ * cpumap_print_to_pagebuf  - copies the cpumask into the buffer either
-+ *      as comma-separated list of cpus or hex values of cpumask
-+ * @list: indicates whether the cpumap must be list
-+ * @mask: the cpumask to copy
-+ * @buf: the buffer to copy into
-+ *
-+ * Returns the length of the (null-terminated) @buf string, zero if
-+ * nothing is copied.
-+ */
-+static inline ssize_t
-+cpumap_print_to_pagebuf(bool list, char *buf, const struct cpumask *mask)
-+{
-+	return bitmap_print_to_pagebuf(list, buf, cpumask_bits(mask),
-+								   nr_cpumask_bits);
-+}
-+
-+#endif /* _LINUX_PERCPU_REFCOUNT_H */
-+
-+#ifdef CONFIG_COMPAT_IB_SAFE_FILE_ACCESS
-+/* Copied from linux-3.16.36 include/rdma/ib.h */
-+
-+static inline bool ib_safe_file_access(struct file *filp)
-+{
-+        return filp->f_cred == current_cred() && segment_eq(get_fs(), USER_DS);
-+}
-+#endif /* CONFIG_COMPAT_IB_SAFE_FILE_ACCESS  */
-+
-+#ifdef _LINUX_TRACE_SEQ_H
-+/**
-+ * trace_seq_buffer_ptr - return pointer to next location in buffer
-+ * @s: trace sequence descriptor
-+ *
-+ * Returns the pointer to the buffer where the next write to
-+ * the buffer will happen. This is useful to save the location
-+ * that is about to be written to and then return the result
-+ * of that write.
-+ */
-+static inline unsigned char *
-+trace_seq_buffer_ptr(struct trace_seq *s)
-+{
-+        return s->buffer + s->len;
-+}
-+#endif /* _LINUX_TRACE_SEQ_H */
-+
- 
- #endif
+ #define IB_DEVICE_NODE_DESC_MAX 64
+ #undef __get_dynamic_array_len
+ #define __get_dynamic_array_len(field)	\
 --- /dev/null
 +++ b/hfi1/compat.c
 @@ -0,0 +1,63 @@
@@ -1430,7 +1251,148 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +}
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -103,6 +103,11 @@
+@@ -51,8 +51,6 @@
+ 
+ #include "compat_common.h"
+ 
+-#define KVZALLOC_NODE 1
+-
+ #define __GFP_RECLAIM	(__GFP_WAIT)
+ 
+ #ifndef NULLS_MARKER
+@@ -67,6 +65,14 @@
+ #define IB_WR_REG_MR IB_WR_FAST_REG_MR
+ #define IB_WC_REG_MR IB_WC_FAST_REG_MR
+ 
++#define IB_OPCODE_RC_SEND_LAST_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 1)
++#define IB_OPCODE_RC_SEND_ONLY_WITH_INVALIDATE (IB_OPCODE_RC_FETCH_ADD + 2)
++
++/*
++ * Generic trap/notice M_Key violation flags in dr_trunc_hop (trap 256).
++ */
++#define IB_NOTICE_TRAP_DR_NOTICE        0x80
++#define IB_NOTICE_TRAP_DR_TRUNC         0x40
+ 
+ /* Define bits for the various functionality this port needs to be supported by
+  * the core.
+@@ -120,9 +126,28 @@
+ #define PCI_IRQ_ALL_TYPES \
+ (PCI_IRQ_LEGACY | PCI_IRQ_MSI | PCI_IRQ_MSIX)
+ 
++enum {
++	IB_OPCODE_CNP                               = 0x80,
++};
++
+ struct hfi1_msix_entry;
+ struct hfi1_devdata;
+ 
++struct ib_node_info {
++	u8 base_version;
++	u8 class_version;
++	u8 node_type;
++	u8 num_ports;
++	__be64 sys_guid;
++	__be64 node_guid;
++	__be64 port_guid;
++	__be16 partition_cap;
++	__be16 device_id;
++	__be32 revision;
++	u8 local_port_num;
++	u8 vendor_id[3];
++} __packed;
++
+ struct ib_send_wr_hdr {
+ 	struct ib_send_wr      *next;
+ 	u64                     wr_id;
+@@ -204,6 +229,87 @@
+ 	return container_of((struct ib_send_wr_hdr *)wr, struct ib_reg_wr, wr);
+ }
+ 
++extern void *memdup_user_nul(const void __user *, size_t);
++
++#ifdef __LINUX_BITMAP_H
++/**
++ * bitmap_print_to_pagebuf - convert bitmap to list or hex format ASCII string
++ * @list: indicates whether the bitmap must be list
++ * @buf: page aligned buffer into which string is placed
++ * @maskp: pointer to bitmap to convert
++ * @nmaskbits: size of bitmap, in bits
++ *
++ * Output format is a comma-separated list of decimal numbers and
++ * ranges if list is specified or hex digits grouped into comma-separated
++ * sets of 8 digits/set. Returns the number of characters written to buf.
++ */
++extern int bitmap_print_to_pagebuf(bool list, char *buf, const unsigned long *maskp,
++								   int nmaskbits);
++#endif /* __LINUX_BITMAP_H */
++
++#if defined(IFS_DEB8) && defined(_LINUX_PERCPU_REFCOUNT_H)
++
++#ifndef topology_sibling_cpumask
++#define topology_sibling_cpumask(cpu)		cpumask_of(cpu)
++#endif
++
++/**
++ * cpumask_pr_args - printf args to output a cpumask
++ * @maskp: cpumask to be printed
++ *
++ * Can be used to provide arguments for '%*pb[l]' when printing a cpumask.
++ */
++#ifndef cpumask_pr_args
++#define cpumask_pr_args(maskp)		nr_cpu_ids, cpumask_bits(maskp)
++#endif
++
++extern int bitmap_print_to_pagebuf(bool list, char *buf,
++                                   const unsigned long *maskp, int nmaskbits);
++
++/**
++ * cpumap_print_to_pagebuf  - copies the cpumask into the buffer either
++ *      as comma-separated list of cpus or hex values of cpumask
++ * @list: indicates whether the cpumap must be list
++ * @mask: the cpumask to copy
++ * @buf: the buffer to copy into
++ *
++ * Returns the length of the (null-terminated) @buf string, zero if
++ * nothing is copied.
++ */
++static inline ssize_t
++cpumap_print_to_pagebuf(bool list, char *buf, const struct cpumask *mask)
++{
++	return bitmap_print_to_pagebuf(list, buf, cpumask_bits(mask),
++								   nr_cpumask_bits);
++}
++
++#endif /* _LINUX_PERCPU_REFCOUNT_H */
++
++#ifdef CONFIG_COMPAT_IB_SAFE_FILE_ACCESS
++/* Copied from linux-3.16.36 include/rdma/ib.h */
++
++static inline bool ib_safe_file_access(struct file *filp)
++{
++        return filp->f_cred == current_cred() && segment_eq(get_fs(), USER_DS);
++}
++#endif /* CONFIG_COMPAT_IB_SAFE_FILE_ACCESS  */
++
++#ifdef _LINUX_TRACE_SEQ_H
++/**
++ * trace_seq_buffer_ptr - return pointer to next location in buffer
++ * @s: trace sequence descriptor
++ *
++ * Returns the pointer to the buffer where the next write to
++ * the buffer will happen. This is useful to save the location
++ * that is about to be written to and then return the result
++ * of that write.
++ */
++static inline unsigned char *
++trace_seq_buffer_ptr(struct trace_seq *s)
++{
++        return s->buffer + s->len;
++}
++#endif /* _LINUX_TRACE_SEQ_H */
+ 
+ void pcie_flr(struct pci_dev *dev);
+ 
+@@ -261,6 +367,11 @@
  	return !d_unhashed(dentry) && dentry->d_inode;
  }
  
@@ -1442,7 +1404,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static inline void hfi1_enable_intx(struct pci_dev *pdev)
  {
  	/* first, turn on INTx */
-@@ -111,6 +116,12 @@
+@@ -269,6 +380,12 @@
  	pci_disable_msix(pdev);
  }
  
@@ -1455,15 +1417,20 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /* Helpers to hide struct msi_desc implementation details */
  #define msi_desc_to_dev(desc)           ((desc)->dev)
  #define dev_to_msi_list(dev)            (&(dev)->msi_list)
+@@ -322,5 +439,4 @@
+ }
+ #endif
+ 
+-
+ #endif //DEB8_COMPAT_H
 --- a/hfi1/file_ops.c
 +++ b/hfi1/file_ops.c
-@@ -48,11 +48,12 @@
+@@ -48,11 +48,11 @@
  #include <linux/cdev.h>
  #include <linux/vmalloc.h>
  #include <linux/io.h>
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
  #include <linux/sched/mm.h>
  #else
  #include <linux/aio.h>
@@ -1472,12 +1439,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #endif
  #include <linux/bitmap.h>
  #include <rdma/ib.h>
-@@ -96,7 +97,7 @@
+@@ -96,7 +96,8 @@
   */
  static int hfi1_file_open(struct inode *inode, struct file *fp);
  static int hfi1_file_close(struct inode *inode, struct file *fp);
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) \
++	&& !defined(IFS_DEB8)
  static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from);
  #else
  static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
@@ -1485,36 +1453,49 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
  static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
  		       unsigned long arg);
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
  static int vma_fault(struct vm_fault *vmf);
  #else
  static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
-@@ -152,7 +153,7 @@
+@@ -152,7 +153,8 @@
  
  static const struct file_operations hfi1_file_ops = {
  	.owner = THIS_MODULE,
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) \
++	&& !defined(IFS_DEB8)
  	.write_iter = hfi1_write_iter,
  #else
  	.aio_write = hfi1_aio_write,
-@@ -350,7 +351,7 @@
+@@ -350,7 +352,8 @@
  	return ret;
  }
  
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) \
++	&& !defined(IFS_DEB8)
  static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
  {
  	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
-@@ -685,7 +686,8 @@
+@@ -685,7 +688,7 @@
   * Local (non-chip) user memory is not mapped right away but as it is
   * accessed by the user-level code.
   */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
  static int vma_fault(struct vm_fault *vmf)
  #else
  static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+--- a/Makefile
++++ b/Makefile
+@@ -18,7 +18,8 @@
+ 	rdma_cm/ \
+ 	rdma_ucm/ \
+ 	ib_ipoib/ \
+-	rdmavt/
++	rdmavt/ \
++	hfi1/
+ 
+ else
+ #normal makefile

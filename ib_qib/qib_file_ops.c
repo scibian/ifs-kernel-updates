@@ -57,7 +57,7 @@
 static int qib_open(struct inode *, struct file *);
 static int qib_close(struct inode *, struct file *);
 static ssize_t qib_write(struct file *, const char __user *, size_t, loff_t *);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
 static ssize_t qib_write_iter(struct kiocb *, struct iov_iter *);
 #else
 static ssize_t qib_aio_write(struct kiocb *, const struct iovec *,
@@ -74,7 +74,7 @@ static int qib_mmapf(struct file *, struct vm_area_struct *);
 static const struct file_operations qib_file_ops = {
 	.owner = THIS_MODULE,
 	.write = qib_write,
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
 	.write_iter = qib_write_iter,
 #else
 	.aio_write = qib_aio_write,
@@ -373,6 +373,8 @@ static int qib_tid_update(struct qib_ctxtdata *rcd, struct file *fp,
 		goto done;
 	}
 	for (i = 0; i < cnt; i++, vaddr += PAGE_SIZE) {
+		dma_addr_t daddr;
+
 		for (; ntids--; tid++) {
 			if (tid == tidcnt)
 				tid = 0;
@@ -389,12 +391,14 @@ static int qib_tid_update(struct qib_ctxtdata *rcd, struct file *fp,
 			ret = -ENOMEM;
 			break;
 		}
+		ret = qib_map_page(dd->pcidev, pagep[i], &daddr);
+		if (ret)
+			break;
+
 		tidlist[i] = tid + tidoff;
 		/* we "know" system pages and TID pages are same size */
 		dd->pageshadow[ctxttid + tid] = pagep[i];
-		dd->physshadow[ctxttid + tid] =
-			qib_map_page(dd->pcidev, pagep[i], 0, PAGE_SIZE,
-				     PCI_DMA_FROMDEVICE);
+		dd->physshadow[ctxttid + tid] = daddr;
 		/*
 		 * don't need atomic or it's overhead
 		 */
@@ -902,7 +906,7 @@ bail:
 /*
  * qib_file_vma_fault - handle a VMA page fault.
  */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 static int qib_file_vma_fault(struct vm_fault *vmf)
 #else
 static int qib_file_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
@@ -2277,7 +2281,7 @@ bail:
 	return ret;
 }
 
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
 static ssize_t qib_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct qib_filedata *fp = iocb->ki_filp->private_data;
@@ -2286,7 +2290,7 @@ static ssize_t qib_write_iter(struct kiocb *iocb, struct iov_iter *from)
 
 	if (!iter_is_iovec(from) || !from->nr_segs || !pq)
 		return -EINVAL;
-			 
+
 	return qib_user_sdma_writev(rcd, pq, from->iov, from->nr_segs);
 }
 #else

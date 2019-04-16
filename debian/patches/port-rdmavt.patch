@@ -5,7 +5,7 @@ Description: Port rdmavt to debian kernel 3.16
  wait_for_completion_timeout in kernel 3.16.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2018-11-26>
+Last-Update: <2019-01-30>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/rdmavt/cq.h
@@ -227,7 +227,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		goto bail;
 --- a/rdmavt/qp.c
 +++ b/rdmavt/qp.c
-@@ -1004,6 +1004,7 @@
+@@ -1017,6 +1017,7 @@
  	spin_lock(&rdi->n_qps_lock);
  	if (rdi->n_qps_allocated == rdi->dparms.props.max_qp) {
  		spin_unlock(&rdi->n_qps_lock);
@@ -313,10 +313,10 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	spin_lock_init(&rdi->n_cqs_lock);
  
  	/* DMA Operations */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
  	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
- #elif defined(IFS_RH75)
+ #elif defined(IFS_RH75) || defined(IFS_RH76)
  	rdi->ibdev.dev.device_rh->dma_ops =
 --- a/rdmavt/vt.h
 +++ b/rdmavt/vt.h
@@ -450,20 +450,81 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -44,8 +44,8 @@
+@@ -44,8 +44,10 @@
   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   *
   */
--#if !defined(RH75_COMPAT_H)
--#define RH75_COMPAT_H
+-#if !defined(RH76_COMPAT_H)
+-#define RH76_COMPAT_H
 +#if !defined(DEB8_COMPAT_H)
 +#define DEB8_COMPAT_H
++
++#define IB_MULTICAST_LID_BASE  cpu_to_be16(0xC000)
  
  #include "compat_common.h"
  
-@@ -57,6 +57,13 @@
+@@ -53,21 +55,187 @@
+ 
+ #define __GFP_RECLAIM	(__GFP_WAIT)
+ 
+-#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
++#ifndef NULLS_MARKER
++#define NULLS_MARKER(value) (1UL | (((long)value) << 1))
++#endif
+ 
++#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
+ 
  #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
  #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
+ 
++#define IB_WR_REG_MR IB_WR_FAST_REG_MR
++#define IB_WC_REG_MR IB_WC_FAST_REG_MR
++
++
++/* Define bits for the various functionality this port needs to be supported by
++ * the core.
++ */
++/* Management                           0x00000FFF */
++#define RDMA_CORE_CAP_IB_MAD            0x00000001
++#define RDMA_CORE_CAP_IB_SMI            0x00000002
++#define RDMA_CORE_CAP_IB_CM             0x00000004
++#define RDMA_CORE_CAP_IW_CM             0x00000008
++#define RDMA_CORE_CAP_IB_SA             0x00000010
++#define RDMA_CORE_CAP_OPA_MAD           0x00000020
++
++/* Protocol                             0xFFF00000 */
++#define RDMA_CORE_CAP_PROT_IB           0x00100000
++#define RDMA_CORE_CAP_PROT_ROCE         0x00200000
++#define RDMA_CORE_CAP_PROT_IWARP        0x00400000
++#define RDMA_CORE_CAP_PROT_ROCE_UDP_ENCAP 0x00800000
++
++#define RDMA_CORE_PORT_IBA_IB          \
++	(RDMA_CORE_CAP_PROT_IB										\
++	 | RDMA_CORE_CAP_IB_MAD										\
++	 | RDMA_CORE_CAP_IB_SMI										\
++	 | RDMA_CORE_CAP_IB_CM										\
++	 | RDMA_CORE_CAP_IB_SA										\
++	 | RDMA_CORE_CAP_AF_IB)
++#define RDMA_CORE_PORT_IBA_ROCE        \
++	(RDMA_CORE_CAP_PROT_ROCE									\
++	 | RDMA_CORE_CAP_IB_MAD										\
++	 | RDMA_CORE_CAP_IB_CM										\
++	 | RDMA_CORE_CAP_AF_IB										\
++	 | RDMA_CORE_CAP_ETH_AH)
++#define RDMA_CORE_PORT_IBA_ROCE_UDP_ENCAP               \
++	(RDMA_CORE_CAP_PROT_ROCE_UDP_ENCAP									\
++	 | RDMA_CORE_CAP_IB_MAD												\
++	 | RDMA_CORE_CAP_IB_CM												\
++	 | RDMA_CORE_CAP_AF_IB												\
++	 | RDMA_CORE_CAP_ETH_AH)
++#define RDMA_CORE_PORT_IWARP           \
++	(RDMA_CORE_CAP_PROT_IWARP		   \
++	 | RDMA_CORE_CAP_IW_CM)
++#define RDMA_CORE_PORT_INTEL_OPA       \
++	(RDMA_CORE_PORT_IBA_IB												\
++	 | RDMA_CORE_CAP_OPA_MAD)
++
+ #define NET_NAME_UNKNOWN 0
  
 +#define PCI_IRQ_LEGACY          BIT(0) /* allow legacy interrupts */
 +#define PCI_IRQ_MSI             BIT(1) /* allow MSI interrupts */
@@ -474,125 +535,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
  struct hfi1_msix_entry;
  struct hfi1_devdata;
- 
-@@ -66,6 +73,11 @@
- 		struct hfi1_msix_entry *hfi1_msix_entry);
- int bitmap_print_to_pagebuf(bool list, char *buf,
- 			    const unsigned long *maskp, int nmaskbits);
-+
-+struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
-+int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
-+                          unsigned int max_vecs, unsigned int flags);
-+
- int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
- __acquires(&debugfs_srcu);
- 
-@@ -107,4 +119,53 @@
- #define for_each_msi_entry(desc, dev)   \
- 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
- 
--#endif //RH75_COMPAT
-+#ifdef CONFIG_PCI_MSI
-+#define dev_to_msi_list(dev)		(&(dev)->msi_list)
-+#define first_msi_entry(dev)										\
-+	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
-+#define for_each_msi_entry(desc, dev)								\
-+        list_for_each_entry((desc), dev_to_msi_list((dev)), list)
-+
-+/**
-+ * pci_irq_vector - return Linux IRQ number of a device vector
-+ * @dev: PCI device to operate on
-+ * @nr: device-relative interrupt vector index (0-based).
-+ */
-+static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
-+{
-+        if (dev->msix_enabled) {
-+                struct msi_desc *entry;
-+                int i = 0;
-+
-+                for_each_msi_entry(entry, dev) {
-+                        if (i == nr)
-+                                return entry->irq;
-+                        i++;
-+                }
-+                WARN_ON_ONCE(1);
-+                return -EINVAL;
-+        }
-+
-+        if (dev->msi_enabled) {
-+                struct msi_desc *entry = first_msi_entry(dev);
-+
-+                if (WARN_ON_ONCE(nr >= entry->nvec_used))
-+                        return -EINVAL;
-+        } else {
-+                if (WARN_ON_ONCE(nr > 0))
-+                        return -EINVAL;
-+        }
-+
-+        return dev->irq + nr;
-+}
-+#else
-+static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
-+{
-+        if (WARN_ON_ONCE(nr > 0))
-+                return -EINVAL;
-+        return dev->irq;
-+}
-+#endif
-+
-+
-+#endif //DEB8_COMPAT
---- a/include/rdma/rdma_vt.h
-+++ b/include/rdma/rdma_vt.h
-@@ -201,7 +201,8 @@
- 	defined(IFS_RH74) || \
- 	defined(IFS_RH75) || \
- 	defined(IFS_SLES12SP2) || \
--	defined(IFS_SLES12SP3))
-+	defined(IFS_SLES12SP3) || \
-+	defined(IFS_DEB8))
- 
- struct rvt_dev_info;
- struct rvt_swqe;
---- a/compat/compat_common.h
-+++ b/compat/compat_common.h
-@@ -47,6 +47,8 @@
- #if !defined(COMPAT_COMMON_H)
- #define COMPAT_COMMON_H
- 
-+#define IB_MULTICAST_LID_BASE  cpu_to_be16(0xC000)
-+
- #include <linux/socket.h>
- #include <net/ipv6.h>
- #include <net/ip.h>
-@@ -66,11 +68,14 @@
- #define BAD_DMA_ADDRESS ((u64)0)
- #endif
- 
-+#define NULLS_MARKER(value) (1UL | (((long)value) << 1))
-+
- #define SHMLBA PAGE_SIZE         /* attach addr a multiple of this */
- 
- #define MAX_NICE        19
- #define MIN_NICE        -20
- #define NICE_WIDTH      (MAX_NICE - MIN_NICE + 1)
-+
- #define IB_DEVICE_RDMA_NETDEV_OPA_VNIC	0
- #define IB_DEVICE_NODE_DESC_MAX 64
- #undef __get_dynamic_array_len
-@@ -83,6 +88,9 @@
- #define  current_time(inode)			  CURRENT_TIME
- #endif
- 
-+#define IB_WR_REG_MR IB_WR_FAST_REG_MR
-+#define IB_WC_REG_MR IB_WC_FAST_REG_MR
-+
- /* Address format                       0x000FF000 */
- #if !defined RDMA_CORE_CAP_AF_IB
- #define RDMA_CORE_CAP_AF_IB             0x00001000
-@@ -105,6 +113,59 @@
- #define rb_first_cached(root)		rb_first(root)
- #endif
  
 +struct ib_send_wr_hdr {
 +	struct ib_send_wr      *next;
@@ -647,26 +589,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	u8      weight;
 +};
 +
- extern struct srcu_struct debugfs_srcu;
- extern struct ib_dma_mapping_ops rvt_default_dma_mapping_ops;
- 
-@@ -169,6 +230,12 @@
- 	u8 reserved[3];
- } __packed;
- 
 +enum ib_mr_type {
 +	IB_MR_TYPE_MEM_REG,
 +	IB_MR_TYPE_SIGNATURE,
 +	IB_MR_TYPE_SG_GAPS,
 +};
 +
- /* rdma netdev type - specifies protocol type */
- enum rdma_netdev_t {
- 	RDMA_NETDEV_OPA_VNIC,
-@@ -301,6 +368,29 @@
- 	return (u16)lid;
- }
- 
 +static inline struct ib_rdma_wr *rdma_wr(struct ib_send_wr *wr)
 +{
 +	return container_of((struct ib_send_wr_hdr *)wr, struct ib_rdma_wr,
@@ -690,15 +618,139 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +}
 +
 +
- /**
-  * rdma_destroy_ah - Destroys an address handle.
-  * @ah: The address handle to destroy.
-@@ -474,4 +564,6 @@
- 				u8                port_num,
- 				u64              *sn_pfx);
+ void pcie_flr(struct pci_dev *dev);
+ 
+ int bitmap_print_to_pagebuf(bool list, char *buf,
+ 			    const unsigned long *maskp, int nmaskbits);
++
++struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
++static inline bool rdma_core_cap_opa_port(struct ib_device *device,
++					  u32 port_num)
++{
++	struct ib_port_attr attr;
++	if (!device)
++		return false;
++	if (device->query_port(device, port_num, & attr) != 0)
++		return false;
++	return (attr.port_cap_flags & RDMA_CORE_PORT_INTEL_OPA) == RDMA_CORE_PORT_INTEL_OPA;
++}
++
++static inline int rdma_mtu_enum_to_int(struct ib_device *device, u8 port,
++				       int mtu)
++{
++	if (rdma_core_cap_opa_port(device, port))
++		return opa_mtu_enum_to_int(mtu);
++	else
++		return ib_mtu_enum_to_int((enum ib_mtu)mtu);
++}
++
++void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
++                struct hfi1_msix_entry *hfi1_msix_entry);
++int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
++                          unsigned int max_vecs, unsigned int flags);
++
+ int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
+ __acquires(&debugfs_srcu);
+ 
+@@ -108,5 +276,51 @@
+ 	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
+ #define for_each_msi_entry(desc, dev)   \
+ 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
++#ifdef CONFIG_PCI_MSI
++#define first_pci_msi_entry(dev)               \
++	first_msi_entry((dev))
++#define for_each_pci_msi_entry(desc, dev)      \
++	for_each_msi_entry((desc), (dev))
++/**
++ * pci_irq_vector - return Linux IRQ number of a device vector
++ * @dev: PCI device to operate on
++ * @nr: device-relative interrupt vector index (0-based).
++ */
++static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
++{
++        if (dev->msix_enabled) {
++                struct msi_desc *entry;
++                int i = 0;
++
++                for_each_pci_msi_entry(entry, dev) {
++                        if (i == nr)
++                                return entry->irq;
++                        i++;
++                }
++                WARN_ON_ONCE(1);
++                return -EINVAL;
++        }
++
++        if (dev->msi_enabled) {
++                struct msi_desc *entry = first_pci_msi_entry(dev);
++
++                if (WARN_ON_ONCE(nr >= entry->nvec_used))
++                        return -EINVAL;
++        } else {
++                if (WARN_ON_ONCE(nr > 0))
++                        return -EINVAL;
++        }
++
++        return dev->irq + nr;
++}
++#else
++static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
++{
++        if (WARN_ON_ONCE(nr > 0))
++                return -EINVAL;
++        return dev->irq;
++}
++#endif
++
+ 
+-#endif //RH76_COMPAT
++#endif //DEB8_COMPAT_H
+--- a/include/rdma/rdma_vt.h
++++ b/include/rdma/rdma_vt.h
+@@ -200,7 +200,8 @@
+ 	(defined(IFS_RH73) || \
+ 	defined(IFS_RH74) || \
+ 	defined(IFS_SLES12SP2) || \
+-	defined(IFS_SLES12SP3))
++	defined(IFS_SLES12SP3) || \
++	defined(IFS_DEB8))
+ 
+ struct rvt_dev_info;
+ struct rvt_swqe;
+--- a/compat/compat_common.h
++++ b/compat/compat_common.h
+@@ -552,6 +552,8 @@
+ }
  #endif
-+
-+
+ 
++#if !defined(IFS_DEB8)
++/* deb8 uses rdma_core_cap_opa_port defined in compat.h */
+ static inline bool rdma_core_cap_opa_port(struct ib_device *device,
+ 					  u32 port_num)
+ {
+@@ -561,6 +563,7 @@
+ 	return (device->port_immutable[port_num].core_cap_flags & RDMA_CORE_PORT_INTEL_OPA)
+ 		== RDMA_CORE_PORT_INTEL_OPA;
+ }
++#endif
+ 
+ static inline int opa_mtu_enum_to_int(int mtu)
+ {
+@@ -574,6 +577,8 @@
+ 	}
+ }
+ 
++#if !defined(IFS_DEB8)
++/* deb8 needs to call rdma_core_cap_opa_port defined in compat.h */
+ static inline int rdma_mtu_enum_to_int(struct ib_device *device, u8 port,
+ 				       int mtu)
+ {
+@@ -582,5 +587,6 @@
+ 	else
+ 		return ib_mtu_enum_to_int((enum ib_mtu)mtu);
+ }
++#endif
+ 
  #endif
 --- /dev/null
 +++ b/include/linux/rhashtable.h
@@ -1650,20 +1702,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  #define CQ_PRN \
  "[%s] idx %u wr_id %llx status %u opcode %u,%s length %u qpn %x"
---- a/hfi1/hfi.h
-+++ b/hfi1/hfi.h
-@@ -657,7 +657,7 @@
- #define MAX_NAME_SIZE 64
- struct hfi1_msix_entry {
- 	enum irq_type type;
--#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)
-+#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3) || defined(IFS_DEB8)
- 	struct msix_entry msix;
- #endif
- 	int irq;
 --- a/rdmavt/compat.c
 +++ b/rdmavt/compat.c
-@@ -58,6 +58,55 @@
+@@ -58,6 +58,98 @@
  #include "../hfi1/hfi.h"
  #include "compat.h"
  
@@ -1690,7 +1731,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +        int i, nvec;
 +        struct hfi1_msix_entry *entries;
 +
-+        if (min_vecs != 1 || max_vecs < min_vecs)
++        if (max_vecs < min_vecs)
 +                return -ERANGE;
 +
 +        nvec = max_vecs;
@@ -1716,10 +1757,53 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +}
 +EXPORT_SYMBOL(pci_alloc_irq_vectors);
 +
- void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
- 		struct hfi1_msix_entry *hfi1_msix_entry)
- {
-@@ -147,3 +196,171 @@
++void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
++                struct hfi1_msix_entry *hfi1_msix_entry)
++{
++        int ret;
++        int nvec = *msixcnt;
++        struct msix_entry *msix_entry;
++        int i;
++
++        /*
++         * We can't pass hfi1_msix_entry array to msix_setup
++         * so use a dummy msix_entry array and copy the allocated
++         * irq back to the hfi1_msix_entry array.
++         */
++        msix_entry = kmalloc_array(nvec, sizeof(*msix_entry), GFP_KERNEL);
++        if (!msix_entry) {
++                ret = -ENOMEM;
++                goto do_intx;
++        }
++
++        for (i = 0; i < nvec; i++)
++                msix_entry[i] = hfi1_msix_entry[i].msix;
++
++        ret = pci_enable_msix_range(pcidev, msix_entry, 1, nvec);
++        if (ret < 0)
++                goto free_msix_entry;
++        nvec = ret;
++
++        for (i = 0; i < nvec; i++)
++                hfi1_msix_entry[i].msix = msix_entry[i];
++
++        kfree(msix_entry);
++        *msixcnt = nvec;
++        return;
++
++free_msix_entry:
++        kfree(msix_entry);
++
++do_intx:
++        *msixcnt = 0;
++        hfi1_enable_intx(pcidev);
++}
++EXPORT_SYMBOL(msix_setup);
++
+ /**
+  * debugfs_use_file_start - mark the beginning of file data access
+  * @dentry: the dentry object whose data is being accessed.
+@@ -104,3 +196,171 @@
  	srcu_read_unlock(&debugfs_srcu, srcu_idx);
  }
  EXPORT_SYMBOL(debugfs_use_file_finish);
@@ -1944,3 +2028,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  
  static inline void rvt_put_ss(struct rvt_sge_state *ss)
+--- a/hfi1/hfi.h
++++ b/hfi1/hfi.h
+@@ -709,7 +709,7 @@
+ #define MAX_NAME_SIZE 64
+ struct hfi1_msix_entry {
+ 	enum irq_type type;
+-#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)
++#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3) || defined(IFS_DEB8)
+ 	struct msix_entry msix;
+ #endif
+ 	int irq;

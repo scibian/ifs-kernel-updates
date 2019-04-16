@@ -63,6 +63,7 @@ struct hfi1_affinity_node_list node_affinity = {
 static const char * const irq_type_names[] = {
 	"SDMA",
 	"RCVCTXT",
+	"NETDEVCTXT",
 	"GENERAL",
 	"OTHER",
 };
@@ -698,7 +699,7 @@ int hfi1_dev_affinity_init(struct hfi1_devdata *dd)
 			 */
 			for (i = 0;
 			     i < (dd->n_krcv_queues - 1) *
-				  hfi1_per_node_cntr[dd->node];
+				 hfi1_per_node_cntr[dd->node];
 			     i++) {
 				cpumask_clear_cpu(curr_cpu,
 						  &entry->def_intr.mask);
@@ -817,10 +818,10 @@ static void hfi1_update_sdma_affinity(struct hfi1_msix_entry *msix, int cpu)
 	set = &entry->def_intr;
 	cpumask_set_cpu(cpu, &set->mask);
 	cpumask_set_cpu(cpu, &set->used);
-	for (i = 0; i < dd->num_msix_entries; i++) {
+	for (i = 0; i < dd->msix_info.max_requested; i++) {
 		struct hfi1_msix_entry *other_msix;
 
-		other_msix = &dd->msix_entries[i];
+		other_msix = &dd->msix_info.msix_entries[i];
 		if (other_msix->type != IRQ_SDMA || other_msix == msix)
 			continue;
 
@@ -912,6 +913,11 @@ static int get_irq_affinity(struct hfi1_devdata *dd,
 			set = &entry->rcv_intr;
 		scnprintf(extra, 64, "ctxt %u", rcd->ctxt);
 		break;
+	case IRQ_NETDEVCTXT:
+		rcd = (struct hfi1_ctxtdata *)msix->arg;
+		set = &entry->def_intr;
+		scnprintf(extra, 64, "ctxt %u", rcd->ctxt);
+		break;
 	default:
 		dd_dev_err(dd, "Invalid IRQ type %d\n", msix->type);
 		return -EINVAL;
@@ -983,6 +989,10 @@ void hfi1_put_irq_affinity(struct hfi1_devdata *dd,
 		/* Don't do accounting for control contexts */
 		if (rcd->ctxt != HFI1_CTRL_CTXT)
 			set = &entry->rcv_intr;
+		break;
+	case IRQ_NETDEVCTXT:
+		rcd = (struct hfi1_ctxtdata *)msix->arg;
+		set = &entry->def_intr;
 		break;
 	default:
 		mutex_unlock(&node_affinity.lock);

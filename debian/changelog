@@ -1,3 +1,17 @@
+ifs-kernel-updates (1:3.10.0-957-1777-1ifs+deb8) jessie; urgency=medium
+
+    * Import ifs-kernel-updates 3.10.0_957 1777 from
+      IFS RHEL76 10.9.2.0.9 upstream.
+
+ -- Brian T. Smith <bsmith@systemfabricworks.com>  Tue, 16 Apr 2019 13:22:09 -0500
+
+ifs-kernel-updates (1:3.10.0-957-1762-1ifs+deb8) jessie; urgency=medium
+
+    * Import ifs-kernel-updates 3.10.0_957 1762 from
+      IFS RHEL76 10.9.1.0.15 upstream.
+
+ -- Brian T. Smith <bsmith@systemfabricworks.com>  Thu, 07 Mar 2019 15:33:55 -0600
+
 ifs-kernel-updates (1:3.10.0-862-1618-1ifs+deb8) jessie; urgency=medium
 
     * Import ifs-kernel-updates 3.10.0_862 1618 from

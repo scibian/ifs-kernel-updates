@@ -1,4 +1,5 @@
 remove-Makefile-targets.patch
+remove-aip.patch
 add-ib_uverbs.patch
 add-ib_mad.patch
 add-mad-dependent-modules.patch
@@ -6,6 +7,7 @@ add-ib_ipoib.patch
 add-linux-rdma-headers.patch
 add-jumbo-mad.patch
 port-rdmavt.patch
+config-aip-removal.patch
 port-hfi1.patch
 ib_uverbs-idr-rcu.patch
 linux-ipoib-db84f88.patch

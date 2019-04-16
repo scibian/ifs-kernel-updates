@@ -113,6 +113,12 @@ enum {
 #define LRH_9B_BYTES (FIELD_SIZEOF(struct ib_header, lrh))
 #define LRH_9B_DWORDS (LRH_9B_BYTES / sizeof(u32))
 
+/* 24Bits for qpn, upper 8Bits reserved */
+struct opa_16b_mgmt {
+	__be32 dest_qpn;
+	__be32 src_qpn;
+};
+
 struct hfi1_16b_header {
 	u32 lrh[4];
 	union {
@@ -121,6 +127,7 @@ struct hfi1_16b_header {
 			struct ib_other_headers oth;
 		} l;
 		struct ib_other_headers oth;
+		struct opa_16b_mgmt mgmt;
 	} u;
 } __packed;
 
@@ -418,8 +425,6 @@ void hfi1_ud_rcv(struct hfi1_packet *packet);
 
 int hfi1_lookup_pkey_idx(struct hfi1_ibport *ibp, u16 pkey);
 
-int hfi1_rvt_get_rwqe(struct rvt_qp *qp, int wr_id_only);
-
 void hfi1_migrate_qp(struct rvt_qp *qp);
 
 int hfi1_check_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
@@ -428,8 +433,8 @@ int hfi1_check_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
 		    int attr_mask, struct ib_udata *udata);
 void hfi1_restart_rc(struct rvt_qp *qp, u32 psn, int wait);
-int hfi1_check_send_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
-int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
+int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe,
+		   bool *call_send);
 
 extern const u32 rc_only_opcode;
 extern const u32 uc_only_opcode;
@@ -512,6 +517,14 @@ static inline void cacheless_memcpy(void *dst, void *src, size_t n)
 static inline bool opa_bth_is_migration(struct ib_other_headers *ohdr)
 {
 	return !!(ohdr->bth[1] & cpu_to_be32(OPA_BTH_MIG_REQ));
+}
+
+static inline void hfi1_trdma_send_complete(struct rvt_qp *qp,
+					    struct rvt_swqe *wqe,
+					    enum ib_wc_status status)
+{
+	trdma_clean_swqe(qp, wqe);
+	hfi1_send_complete(qp, wqe, status);
 }
 
 extern const enum ib_wc_opcode ib_hfi1_wc_opcode[];

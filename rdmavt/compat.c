@@ -58,49 +58,6 @@
 #include "../hfi1/hfi.h"
 #include "compat.h"
 
-void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
-		struct hfi1_msix_entry *hfi1_msix_entry)
-{
-	int ret;
-	int nvec = *msixcnt;
-	struct msix_entry *msix_entry;
-	int i;
-
-	/*
-	 * We can't pass hfi1_msix_entry array to msix_setup
-	 * so use a dummy msix_entry array and copy the allocated
-	 * irq back to the hfi1_msix_entry array.
-	 */
-	msix_entry = kmalloc_array(nvec, sizeof(*msix_entry), GFP_KERNEL);
-	if (!msix_entry) {
-		ret = -ENOMEM;
-		goto do_intx;
-	}
-
-	for (i = 0; i < nvec; i++)
-		msix_entry[i] = hfi1_msix_entry[i].msix;
-
-	ret = pci_enable_msix_range(pcidev, msix_entry, 1, nvec);
-	if (ret < 0)
-		goto free_msix_entry;
-	nvec = ret;
-
-	for (i = 0; i < nvec; i++)
-		hfi1_msix_entry[i].msix = msix_entry[i];
-
-	kfree(msix_entry);
-	*msixcnt = nvec;
-	return;
-
-free_msix_entry:
-	kfree(msix_entry);
-
-do_intx:
-	*msixcnt = 0;
-	hfi1_enable_intx(pcidev);
-}
-EXPORT_SYMBOL(msix_setup);
-
 /**
  * debugfs_use_file_start - mark the beginning of file data access
  * @dentry: the dentry object whose data is being accessed.

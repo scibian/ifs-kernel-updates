@@ -48,7 +48,7 @@
 #include <linux/cdev.h>
 #include <linux/vmalloc.h>
 #include <linux/io.h>
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 #include <linux/sched/mm.h>
 #else
 #include <linux/aio.h>
@@ -96,7 +96,7 @@ MODULE_PARM_DESC(ifs_sel_mode, "Use SELinux for PSM");
  */
 static int hfi1_file_open(struct inode *inode, struct file *fp);
 static int hfi1_file_close(struct inode *inode, struct file *fp);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from);
 #else
 static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
@@ -142,7 +142,7 @@ static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg);
 static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
 static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		       unsigned long arg);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 static int vma_fault(struct vm_fault *vmf);
 #else
 static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
@@ -152,7 +152,7 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 
 static const struct file_operations hfi1_file_ops = {
 	.owner = THIS_MODULE,
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
 	.write_iter = hfi1_write_iter,
 #else
 	.aio_write = hfi1_aio_write,
@@ -350,7 +350,7 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 	return ret;
 }
 
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 {
 	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
@@ -505,7 +505,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		mapio = 1;
 		break;
 	case RCV_HDRQ:
-		memlen = uctxt->rcvhdrq_size;
+		memlen = rcvhdrq_size(uctxt);
 		memvirt = uctxt->rcvhdrq;
 		break;
 	case RCV_EGRBUF: {
@@ -582,7 +582,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		vmf = 1;
 		break;
 	case STATUS:
-		if (flags & (unsigned long)(VM_WRITE | VM_EXEC)) {
+		if (flags & VM_WRITE) {
 			ret = -EPERM;
 			goto done;
 		}
@@ -599,12 +599,12 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 			ret = -EINVAL;
 			goto done;
 		}
-		if ((flags & VM_WRITE) || !uctxt->rcvhdrtail_kvaddr) {
+		memvirt = (void *)hfi1_rcvhdrtail_kvaddr(uctxt);
+		if ((flags & VM_WRITE) || !memvirt) {
 			ret = -EPERM;
 			goto done;
 		}
 		memlen = PAGE_SIZE;
-		memvirt = (void *)uctxt->rcvhdrtail_kvaddr;
 		flags &= ~VM_MAYWRITE;
 		break;
 	case SUBCTXT_UREGS:
@@ -615,7 +615,7 @@ static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 		break;
 	case SUBCTXT_RCV_HDRQ:
 		memaddr = (u64)uctxt->subctxt_rcvhdr_base;
-		memlen = uctxt->rcvhdrq_size * uctxt->subctxt_cnt;
+		memlen = rcvhdrq_size(uctxt) * uctxt->subctxt_cnt;
 		flags |= VM_IO | VM_DONTEXPAND;
 		vmf = 1;
 		break;
@@ -685,7 +685,7 @@ done:
  * Local (non-chip) user memory is not mapped right away but as it is
  * accessed by the user-level code.
  */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 static int vma_fault(struct vm_fault *vmf)
 #else
 static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
@@ -769,6 +769,8 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 	}
 	spin_unlock_irqrestore(&dd->uctxt_lock, flags);
 
+	uctxt->del_pend = 1;
+
 	/*
 	 * Disable receive context and interrupt available, reset all
 	 * RcvCtxtCtrl bits to default values.
@@ -779,7 +781,8 @@ static int hfi1_file_close(struct inode *inode, struct file *fp)
 		     HFI1_RCVCTRL_TAILUPD_DIS |
 		     HFI1_RCVCTRL_ONE_PKT_EGR_DIS |
 		     HFI1_RCVCTRL_NO_RHQ_DROP_DIS |
-		     HFI1_RCVCTRL_NO_EGR_DROP_DIS, uctxt);
+		     HFI1_RCVCTRL_NO_EGR_DROP_DIS |
+		     HFI1_RCVCTRL_URGENT_DIS, uctxt);
 	/* Clear the context's J_KEY */
 	hfi1_clear_ctxt_jkey(dd, uctxt);
 	if (uctxt->security)
@@ -1087,7 +1090,11 @@ static int allocate_ctxt(struct hfi1_filedata *fd, struct hfi1_devdata *dd,
 	 * sub contexts.
 	 * This has to be done here so the rest of the sub-contexts find the
 	 * proper base context.
+	 * NOTE: _set_bit() can be used here because the context creation is
+	 * protected by the mutex (rather than the spin_lock), and will be the
+	 * very first instance of this context.
 	 */
+	__set_bit(0, uctxt->in_use_ctxts);
 	if (uinfo->subctxt_cnt)
 		init_subctxts(uctxt, uinfo);
 	uctxt->userversion = uinfo->userversion;
@@ -1148,7 +1155,7 @@ static int setup_subctxt(struct hfi1_ctxtdata *uctxt)
 		return -ENOMEM;
 
 	/* We can take the size of the RcvHdr Queue from the master */
-	uctxt->subctxt_rcvhdr_base = vmalloc_user(uctxt->rcvhdrq_size *
+	uctxt->subctxt_rcvhdr_base = vmalloc_user(rcvhdrq_size(uctxt) *
 						  num_subctxts);
 	if (!uctxt->subctxt_rcvhdr_base) {
 		ret = -ENOMEM;
@@ -1193,8 +1200,7 @@ static void user_init(struct hfi1_ctxtdata *uctxt)
 	 * don't have to wait to be sure the DMA update has happened
 	 * (chip resets head/tail to 0 on transition to enable).
 	 */
-	if (uctxt->rcvhdrtail_kvaddr)
-		clear_rcvhdrtail(uctxt);
+	clear_rcvhdrtail(uctxt);
 
 	if (uctxt->security)
 		/*
@@ -1205,6 +1211,7 @@ static void user_init(struct hfi1_ctxtdata *uctxt)
 		hfi1_set_ctxt_jkey(uctxt->dd, uctxt, uctxt->jkey);
 
 	rcvctrl_ops = HFI1_RCVCTRL_CTXT_ENB;
+	rcvctrl_ops |= HFI1_RCVCTRL_URGENT_ENB;
 	if (HFI1_CAP_UGET_MASK(uctxt->flags, HDRSUPP))
 		rcvctrl_ops |= HFI1_RCVCTRL_TIDFLOW_ENB;
 	/*
@@ -1264,7 +1271,7 @@ static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	cinfo.send_ctxt = uctxt->sc->hw_context;
 
 	cinfo.egrtids = uctxt->egrbufs.alloced;
-	cinfo.rcvhdrq_cnt = uctxt->rcvhdrq_cnt;
+	cinfo.rcvhdrq_cnt = get_hdrq_cnt(uctxt);
 	cinfo.rcvhdrq_entsize = uctxt->rcvhdrqentsize << 2;
 	cinfo.sdma_ring_size = fd->cq->nentries;
 	cinfo.rcvegr_size = uctxt->egrbufs.rcvtid_size;
@@ -1382,7 +1389,7 @@ static int get_base_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	memset(&binfo, 0, sizeof(binfo));
 	binfo.hw_version = dd->revision;
 	binfo.sw_version = HFI1_KERN_SWVERSION;
-	binfo.bthqp = kdeth_qp;
+	binfo.bthqp = RVT_KDETH_QP_PREFIX;
 	hfi1_cdbg(SEL, "Handing the user the JKey 0x%x", uctxt->jkey);
 	binfo.jkey = uctxt->jkey;
 	/*
@@ -1692,8 +1699,7 @@ static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		 * always resets it's tail register back to 0 on a
 		 * transition from disabled to enabled.
 		 */
-		if (uctxt->rcvhdrtail_kvaddr)
-			clear_rcvhdrtail(uctxt);
+		clear_rcvhdrtail(uctxt);
 		rcvctrl_op = HFI1_RCVCTRL_CTXT_ENB;
 	} else {
 		rcvctrl_op = HFI1_RCVCTRL_CTXT_DIS;

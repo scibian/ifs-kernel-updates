@@ -338,11 +338,12 @@ static inline unsigned mk_qpn(struct rvt_qpn_table *qpt,
  *@rdi:	rvt device info structure
  *@qpt: queue pair number table pointer
  *@port_num: IB port number, 1 based, comes from core
+ *@exclude_prefix: prefix of special queue pair number being allocated
  *
  * Return: The queue pair number
  */
 static int alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
-		     enum ib_qp_type type, u8 port_num, gfp_t gfp)
+		     enum ib_qp_type type, u8 port_num, gfp_t gfp, u8 exclude_prefix)
 {
 	u32 i, offset, max_scan, qpn;
 	struct rvt_qpn_map *map;
@@ -370,7 +371,7 @@ static int alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
 	}
 
 	qpn = qpt->last + qpt->incr;
-	if (qpn >= RVT_QPN_MAX)
+	if (qpn >= RVT_QPN_MAX || (exclude_prefix && (qpn >> 16)))
 		qpn = qpt->incr | ((qpt->last & 1) ^ 1);
 	/* offset carries bit 0 */
 	offset = qpn & RVT_BITS_PER_PAGE_MASK;
@@ -749,6 +750,10 @@ static void rvt_free_qpn(struct rvt_qpn_table *qpt, u32 qpn)
 {
 	struct rvt_qpn_map *map;
 
+	if ((qpn & RVT_AIP_QP_PREFIX_MASK) == RVT_AIP_QP_BASE)
+		qpn &= 0xffff;
+
+
 	map = qpt->map + (qpn & RVT_QPN_MASK) / RVT_BITS_PER_PAGE;
 	if (map->page)
 		clear_bit(qpn & RVT_BITS_PER_PAGE_MASK, map->page);
@@ -781,6 +786,7 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 	struct rvt_dev_info *rdi = ib_to_rvt(ibpd->device);
 	void *priv = NULL;
 	size_t sqsize;
+	u8 exclude_prefix = 0;
 	gfp_t gfp;
 
 	if (!rdi)
@@ -789,10 +795,11 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 	if (init_attr->cap.max_send_sge > rdi->dparms.props.max_sge ||
 	    init_attr->cap.max_send_wr > rdi->dparms.props.max_qp_wr ||
 #if HAVE_IB_QP_CREATE_USE_GFP_NOIO
-	    init_attr->create_flags & ~IB_QP_CREATE_USE_GFP_NOIO)
+	    ((init_attr->create_flags & ~IB_QP_CREATE_USE_GFP_NOIO) &&
 #else
-	    init_attr->create_flags)
+	    (init_attr->create_flags &&
 #endif
+	    init_attr->create_flags != IB_QP_CREATE_NETDEV_USE))
 		return ERR_PTR(-EINVAL);
 
 	/* Check receive queue parameters if no SRQ is specified. */
@@ -940,14 +947,20 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 		if (init_attr->sq_sig_type == IB_SIGNAL_REQ_WR)
 			qp->s_flags = RVT_S_SIGNAL_REQ_WR;
 
+		if (init_attr->create_flags & IB_QP_CREATE_NETDEV_USE)
+			exclude_prefix = RVT_AIP_QP_PREFIX;
+		
 		err = alloc_qpn(rdi, &rdi->qp_dev->qpn_table,
 				init_attr->qp_type,
-				init_attr->port_num, gfp);
+				init_attr->port_num, gfp,
+				exclude_prefix);
 		if (err < 0) {
 			ret = ERR_PTR(err);
 			goto bail_rq_wq;
 		}
 		qp->ibqp.qp_num = err;
+		if (init_attr->create_flags & IB_QP_CREATE_NETDEV_USE)
+			qp->ibqp.qp_num |= RVT_AIP_QP_BASE;
 		qp->port_num = init_attr->port_num;
 		rvt_init_qp(rdi, qp, init_attr->qp_type);
 		if (rdi->driver_f.qp_priv_init) {
@@ -1761,7 +1774,7 @@ static inline int rvt_qp_is_avail(
  */
 static int rvt_post_one_wr(struct rvt_qp *qp,
 			   struct ib_send_wr *wr,
-			   int *call_send)
+			   bool *call_send)
 {
 	struct rvt_swqe *wqe;
 	u32 next;
@@ -1899,7 +1912,7 @@ static int rvt_post_one_wr(struct rvt_qp *qp,
 
 	/* general part of wqe valid - allow for driver checks */
 	if (rdi->driver_f.setup_wqe) {
-		ret = rdi->driver_f.setup_wqe(qp, wqe);
+		ret = rdi->driver_f.setup_wqe(qp, wqe, call_send);
 		if (ret < 0)
 			goto bail_inval_free_ref;
 		if (ret)
@@ -1952,7 +1965,7 @@ int rvt_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 	struct rvt_qp *qp = ibqp_to_rvtqp(ibqp);
 	struct rvt_dev_info *rdi = ib_to_rvt(ibqp->device);
 	unsigned long flags = 0;
-	int call_send;
+	bool call_send;
 	unsigned nreq = 0;
 	int err = 0;
 
@@ -1985,7 +1998,11 @@ int rvt_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 bail:
 	spin_unlock_irqrestore(&qp->s_hlock, flags);
 	if (nreq) {
-		if (call_send)
+		/*
+		 * Only call do_send if there is exactly one packet, and the
+		 * driver said it was ok.
+		 */
+		if (nreq == 1 && call_send)
 			rdi->driver_f.do_send(qp);
 		else
 			rdi->driver_f.schedule_send_no_lock(qp);
@@ -2043,6 +2060,155 @@ int rvt_post_srq_recv(struct ib_srq *ibsrq, struct ib_recv_wr *wr,
 	}
 	return 0;
 }
+
+/*
+ * Validate a RWQE and fill in the SGE state.
+ * Return 1 if OK.
+ */
+static int init_sge(struct rvt_qp *qp, struct rvt_rwqe *wqe)
+{
+	int i, j, ret;
+	struct ib_wc wc;
+	struct rvt_lkey_table *rkt;
+	struct rvt_pd *pd;
+	struct rvt_sge_state *ss;
+	struct rvt_dev_info *rdi = ib_to_rvt(qp->ibqp.device);
+
+	rkt = &rdi->lkey_table;
+	pd = ibpd_to_rvtpd(qp->ibqp.srq ? qp->ibqp.srq->pd : qp->ibqp.pd);
+	ss = &qp->r_sge;
+	ss->sg_list = qp->r_sg_list;
+	qp->r_len = 0;
+	for (i = j = 0; i < wqe->num_sge; i++) {
+		if (wqe->sg_list[i].length == 0)
+			continue;
+		/* Check LKEY */
+		ret = rvt_lkey_ok(rkt, pd, j ? &ss->sg_list[j - 1] : &ss->sge,
+				  NULL, &wqe->sg_list[i],
+				  IB_ACCESS_LOCAL_WRITE);
+		if (unlikely(ret <= 0))
+			goto bad_lkey;
+		qp->r_len += wqe->sg_list[i].length;
+		j++;
+	}
+	ss->num_sge = j;
+	ss->total_len = qp->r_len;
+	return 1;
+
+bad_lkey:
+	while (j) {
+		struct rvt_sge *sge = --j ? &ss->sg_list[j - 1] : &ss->sge;
+
+		rvt_put_mr(sge->mr);
+	}
+	ss->num_sge = 0;
+	memset(&wc, 0, sizeof(wc));
+	wc.wr_id = wqe->wr_id;
+	wc.status = IB_WC_LOC_PROT_ERR;
+	wc.opcode = IB_WC_RECV;
+	wc.qp = &qp->ibqp;
+	/* Signal solicited completion event. */
+	rvt_cq_enter(ibcq_to_rvtcq(qp->ibqp.recv_cq), &wc, 1);
+	return 0;
+}
+
+/**
+ * rvt_get_rwqe - copy the next RWQE into the QP's RWQE
+ * @qp: the QP
+ * @wr_id_only: update qp->r_wr_id only, not qp->r_sge
+ *
+ * Return -1 if there is a local error, 0 if no RWQE is available,
+ * otherwise return 1.
+ *
+ * Can be called from interrupt level.
+ */
+int rvt_get_rwqe(struct rvt_qp *qp, bool wr_id_only)
+{
+	unsigned long flags;
+	struct rvt_rq *rq;
+	struct rvt_rwq *wq;
+	struct rvt_srq *srq;
+	struct rvt_rwqe *wqe;
+	void (*handler)(struct ib_event *, void *);
+	u32 tail;
+	int ret;
+
+	if (qp->ibqp.srq) {
+		srq = ibsrq_to_rvtsrq(qp->ibqp.srq);
+		handler = srq->ibsrq.event_handler;
+		rq = &srq->rq;
+	} else {
+		srq = NULL;
+		handler = NULL;
+		rq = &qp->r_rq;
+	}
+
+	spin_lock_irqsave(&rq->lock, flags);
+	if (!(ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK)) {
+		ret = 0;
+		goto unlock;
+	}
+
+	wq = rq->wq;
+	tail = wq->tail;
+	/* Validate tail before using it since it is user writable. */
+	if (tail >= rq->size)
+		tail = 0;
+	if (unlikely(tail == wq->head)) {
+		ret = 0;
+		goto unlock;
+	}
+	/* Make sure entry is read after head index is read. */
+	smp_rmb();
+	wqe = rvt_get_rwqe_ptr(rq, tail);
+	/*
+	 * Even though we update the tail index in memory, the verbs
+	 * consumer is not supposed to post more entries until a
+	 * completion is generated.
+	 */
+	if (++tail >= rq->size)
+		tail = 0;
+	wq->tail = tail;
+	if (!wr_id_only && !init_sge(qp, wqe)) {
+		ret = -1;
+		goto unlock;
+	}
+	qp->r_wr_id = wqe->wr_id;
+
+	ret = 1;
+	set_bit(RVT_R_WRID_VALID, &qp->r_aflags);
+	if (handler) {
+		u32 n;
+
+		/*
+		 * Validate head pointer value and compute
+		 * the number of remaining WQEs.
+		 */
+		n = wq->head;
+		if (n >= rq->size)
+			n = 0;
+		if (n < tail)
+			n += rq->size - tail;
+		else
+			n -= tail;
+		if (n < srq->limit) {
+			struct ib_event ev;
+
+			srq->limit = 0;
+			spin_unlock_irqrestore(&rq->lock, flags);
+			ev.device = qp->ibqp.device;
+			ev.element.srq = qp->ibqp.srq;
+			ev.event = IB_EVENT_SRQ_LIMIT_REACHED;
+			handler(&ev, srq->ibsrq.srq_context);
+			goto bail;
+		}
+	}
+unlock:
+	spin_unlock_irqrestore(&rq->lock, flags);
+bail:
+	return ret;
+}
+EXPORT_SYMBOL(rvt_get_rwqe);
 
 /**
  * qp_comm_est - handle trap with QP established

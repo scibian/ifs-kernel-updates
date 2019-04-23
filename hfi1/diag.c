@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -86,24 +86,14 @@ static u8 snoop_flags;
  * Extract packet length from LRH header.
  * This is in Dwords so multiply by 4 to get size in bytes
  */
-#define HFI1_GET_PKT_LEN(x)      (((be16_to_cpu((x)->lrh[2]) & 0xFFF)) << 2)
+//#define HFI1_GET_PKT_LEN(x)      (((be16_to_cpu((x)->lrh[2]) & 0xFFF)) << 2)
+#define HFI1_GET_PKT_LEN(x)      (((be16_to_cpu((x)->ibh.lrh[2]) & 0xFFF)) << 2)
+
 
 enum hfi1_filter_status {
 	HFI1_FILTER_HIT,
 	HFI1_FILTER_ERR,
 	HFI1_FILTER_MISS
-};
-
-/* snoop processing functions */
-rhf_rcv_function_ptr snoop_rhf_rcv_functions[8] = {
-	[RHF_RCV_TYPE_EXPECTED] = snoop_recv_handler,
-	[RHF_RCV_TYPE_EAGER]    = snoop_recv_handler,
-	[RHF_RCV_TYPE_IB]       = snoop_recv_handler,
-	[RHF_RCV_TYPE_ERROR]    = snoop_recv_handler,
-	[RHF_RCV_TYPE_BYPASS]   = snoop_recv_handler,
-	[RHF_RCV_TYPE_INVALID5] = process_receive_invalid,
-	[RHF_RCV_TYPE_INVALID6] = process_receive_invalid,
-	[RHF_RCV_TYPE_INVALID7] = process_receive_invalid
 };
 
 /* Snoop packet structure */
@@ -168,7 +158,6 @@ struct hfi1_link_info {
  */
 #define SNOOP_CAPTURE_VERSION 0x1
 
-#define IB_IOCTL_MAGIC          0x1b /* See Documentation/ioctl-number.txt */
 #define HFI1_SNOOP_IOC_MAGIC IB_IOCTL_MAGIC
 #define HFI1_SNOOP_IOC_BASE_SEQ 0x80
 
@@ -229,6 +218,8 @@ enum hfi1_packet_filter_opcodes {
 	FILTER_BY_DIRECTION,
 };
 
+const rhf_rcv_function_ptr snoop_rhf_rcv_functions[];
+
 static const struct file_operations snoop_file_ops = {
 	.owner = THIS_MODULE,
 	.open = hfi1_snoop_open,
@@ -288,9 +279,12 @@ int hfi1_diag_add(struct hfi1_devdata *dd)
 
 	snprintf(name, sizeof(name), "%s_diagpkt", class_name());
 	if (atomic_inc_return(&diagpkt_count) == 1) {
+		kobject_get(&dd->kobj);
 		ret = hfi1_cdev_init(HFI1_DIAGPKT_MINOR, name,
 				     &diagpkt_file_ops, &diagpkt_cdev,
 				     &diagpkt_device, false, &dd->kobj);
+		if (ret)
+			kobject_put(&dd->kobj);
 	}
 
 	return ret;
@@ -315,15 +309,18 @@ static void hfi1_snoop_remove(struct hfi1_devdata *dd)
 
 	spin_lock_irqsave(&dd->hfi1_snoop.snoop_lock, flags);
 	drain_snoop_list(&dd->hfi1_snoop.queue);
-	hfi1_cdev_cleanup(&dd->hfi1_snoop.cdev, &dd->hfi1_snoop.class_dev);
 	spin_unlock_irqrestore(&dd->hfi1_snoop.snoop_lock, flags);
+	hfi1_cdev_cleanup(&dd->hfi1_snoop.cdev, &dd->hfi1_snoop.class_dev);
+	kobject_put(&dd->kobj);
 }
 
 void hfi1_diag_remove(struct hfi1_devdata *dd)
 {
 	hfi1_snoop_remove(dd);
-	if (atomic_dec_and_test(&diagpkt_count))
+	if (atomic_dec_and_test(&diagpkt_count)) {
 		hfi1_cdev_cleanup(&diagpkt_cdev, &diagpkt_device);
+		kobject_put(&dd->kobj);
+	}
 	hfi1_cdev_cleanup(&dd->diag_cdev, &dd->diag_device);
 }
 
@@ -595,6 +592,7 @@ static int hfi1_snoop_add(struct hfi1_devdata *dd, const char *name)
 	INIT_LIST_HEAD(&dd->hfi1_snoop.queue);
 	init_waitqueue_head(&dd->hfi1_snoop.waitq);
 
+	kobject_get(&dd->kobj);
 	ret = hfi1_cdev_init(HFI1_SNOOP_CAPTURE_BASE + dd->unit, name,
 			     &snoop_file_ops,
 			     &dd->hfi1_snoop.cdev, &dd->hfi1_snoop.class_dev,
@@ -604,6 +602,7 @@ static int hfi1_snoop_add(struct hfi1_devdata *dd, const char *name)
 		dd_dev_err(dd, "Couldn't create %s device: %d", name, ret);
 		hfi1_cdev_cleanup(&dd->hfi1_snoop.cdev,
 				  &dd->hfi1_snoop.class_dev);
+		kobject_put(&dd->kobj);
 	}
 
 	return ret;
@@ -643,6 +642,47 @@ static void adjust_integrity_checks(struct hfi1_devdata *dd)
 			hfi1_init_ctxt(sc);
 	}
 	spin_unlock_irqrestore(&dd->sc_lock, sc_flags);
+}
+
+static void hfi1_snoop_save_funcs(struct hfi1_devdata *dd)
+{
+	int i;
+
+	struct hfi1_ctxtdata *rcd;
+
+	for (i = 0; i < dd->num_rcv_contexts; i++) {
+		rcd = hfi1_rcd_get_by_index_safe(dd, i);
+		if (rcd && (i < dd->first_dyn_alloc_ctxt || rcd->is_vnic)) {
+			snoop_dbg("context %u changing from %p to %p\n",
+		  		  i, rcd->rhf_rcv_function_map, snoop_rhf_rcv_functions);
+			rcd->save_rhf_rcv_function_map =
+				rcd->rhf_rcv_function_map;
+			rcd->rhf_rcv_function_map =
+				snoop_rhf_rcv_functions;
+		}
+		hfi1_rcd_put(rcd);
+	}
+}
+
+static void hfi1_snoop_restore_funcs(struct hfi1_devdata *dd)
+{
+	int i;
+	struct hfi1_ctxtdata *rcd;
+
+	for (i = 0; i < dd->num_rcv_contexts; i++) {
+		rcd = hfi1_rcd_get_by_index_safe(dd, i);
+		if (rcd && (i < dd->first_dyn_alloc_ctxt || rcd->is_vnic)) {
+			const rhf_rcv_function_ptr *tmp =
+				rcd->save_rhf_rcv_function_map;
+
+			if (tmp) {
+				snoop_dbg("context %u changing from %p to %p\n",
+					  i, rcd->rhf_rcv_function_map, tmp);
+				rcd->rhf_rcv_function_map =  tmp;
+			}
+		}
+		hfi1_rcd_put(rcd);
+	}
 }
 
 static int hfi1_snoop_open(struct inode *in, struct file *fp)
@@ -721,8 +761,8 @@ static int hfi1_snoop_open(struct inode *in, struct file *fp)
 	 * locking here but all that will happen is on recv a packet will get
 	 * allocated and get stuck on the snoop_lock before getting added to the
 	 * queue. Same goes for send.
-	 */
-	dd->rhf_rcv_function_map = snoop_rhf_rcv_functions;
+	  */
+	hfi1_snoop_save_funcs(dd);
 	dd->process_pio_send = snoop_send_pio_handler;
 	dd->process_dma_send = snoop_send_pio_handler;
 	dd->pio_inline_send = snoop_inline_pio_send;
@@ -777,7 +817,7 @@ static int hfi1_snoop_release(struct inode *in, struct file *fp)
 	 * User is done snooping and capturing, return control to the normal
 	 * handler. Re-enable SDMA handling.
 	 */
-	dd->rhf_rcv_function_map = dd->normal_rhf_rcv_functions;
+	hfi1_snoop_restore_funcs(dd);
 	dd->process_pio_send = hfi1_verbs_send_pio;
 	dd->process_dma_send = hfi1_verbs_send_dma;
 	dd->pio_inline_send = pio_copy;
@@ -1164,8 +1204,8 @@ static long hfi1_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 			struct hfi1_ibport *ibp = &ppd->ibport_data;
 
 			link_info.port_state = value;
-                        link_info.node_guid = get_sguid(ibp,
-                                                        HFI1_PORT_GUID_INDEX);
+			link_info.node_guid = get_sguid(ibp,
+							HFI1_PORT_GUID_INDEX);
 			link_info.link_speed_active =
 						ppd->link_speed_active;
 			link_info.link_width_active =
@@ -1298,11 +1338,40 @@ static inline int hfi1_filter_check(void *val, const char *msg)
 
 static int hfi1_filter_lid(void *ibhdr, void *packet_data, void *value)
 {
+	struct ib_header *hdr;
+	int ret;
+
+	ret = hfi1_filter_check(ibhdr, "header");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(value, "user");
+	if (ret)
+		return ret;
+	hdr = (struct ib_header *)ibhdr;
+
+	if (*((u16 *)value) == be16_to_cpu(hdr->lrh[3])) /* matches slid */
+		return HFI1_FILTER_HIT; /* matched */
+
 	return HFI1_FILTER_MISS; /* Not matched */
 }
 
 static int hfi1_filter_dlid(void *ibhdr, void *packet_data, void *value)
 {
+	struct ib_header *hdr;
+	int ret;
+
+	ret = hfi1_filter_check(ibhdr, "header");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(value, "user");
+	if (ret)
+		return ret;
+
+	hdr = (struct ib_header *)ibhdr;
+
+	if (*((u16 *)value) == be16_to_cpu(hdr->lrh[1]))
+		return HFI1_FILTER_HIT;
+
 	return HFI1_FILTER_MISS;
 }
 
@@ -1310,28 +1379,159 @@ static int hfi1_filter_dlid(void *ibhdr, void *packet_data, void *value)
 static int hfi1_filter_mad_mgmt_class(void *ibhdr, void *packet_data,
 				      void *value)
 {
-	return HFI1_FILTER_MISS;
+	struct ib_header *hdr;
+	struct ib_other_headers *ohdr = NULL;
+	struct ib_smp *smp = NULL;
+	u32 qpn = 0;
+	int ret;
+
+	ret = hfi1_filter_check(ibhdr, "header");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(packet_data, "packet_data");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(value, "user");
+	if (ret)
+		return ret;
+
+	hdr = (struct ib_header *)ibhdr;
+
+	/* Check for GRH */
+	if ((be16_to_cpu(hdr->lrh[0]) & 3) == HFI1_LRH_BTH)
+		ohdr = &hdr->u.oth; /* LRH + BTH + DETH */
+	else
+		ohdr = &hdr->u.l.oth; /* LRH + GRH + BTH + DETH */
+
+	qpn = be32_to_cpu(ohdr->bth[1]) & 0x00FFFFFF;
+	if (qpn <= 1) {
+		smp = (struct ib_smp *)packet_data;
+		if (*((u8 *)value) == smp->mgmt_class)
+			return HFI1_FILTER_HIT;
+		else
+			return HFI1_FILTER_MISS;
+	}
+	return HFI1_FILTER_ERR;
 }
 
 static int hfi1_filter_qp_number(void *ibhdr, void *packet_data, void *value)
 {
+	struct ib_header *hdr;
+	struct ib_other_headers *ohdr = NULL;
+	int ret;
+
+	ret = hfi1_filter_check(ibhdr, "header");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(value, "user");
+	if (ret)
+		return ret;
+
+	hdr = (struct ib_header *)ibhdr;
+
+	/* Check for GRH */
+	if ((be16_to_cpu(hdr->lrh[0]) & 3) == HFI1_LRH_BTH)
+		ohdr = &hdr->u.oth; /* LRH + BTH + DETH */
+	else
+		ohdr = &hdr->u.l.oth; /* LRH + GRH + BTH + DETH */
+	if (*((u32 *)value) == (be32_to_cpu(ohdr->bth[1]) & 0x00FFFFFF))
+		return HFI1_FILTER_HIT;
+
 	return HFI1_FILTER_MISS;
 }
 
 static int hfi1_filter_ibpacket_type(void *ibhdr, void *packet_data,
 				     void *value)
 {
+	u32 lnh = 0;
+	u8 opcode = 0;
+	struct ib_header *hdr;
+	struct ib_other_headers *ohdr = NULL;
+	int ret;
+
+	ret = hfi1_filter_check(ibhdr, "header");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(value, "user");
+	if (ret)
+		return ret;
+
+	hdr = (struct ib_header *)ibhdr;
+
+	lnh = (be16_to_cpu(hdr->lrh[0]) & 3);
+
+	if (lnh == HFI1_LRH_BTH)
+		ohdr = &hdr->u.oth;
+	else if (lnh == HFI1_LRH_GRH)
+		ohdr = &hdr->u.l.oth;
+	else
+		return HFI1_FILTER_ERR;
+
+	opcode = be32_to_cpu(ohdr->bth[0]) >> 24;
+
+	if (*((u8 *)value) == ((opcode >> 5) & 0x7))
+		return HFI1_FILTER_HIT;
+
 	return HFI1_FILTER_MISS;
 }
 
 static int hfi1_filter_ib_service_level(void *ibhdr, void *packet_data,
 					void *value)
 {
+	struct ib_header *hdr;
+	int ret;
+
+	ret = hfi1_filter_check(ibhdr, "header");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(value, "user");
+	if (ret)
+		return ret;
+
+	hdr = (struct ib_header *)ibhdr;
+
+	if ((*((u8 *)value)) == ((be16_to_cpu(hdr->lrh[0]) >> 4) & 0xF))
+		return HFI1_FILTER_HIT;
+
 	return HFI1_FILTER_MISS;
 }
 
 static int hfi1_filter_ib_pkey(void *ibhdr, void *packet_data, void *value)
 {
+	u32 lnh = 0;
+	struct ib_header *hdr;
+	struct ib_other_headers *ohdr = NULL;
+	int ret;
+
+	ret = hfi1_filter_check(ibhdr, "header");
+	if (ret)
+		return ret;
+	ret = hfi1_filter_check(value, "user");
+	if (ret)
+		return ret;
+
+	hdr = (struct ib_header *)ibhdr;
+
+	lnh = (be16_to_cpu(hdr->lrh[0]) & 3);
+	if (lnh == HFI1_LRH_BTH)
+		ohdr = &hdr->u.oth;
+	else if (lnh == HFI1_LRH_GRH)
+		ohdr = &hdr->u.l.oth;
+	else
+		return HFI1_FILTER_ERR;
+
+	/* P_key is 16-bit entity, however top most bit indicates
+	 * type of membership. 0 for limited and 1 for Full.
+	 * Limited members cannot accept information from other
+	 * Limited members, but communication is allowed between
+	 * every other combination of membership.
+	 * Hence we'll omit comparing top-most bit while filtering
+	 */
+
+	if ((*(u16 *)value & 0x7FFF) ==
+		((be32_to_cpu(ohdr->bth[0])) & 0x7FFF))
+		return HFI1_FILTER_HIT;
+
 	return HFI1_FILTER_MISS;
 }
 
@@ -1380,12 +1580,12 @@ static struct snoop_packet *allocate_snoop_packet(u32 hdr_len,
 	return packet;
 }
 
-static inline void *hfi1_get_packet_header(struct hfi1_devdata *dd,
+static inline void *hfi1_get_packet_header(struct hfi1_ctxtdata *rcd,
 					   __le32 *rhf_addr)
 {
 	u32 offset = rhf_hdrq_offset(rhf_to_cpu(rhf_addr));
 
-	return (void *)(rhf_addr - dd->rhf_offset + offset);
+	return (void *)(rhf_addr - rcd->rhf_offset + offset);
 }
 
 /*
@@ -1399,11 +1599,11 @@ static inline void *hfi1_get_packet_header(struct hfi1_devdata *dd,
  * there is no specific support. Bottom line is this routine does now even know
  * what a bypass packet is.
  */
-int snoop_recv_handler(struct hfi1_packet *packet)
+void snoop_recv_handler(struct hfi1_packet *packet)
 {
 	struct hfi1_pportdata *ppd = packet->rcd->ppd;
-	struct hfi1_ib_header *hdr = hfi1_get_packet_header(packet->rcd->dd,
-							    packet->rhf_addr);
+	struct ib_header *hdr = hfi1_get_packet_header(packet->rcd,
+						       packet->rhf_addr);
 	int header_size = (u8 *)packet->rhf_addr - (u8 *)hdr;
 	void *data = packet->ebuf;
 	u32 tlen = packet->tlen;
@@ -1415,6 +1615,9 @@ int snoop_recv_handler(struct hfi1_packet *packet)
 
 	snoop_dbg("PACKET IN: hdr size %d tlen %d data %p", header_size, tlen,
 		  data);
+
+	trace_snoop_capture(ppd->dd, header_size, hdr, tlen - header_size,
+			    data);
 
 	if (!ppd->dd->hfi1_snoop.filter_callback) {
 		snoop_dbg("filter not set");
@@ -1496,7 +1699,7 @@ int snoop_recv_handler(struct hfi1_packet *packet)
 				handle_eflags(packet);
 
 			/* throw the packet on the floor */
-			return RHF_RCV_CONTINUE;
+			return;
 		}
 		break;
 	default:
@@ -1507,8 +1710,12 @@ int snoop_recv_handler(struct hfi1_packet *packet)
 	 * We do not care what type of packet came in here - just pass it off
 	 * to the normal handler.
 	 */
-	return ppd->dd->normal_rhf_rcv_functions[rhf_rcv_type(packet->rhf)]
-			(packet);
+	packet->rcd->save_rhf_rcv_function_map[rhf_rcv_type(packet->rhf)](packet);
+}
+
+void snoop_process_receive_invalid(struct hfi1_packet *packet)
+{
+	pr_alert("Recv Invalid Snoop Packet!\n");
 }
 
 /*
@@ -1575,23 +1782,22 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		md.port = 1;
 		md.dir = PKT_DIR_EGRESS;
 		if (likely(pbc == 0)) {
-			struct verbs_txreq *tx = ps->s_txreq;
-			u8 opcode = get_opcode(&tx->phdr.hdr);
 			u8 sc5 = ((struct hfi1_qp_priv *)qp->priv)->s_sc;
 
-			vl = be16_to_cpu(ps->s_txreq->phdr.hdr.lrh[0]) >> 12;
+			vl = be16_to_cpu(ps->s_txreq->phdr.hdr.ibh.lrh[0]) >> 12;
 			/* set PBC_DC_INFO bit (aka SC[4]) in pbc_flags */
 			md.u.pbc |= (!!(sc5 & 0x10)) << PBC_DC_INFO_SHIFT;
-			/*
-			 * Determine whether to insert the HCRC based on packet
-			 * opcode.
-			 */
-			if ((opcode & IB_OPCODE_TID_RDMA) != IB_OPCODE_TID_RDMA)
-				md.u.pbc |= (u64)PBC_IHCRC_NONE <<
-					PBC_INSERT_HCRC_SHIFT;
 
-			md.u.pbc = create_pbc(ppd, md.u.pbc,
-					      qp->srate_mbps, vl, plen);
+			md.u.pbc = create_pbc(ppd, md.u.pbc, qp->s_srate, vl,
+					      plen);
+
+			/* Update HCRC based on packet opcode */
+			if ((ps->opcode & IB_OPCODE_TID_RDMA) ==
+			    IB_OPCODE_TID_RDMA) {
+				md.u.pbc &= ~PBC_INSERT_HCRC_SMASK;
+				md.u.pbc |= (u64)PBC_IHCRC_LKDETH <<
+					PBC_INSERT_HCRC_SHIFT;
+			}
 		} else {
 			md.u.pbc = 0;
 		}
@@ -1706,7 +1912,7 @@ out:
 }
 
 /*
- * Callers of this must pass a hfi1_ib_header type for the from ptr. Currently
+ * Callers of this must pass a ib_header type for the from ptr. Currently
  * this can be used anywhere, but the intention is for inline ACKs for RC and
  * CCA packets. We don't restrict this usage though.
  */
@@ -1732,7 +1938,7 @@ void snoop_inline_pio_send(struct hfi1_devdata *dd, struct pio_buf *pbuf,
 		ret = HFI1_FILTER_HIT;
 	} else {
 		ret = dd->hfi1_snoop.filter_callback(
-				(struct hfi1_ib_header *)from,
+				(struct ib_header *)from,
 				NULL,
 				dd->hfi1_snoop.filter_value);
 	}
@@ -1787,3 +1993,16 @@ void snoop_inline_pio_send(struct hfi1_devdata *dd, struct pio_buf *pbuf,
 inline_pio_out:
 	pio_copy(dd, pbuf, pbc, from, count);
 }
+
+/* snoop processing functions */
+const rhf_rcv_function_ptr snoop_rhf_rcv_functions[] = {
+	[RHF_RCV_TYPE_EXPECTED] = snoop_recv_handler,
+	[RHF_RCV_TYPE_EAGER] = snoop_recv_handler,
+	[RHF_RCV_TYPE_IB] = snoop_recv_handler,
+	[RHF_RCV_TYPE_ERROR] = snoop_recv_handler,
+	[RHF_RCV_TYPE_BYPASS] = snoop_recv_handler,
+	[RHF_RCV_TYPE_INVALID5] = snoop_process_receive_invalid,
+	[RHF_RCV_TYPE_INVALID6] = snoop_process_receive_invalid,
+	[RHF_RCV_TYPE_INVALID7] = snoop_process_receive_invalid,
+};
+

@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016-2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -114,12 +114,31 @@ static inline struct rvt_ack_entry *find_prev_entry(struct rvt_qp *qp, u32 psn,
 	return e;
 }
 
-void restart_rc(struct rvt_qp *qp, u32 psn, int wait);
+static inline u32 restart_sge(struct rvt_sge_state *ss, struct rvt_swqe *wqe,
+			      u32 psn, u32 pmtu)
+{
+	u32 len;
+
+	len = delta_psn(psn, wqe->psn) * pmtu;
+	ss->sge = wqe->sg_list[0];
+	ss->sg_list = wqe->sg_list + 1;
+	ss->num_sge = wqe->wr.num_sge;
+	ss->total_len = wqe->length;
+	rvt_skip_sge(ss, len, false);
+	return wqe->length - len;
+}
+
+static inline void release_rdma_sge_mr(struct rvt_ack_entry *e)
+{
+	if (e->rdma_sge.mr) {
+		rvt_put_mr(e->rdma_sge.mr);
+		e->rdma_sge.mr = NULL;
+	}
+}
+
 int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 	      struct hfi1_ctxtdata *rcd);
 struct rvt_swqe *do_rc_completion(struct rvt_qp *qp, struct rvt_swqe *wqe,
 				  struct hfi1_ibport *ibp);
-void rdma_seq_err(struct rvt_qp *qp, struct hfi1_ibport *ibp, u32 psn,
-		  struct hfi1_ctxtdata *rcd);
 
 #endif /* HFI1_RC_H */

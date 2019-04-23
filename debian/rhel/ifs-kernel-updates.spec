@@ -6,9 +6,9 @@ Name:           ifs-kernel-updates
 Group:		System Environment/Kernel
 Summary:        Extra kernel modules for IFS
 Version:        %(echo %{kver}|sed -e 's/-/_/g')
-Release:        724
+Release:        1777
 License:        GPLv2
-Source0:        %{name}-3.10.0_514.el7.x86_64.tgz
+Source0:        %{name}-3.10.0_957.el7.x86_64.tgz
 Source1:        %{name}.files
 Source2:        %{name}.conf
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root
@@ -36,7 +36,7 @@ else
 fi
 )
 
-%define modlist  rdmavt hfi1 ib_qib
+%define modlist  rdmavt hfi1 ib_qib ib_ipoib
 %define kmod_moddir %kernel_module_package_moddir
 
 %description
@@ -50,7 +50,7 @@ Group: System Environment/Development
 Development header files for Intel HFI1 driver interface
 
 %prep
-%setup -qn %{name}-3.10.0_514.el7.x86_64
+%setup -qn %{name}-3.10.0_957.el7.x86_64
 for flavor in %flavors_to_build; do
 	for mod in %modlist; do
 		rm -rf "$mod"_$flavor
@@ -90,7 +90,7 @@ for flavor in %flavors_to_build ; do
 	flv=$( [[ $flavor = default ]] || echo ".$flavor" )
 	mkdir -p $RPM_BUILD_ROOT/lib/modules/%kver$flv/%kmod_moddir/%{name}
 	for mod in %modlist; do
-		if [[ "1" == "1" ]]; then
+		if [[ "$KERNEL_MOD_SIGNING_ENABLED" == "1" ]]; then
 			RPM_KMOD_DIR=$RPM_BUILD_ROOT/../../KMODS
 			if [ -d $RPM_KMOD_DIR ]; then
 				install -m 644 -t $RPM_BUILD_ROOT/lib/modules/%kver$flv/%kmod_moddir/%{name} $RPM_KMOD_DIR/"$mod".ko
@@ -105,17 +105,25 @@ for flavor in %flavors_to_build ; do
 done
 (targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi/
  mkdir -p $targetdir
+ rsrcdir=$(pwd)/include/rdma/
  srcdir=$(pwd)/include/rdma/hfi/
  cd %kdir
- sh ./scripts/headers_install.sh $targetdir $srcdir hfi1_user.h)
+ sh ./scripts/headers_install.sh $targetdir $srcdir hfi1_user.h hfi1_ioctl.h
+ targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/
+ sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl.h)
 
 %files devel
 %defattr(-,root,root,-)
 %dir %{_includedir}/uapi/rdma
 %dir %{_includedir}/uapi/rdma/hfi
 %{_includedir}/uapi/rdma/hfi/hfi1_user.h
+%{_includedir}/uapi/rdma/hfi/hfi1_ioctl.h
+%{_includedir}/uapi/rdma/rdma_user_ioctl.h
+
 
 %changelog
+* Thu Nov 09 2017 Dennis Dalessandro <dennis.dalessandro@intel.com>
+- Support latest upstream uAPI header scheme
 * Wed Dec 21 2016 Alex Estrin <alex.estrin@intel.com>
 - Add 'devel' package to supply exported header.
 * Fri Sep 16 2016 Alex Estrin <alex.estrin@intel.com>

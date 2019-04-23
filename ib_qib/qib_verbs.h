@@ -274,11 +274,19 @@ int qib_get_counters(struct qib_pportdata *ppd,
  * Functions provided by qib driver for rdmavt to use
  */
 unsigned qib_free_all_qps(struct rvt_dev_info *rdi);
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp);
+#else
+void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp);
+#endif
 void qib_qp_priv_free(struct rvt_dev_info *rdi, struct rvt_qp *qp);
 void qib_notify_qp_reset(struct rvt_qp *qp);
 int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 		  enum ib_qp_type type, u8 port, gfp_t gfp);
+#else
+		  enum ib_qp_type type, u8 port);
+#endif
 void qib_restart_rc(struct rvt_qp *qp, u32 psn, int wait);
 #ifdef CONFIG_DEBUG_FS
 
@@ -304,9 +312,10 @@ void qib_uc_rcv(struct qib_ibport *ibp, struct ib_header *hdr,
 void qib_rc_rcv(struct qib_ctxtdata *rcd, struct ib_header *hdr,
 		int has_grh, void *data, u32 tlen, struct rvt_qp *qp);
 
-int qib_check_ah(struct ib_device *ibdev, struct ib_ah_attr *ah_attr);
+int qib_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr);
 
-int qib_check_send_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
+int qib_check_send_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe,
+		       bool *call_send);
 
 struct ib_ah *qib_create_qp0_ah(struct qib_ibport *ibp, u16 dlid);
 
@@ -321,15 +330,13 @@ void qib_ud_rcv(struct qib_ibport *ibp, struct ib_header *hdr,
 
 void mr_rcu_callback(struct rcu_head *list);
 
-int qib_get_rwqe(struct rvt_qp *qp, int wr_id_only);
-
 void qib_migrate_qp(struct rvt_qp *qp);
 
 int qib_ruc_check_hdr(struct qib_ibport *ibp, struct ib_header *hdr,
 		      int has_grh, struct rvt_qp *qp, u32 bth0);
 
 u32 qib_make_grh(struct qib_ibport *ibp, struct ib_grh *hdr,
-		 struct ib_global_route *grh, u32 hwords, u32 nwords);
+		 const struct ib_global_route *grh, u32 hwords, u32 nwords);
 
 void qib_make_ruc_header(struct rvt_qp *qp, struct ib_other_headers *ohdr,
 			 u32 bth0, u32 bth2);

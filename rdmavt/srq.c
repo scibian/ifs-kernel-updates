@@ -101,7 +101,10 @@ struct ib_srq *rvt_create_srq(struct ib_pd *ibpd,
 	srq->rq.max_sge = srq_init_attr->attr.max_sge;
 	sz = sizeof(struct ib_sge) * srq->rq.max_sge +
 		sizeof(struct rvt_rwqe);
-	srq->rq.wq = vmalloc_user(sizeof(struct rvt_rwq) + srq->rq.size * sz);
+	srq->rq.wq = udata ?
+		vmalloc_user(sizeof(struct rvt_rwq) + srq->rq.size * sz) :
+		vmalloc_node(sizeof(struct rvt_rwq) + srq->rq.size * sz,
+			     dev->dparms.node);
 	if (!srq->rq.wq) {
 		ret = ERR_PTR(-ENOMEM);
 		goto bail_srq;

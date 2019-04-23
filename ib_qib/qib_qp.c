@@ -126,7 +126,11 @@ static void get_map_page(struct rvt_qpn_table *qpt, struct rvt_qpn_map *map,
  * zero/one for QP type IB_QPT_SMI/IB_QPT_GSI.
  */
 int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 		  enum ib_qp_type type, u8 port, gfp_t gfp)
+#else
+		  enum ib_qp_type type, u8 port)
+#endif
 {
 	u32 i, offset, max_scan, qpn;
 	struct rvt_qpn_map *map;
@@ -135,6 +139,9 @@ int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
 	struct qib_devdata *dd = container_of(verbs_dev, struct qib_devdata,
 					      verbs_dev);
 	u16 qpt_mask = dd->qpn_mask;
+#if !HAVE_IB_QP_CREATE_USE_GFP_NOIO
+	gfp_t gfp = GFP_KERNEL;
+#endif
 
 	if (type == IB_QPT_SMI || type == IB_QPT_GSI) {
 		unsigned n;
@@ -317,9 +324,16 @@ u32 qib_mtu_from_qp(struct rvt_dev_info *rdi, struct rvt_qp *qp, u32 pmtu)
 	return ib_mtu_enum_to_int(pmtu);
 }
 
+#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp)
+#else
+void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
+#endif
 {
 	struct qib_qp_priv *priv;
+#if !HAVE_IB_QP_CREATE_USE_GFP_NOIO
+	gfp_t gfp = GFP_KERNEL;
+#endif
 
 	priv = kzalloc(sizeof(*priv), gfp);
 	if (!priv)
@@ -379,25 +393,22 @@ void qib_flush_qp_waiters(struct rvt_qp *qp)
  * qib_check_send_wqe - validate wr/wqe
  * @qp - The qp
  * @wqe - The built wqe
+ * @call_send - Determine if the send should be posted or scheduled
  *
- * validate wr/wqe.  This is called
- * prior to inserting the wqe into
- * the ring but after the wqe has been
- * setup.
- *
- * Returns 1 to force direct progress, 0 otherwise, -EINVAL on failure
+ * Returns 0 on success, -EINVAL on failure
  */
 int qib_check_send_wqe(struct rvt_qp *qp,
-		       struct rvt_swqe *wqe)
+		       struct rvt_swqe *wqe, bool *call_send)
 {
 	struct rvt_ah *ah;
-	int ret = 0;
 
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_RC:
 	case IB_QPT_UC:
 		if (wqe->length > 0x80000000U)
 			return -EINVAL;
+		if (wqe->length > qp->pmtu)
+			*call_send = false;
 		break;
 	case IB_QPT_SMI:
 	case IB_QPT_GSI:
@@ -406,12 +417,12 @@ int qib_check_send_wqe(struct rvt_qp *qp,
 		if (wqe->length > (1 << ah->log_pmtu))
 			return -EINVAL;
 		/* progress hint */
-		ret = 1;
+		*call_send = true;
 		break;
 	default:
 		break;
 	}
-	return ret;
+	return 0;
 }
 
 #ifdef CONFIG_DEBUG_FS
@@ -452,7 +463,7 @@ void qib_qp_iter_print(struct seq_file *s, struct rvt_qp_iter *iter)
 		   qp->s_last, qp->s_acked, qp->s_cur,
 		   qp->s_tail, qp->s_head, qp->s_size,
 		   qp->remote_qpn,
-		   qp->remote_ah_attr.dlid);
+		   rdma_ah_get_dlid(&qp->remote_ah_attr));
 }
 
 #endif

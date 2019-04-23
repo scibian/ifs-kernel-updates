@@ -1,0 +1,39 @@
+Description: Correct install target statements for Debian
+ The upstream statements for the install target do not work correctly
+ with the Debian kbuild. Add INSTALL_MOD_PATH and correct the
+ INSTALL_MOD_DIR configs.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2019-01-31>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/Makefile
++++ b/Makefile
+@@ -21,6 +21,6 @@
+ 	$(MAKE) -C $(KDIR) M=$$PWD clean
+ 
+ install:
+-	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
++	$(MAKE) INSTALL_MOD_PATH=$(DESTDIR) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
+ 
+ endif
+--- a/hfi1/Makefile
++++ b/hfi1/Makefile
+@@ -35,6 +35,6 @@
+ 	$(MAKE) -C $(KDIR) M=$$PWD clean
+ 
+ install:
+-	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
++	$(MAKE) INSTALL_MOD_PATH=$(DESTDIR) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
+ 
+ endif
+--- a/rdmavt/Makefile
++++ b/rdmavt/Makefile
+@@ -27,6 +27,6 @@
+ 	$(MAKE) -C $(KDIR) M=$$PWD clean
+ 
+ install:
+-	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
++	$(MAKE) INSTALL_MOD_PATH=$(DESTDIR) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
+ 
+ endif

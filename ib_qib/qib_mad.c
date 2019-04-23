@@ -105,7 +105,7 @@ static void qib_send_trap(struct qib_ibport *ibp, void *data, unsigned len)
 		if (ibp->rvp.sm_lid != be16_to_cpu(IB_LID_PERMISSIVE)) {
 			struct ib_ah *ah;
 
-			ah = qib_create_qp0_ah(ibp, ibp->rvp.sm_lid);
+			ah = qib_create_qp0_ah(ibp, (u16)ibp->rvp.sm_lid);
 			if (IS_ERR(ah))
 				ret = PTR_ERR(ah);
 			else {
@@ -496,7 +496,7 @@ static int subn_get_portinfo(struct ib_smp *smp, struct ib_device *ibdev,
 		pip->mkey = ibp->rvp.mkey;
 	pip->gid_prefix = ibp->rvp.gid_prefix;
 	pip->lid = cpu_to_be16(ppd->lid);
-	pip->sm_lid = cpu_to_be16(ibp->rvp.sm_lid);
+	pip->sm_lid = cpu_to_be16((u16)ibp->rvp.sm_lid);
 	pip->cap_mask = cpu_to_be32(ibp->rvp.port_cap_flags);
 	/* pip->diag_code; */
 	pip->mkey_lease_period = cpu_to_be16(ibp->rvp.mkey_lease_period);
@@ -714,9 +714,10 @@ static int subn_set_portinfo(struct ib_smp *smp, struct ib_device *ibdev,
 		spin_lock_irqsave(&ibp->rvp.lock, flags);
 		if (ibp->rvp.sm_ah) {
 			if (smlid != ibp->rvp.sm_lid)
-				ibp->rvp.sm_ah->attr.dlid = smlid;
+				rdma_ah_set_dlid(&ibp->rvp.sm_ah->attr,
+						 smlid);
 			if (msl != ibp->rvp.sm_sl)
-				ibp->rvp.sm_ah->attr.sl = msl;
+				rdma_ah_set_sl(&ibp->rvp.sm_ah->attr, msl);
 		}
 		spin_unlock_irqrestore(&ibp->rvp.lock, flags);
 		if (smlid != ibp->rvp.sm_lid)
@@ -869,8 +870,6 @@ static int subn_set_portinfo(struct ib_smp *smp, struct ib_device *ibdev,
 		event.event = IB_EVENT_CLIENT_REREGISTER;
 		ib_dispatch_event(&event);
 	}
-
-	ret = subn_get_portinfo(smp, ibdev, port);
 
 	/* restore re-reg bit per o14-12.2.1 */
 	pip->clientrereg_resv_subnetto |= clientrereg;
@@ -2497,5 +2496,5 @@ void qib_notify_free_mad_agent(struct rvt_dev_info *rdi, int port_idx)
 		del_timer_sync(&dd->pport[port_idx].cong_stats.timer);
 
 	if (dd->pport[port_idx].ibport_data.smi_ah)
-		ib_destroy_ah(&dd->pport[port_idx].ibport_data.smi_ah->ibah);
+		rdma_destroy_ah(&dd->pport[port_idx].ibport_data.smi_ah->ibah);
 }

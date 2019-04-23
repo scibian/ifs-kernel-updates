@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016 - 2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -54,7 +54,11 @@
 
 struct mmu_rb_handler {
 	struct mmu_notifier mn;
+#if defined(IFS_SLES15) || defined(IFS_SLES12SP4)
 	struct rb_root root;
+#else
+	struct rb_root_cached root;
+#endif
 	void *ops_arg;
 	spinlock_t lock;        /* protect the RB tree */
 	struct mmu_rb_ops *ops;
@@ -67,14 +71,9 @@ struct mmu_rb_handler {
 
 static unsigned long mmu_node_start(struct mmu_rb_node *);
 static unsigned long mmu_node_last(struct mmu_rb_node *);
-static inline void mmu_notifier_page(struct mmu_notifier *, struct mm_struct *,
-				     unsigned long);
-static inline void mmu_notifier_range_start(struct mmu_notifier *,
-					    struct mm_struct *,
-					    unsigned long, unsigned long);
-static void mmu_notifier_mem_invalidate(struct mmu_notifier *,
-					struct mm_struct *,
-					unsigned long, unsigned long);
+static void mmu_notifier_range_start(struct mmu_notifier *,
+				     struct mm_struct *,
+				     unsigned long, unsigned long);
 static struct mmu_rb_node *__mmu_rb_search(struct mmu_rb_handler *,
 					   unsigned long, unsigned long);
 static void do_remove(struct mmu_rb_handler *handler,
@@ -82,7 +81,6 @@ static void do_remove(struct mmu_rb_handler *handler,
 static void handle_remove(struct work_struct *work);
 
 static const struct mmu_notifier_ops mn_opts = {
-	.invalidate_page = mmu_notifier_page,
 	.invalidate_range_start = mmu_notifier_range_start,
 };
 
@@ -110,8 +108,11 @@ int hfi1_mmu_rb_register(void *ops_arg, struct mm_struct *mm,
 	handlr = kmalloc(sizeof(*handlr), GFP_KERNEL);
 	if (!handlr)
 		return -ENOMEM;
-
+#if defined(IFS_SLES15) || defined(IFS_SLES12SP4)
 	handlr->root = RB_ROOT;
+#else
+	handlr->root = RB_ROOT_CACHED;
+#endif
 	handlr->ops = ops;
 	handlr->ops_arg = ops_arg;
 	INIT_HLIST_NODE(&handlr->mn.hlist);
@@ -123,10 +124,13 @@ int hfi1_mmu_rb_register(void *ops_arg, struct mm_struct *mm,
 	INIT_LIST_HEAD(&handlr->lru_list);
 	handlr->wq = wq;
 
-	ret = mmu_notifier_register(&handlr->mn, handlr->mm);
-	if (ret) {
-		kfree(handlr);
-		return ret;
+	/* Some callers don't need the MMU notifier */
+	if (mm) {
+		ret = mmu_notifier_register(&handlr->mn, handlr->mm);
+		if (ret) {
+			kfree(handlr);
+			return ret;
+		}
 	}
 
 	*handler = handlr;
@@ -141,7 +145,8 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	struct list_head del_list;
 
 	/* Unregister first so we don't get any more notifications. */
-	mmu_notifier_unregister(&handler->mn, handler->mm);
+	if (handler->mm)
+		mmu_notifier_unregister(&handler->mn, handler->mm);
 
 	/*
 	 * Make sure the wq delete handler is finished running.  It will not
@@ -152,9 +157,17 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	INIT_LIST_HEAD(&del_list);
 
 	spin_lock_irqsave(&handler->lock, flags);
+#if defined(IFS_SLES15) || defined(IFS_SLES12SP4)
 	while ((node = rb_first(&handler->root))) {
+#else
+	while ((node = rb_first_cached(&handler->root))) {
+#endif
 		rbnode = rb_entry(node, struct mmu_rb_node, node);
+#if defined(IFS_SLES15) || defined(IFS_SLES12SP4)
 		rb_erase(node, &handler->root);
+#else
+		rb_erase_cached(node, &handler->root);
+#endif
 		/* move from LRU list to delete list */
 		list_move(&rbnode->list, &del_list);
 	}
@@ -172,9 +185,8 @@ int hfi1_mmu_rb_insert(struct mmu_rb_handler *handler,
 	unsigned long flags;
 	int ret = 0;
 
+	trace_hfi1_mmu_rb_insert(mnode->addr, mnode->len);
 	spin_lock_irqsave(&handler->lock, flags);
-	hfi1_cdbg(MMU, "Inserting node addr 0x%llx, len %u", mnode->addr,
-		  mnode->len);
 	node = __mmu_rb_search(handler, mnode->addr, mnode->len);
 	if (node) {
 		ret = -EINVAL;
@@ -200,7 +212,7 @@ static struct mmu_rb_node *__mmu_rb_search(struct mmu_rb_handler *handler,
 {
 	struct mmu_rb_node *node = NULL;
 
-	hfi1_cdbg(MMU, "Searching for addr 0x%llx, len %u", addr, len);
+	trace_hfi1_mmu_rb_search(addr, len);
 	if (!handler->ops->filter) {
 		node = __mmu_int_rb_iter_first(&handler->root, addr,
 					       (addr + len) - 1);
@@ -281,8 +293,7 @@ void hfi1_mmu_rb_remove(struct mmu_rb_handler *handler,
 	unsigned long flags;
 
 	/* Validity of handler and node pointers has been checked by caller. */
-	hfi1_cdbg(MMU, "Removing node addr 0x%llx, len %u", node->addr,
-		  node->len);
+	trace_hfi1_mmu_rb_remove(node->addr, node->len);
 	spin_lock_irqsave(&handler->lock, flags);
 	__mmu_int_rb_remove(node, &handler->root);
 	list_del(&node->list); /* remove from LRU list */
@@ -291,27 +302,18 @@ void hfi1_mmu_rb_remove(struct mmu_rb_handler *handler,
 	handler->ops->remove(handler->ops_arg, node);
 }
 
-static inline void mmu_notifier_page(struct mmu_notifier *mn,
-				     struct mm_struct *mm, unsigned long addr)
-{
-	mmu_notifier_mem_invalidate(mn, mm, addr, addr + PAGE_SIZE);
-}
-
-static inline void mmu_notifier_range_start(struct mmu_notifier *mn,
-					    struct mm_struct *mm,
-					    unsigned long start,
-					    unsigned long end)
-{
-	mmu_notifier_mem_invalidate(mn, mm, start, end);
-}
-
-static void mmu_notifier_mem_invalidate(struct mmu_notifier *mn,
-					struct mm_struct *mm,
-					unsigned long start, unsigned long end)
+static void mmu_notifier_range_start(struct mmu_notifier *mn,
+				     struct mm_struct *mm,
+				     unsigned long start,
+				     unsigned long end)
 {
 	struct mmu_rb_handler *handler =
 		container_of(mn, struct mmu_rb_handler, mn);
+#if defined(IFS_SLES15) || defined(IFS_SLES12SP4)
 	struct rb_root *root = &handler->root;
+#else
+	struct rb_root_cached *root = &handler->root;
+#endif
 	struct mmu_rb_node *node, *ptr = NULL;
 	unsigned long flags;
 	bool added = false;
@@ -321,8 +323,7 @@ static void mmu_notifier_mem_invalidate(struct mmu_notifier *mn,
 	     node; node = ptr) {
 		/* Guard against node removal. */
 		ptr = __mmu_int_rb_iter_next(node, start, end - 1);
-		hfi1_cdbg(MMU, "Invalidating node addr 0x%llx, len %u",
-			  node->addr, node->len);
+		trace_hfi1_mmu_mem_invalidate(node->addr, node->len);
 		if (handler->ops->invalidate(handler->ops_arg, node)) {
 			__mmu_int_rb_remove(node, root);
 			/* move from LRU list to delete list */
@@ -373,3 +374,83 @@ static void handle_remove(struct work_struct *work)
 
 	do_remove(handler, &del_list);
 }
+
+#ifdef NVIDIA_GPU_DIRECT
+/**
+ * hfi1_mmu_rb_first_cached() - Return the first node in a red/black tree.
+ * @handler: - A pointer to the root/control structure of a red/black tree.
+ *
+ * This function layers on top of the Linux interval red/black tree
+ * implementation.
+ *
+ * If the tree is NOT empty, then return a pointer to the first node in
+ * that tree.  Otherwise return NULL.
+ *
+ * Return: A pointer to the first node in the tree, or NULL if tree is empty.
+ */
+struct mmu_rb_node *hfi1_mmu_rb_first_cached(struct mmu_rb_handler *handler)
+{
+	struct mmu_rb_node *rbnode = NULL;
+	struct rb_node *node;
+	unsigned long flags;
+
+	spin_lock_irqsave(&handler->lock, flags);
+#if defined(IFS_SLES15) || defined(IFS_SLES12SP4)
+	node = rb_first(&handler->root);
+#else
+	node = rb_first_cached(&handler->root);
+#endif
+	if (node)
+		rbnode = rb_entry(node, struct mmu_rb_node, node);
+	spin_unlock_irqrestore(&handler->lock, flags);
+
+	return rbnode;
+}
+
+/**
+ * hfi1_mmu_rb_search_addr() - Search tree for entry with matching start addr
+ * @handler: - A pointer to the root/control structure of a red/black tree.
+ * @addr: - The starting buffer address to search for in the tree.
+ * @len: - The length of the buffer to search for in the tree.
+ *
+ * This function layers on top of the Linux interval red/black tree
+ * implementation.
+ *
+ * It searches r/b tree indicated by the handler argument, trying to find a
+ * node that matches the "addr" starting point. If a node is found, then
+ * return a pointer to that node.
+ *
+ * Return: A pointer to a tree node, if one is found.  Otherwise return NULL.
+ */
+struct mmu_rb_node *hfi1_mmu_rb_search_addr(struct mmu_rb_handler *handler,
+					    unsigned long addr,
+					    unsigned long len)
+{
+	struct mmu_rb_node *ret_node = NULL;
+	unsigned long flags;
+
+	spin_lock_irqsave(&handler->lock, flags);
+	ret_node = __mmu_rb_search(handler, addr, len);
+	spin_unlock_irqrestore(&handler->lock, flags);
+
+	return ret_node;
+}
+
+/*
+ * This API may be used to invalidate cached page pinned buffers that are in the
+ * virutal address range start to (end - 1) when the mapping becomes invalid.
+ *
+ * This API is intended to be invoked from functions that do not refer to
+ * struct mmu_rb_handler or struct mmu_notifier but have a pointer to the
+ * root of the RB tree that stores the page cache.
+ * For example, this API can be used in case of buffers pinned to GPU memory
+ * pages. When the mapping becomes invalid, a callback function registered
+ * with the NVIDIA driver will be invoked. This callback does not get a
+ * reference to struct mmu_notifier.
+ */
+void hfi1_gpu_cache_invalidate(struct mmu_rb_handler *handler,
+			       unsigned long start, unsigned long end)
+{
+	mmu_notifier_range_start(&handler->mn, NULL, start, end);
+}
+#endif /* NVIDIA_GPU_DIRECT */

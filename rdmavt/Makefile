@@ -7,12 +7,12 @@
 ifneq ($(KERNELRELEASE),)
 #kbuild part of makefile
 
-NOSTDINC_FLAGS += -I${M}/include
+NOSTDINC_FLAGS += -I${M}/include -I${M}/compat
 
 obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
 
-rdmavt-y := vt.o ah.o cq.o dma.o mad.o mcast.o mmap.o mr.o pd.o qp.o srq.o \
-	trace.o rc.o
+rdmavt-y := vt.o ah.o cq.o mad.o mcast.o mmap.o mr.o pd.o qp.o srq.o \
+	 trace.o rc.o compat_common.o compat.o
 
 CFLAGS_trace.o = -I$(src)
 
@@ -30,4 +30,3 @@ install:
 	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
 
 endif
-

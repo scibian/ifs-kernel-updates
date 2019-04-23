@@ -1,18 +1,16 @@
 #!/usr/bin/make -f
-#
 
 #export DH_VERBOSE=1
 
 export CFLAGS=
 
-# used by debian/bin/gen-compat-config
-export CONFIG_OPTS=CONFIG_COMPAT=y \
+export CONFIG_OPTS= \
 	CONFIG_INFINIBAND_HFI1=m \
 	CONFIG_HFI1_VERBS_31BIT_PSN=y \
 	CONFIG_INFINIBAND_RDMAVT=m \
-	CONFIG_INFINIBAND_SRPT=m \
 	CONFIG_INFINIBAND_IPOIB=m \
-	CONFIG_INFINIBAND_IPOIB_CM=y
+	CONFIG_INFINIBAND_IPOIB_CM=y \
+	CONFIG_INFINIBAND_IPOIB_DEBUG=y
 
 PREP_FILES=debian/control \
 	debian/kmod-ifs-kernel-updates-$(KVER).lintian-overrides \
@@ -56,18 +54,23 @@ override_dh_auto_configure:
 .PHONY: override_dh_auto_clean
 override_dh_auto_clean:
 	rm -f ifs-kernel-updates-conf.h
-	rm -f debian/bin/unifdef
 	dh_auto_clean $@
 
 .PHONY: override_dh_auto_build
 override_dh_auto_build:
-	cd debian/bin && gcc unifdef.c -o unifdef
 	$(MAKE) -j$(MJOBS) $(CONFIG_OPTS) M=$$PWD V=1
 
 .PHONY: override_dh_auto_install
 override_dh_auto_install:
 	dh_auto_install $@
-	install -m 0755 -d debian/tmp/usr/include/uapi/rdma/hfi
-	./debian/bin/headers_install debian/tmp/usr/include/uapi/rdma/hfi $(CURDIR) include/rdma/hfi/hfi1_user.h
-	chmod 0644 debian/tmp/usr/include/uapi/rdma/hfi/hfi1_user.h
+	install -m 0755 -d debian/tmp/usr/include/uapi/rdma/hfi/
+	./debian/bin/headers_install debian/tmp/usr/include/uapi/rdma/hfi/ \
+		$(CURDIR)/include/rdma/hfi \
+		hfi1_user.h \
+		hfi1_ioctl.h
+	chmod 0644 debian/tmp/usr/include/uapi/rdma/hfi/*.h
+	./debian/bin/headers_install debian/tmp/usr/include/uapi/rdma/ \
+		$(CURDIR)/include/rdma \
+		rdma_user_ioctl.h
+	chmod 0644 debian/tmp/usr/include/uapi/rdma/*.h
 

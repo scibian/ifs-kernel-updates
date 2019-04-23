@@ -88,12 +88,6 @@ struct rvt_mregion {
 	struct rvt_segarray *map[0];    /* the segments */
 };
 
-struct rvt_mr {
-	struct ib_mr ibmr;
-	struct ib_umem *umem;
-	struct rvt_mregion mr;  /* must be last */
-};
-
 #define RVT_MAX_LKEY_TABLE_BITS 23
 
 struct rvt_lkey_table {
@@ -190,8 +184,8 @@ static inline void rvt_skip_sge(struct rvt_sge_state *ss, u32 length,
 
 	while (length) {
 		u32 len = rvt_get_sge_length(sge, length);
-		WARN_ON_ONCE(len == 0);
 
+		WARN_ON_ONCE(len == 0);
 		rvt_update_sge(ss, len, release);
 		length -= len;
 	}

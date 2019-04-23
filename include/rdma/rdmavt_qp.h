@@ -2,7 +2,7 @@
 #define DEF_RDMAVT_INCQP_H
 
 /*
- * Copyright(c) 2016, 2017 Intel Corporation.
+ * Copyright(c) 2016 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -68,6 +68,33 @@
 #define RVT_R_COMM_EST  0x10
 
 /*
+ * If a packet's QP[23:16] bits match this value, then it is
+ * a PSM packet and the hardware will expect a KDETH header
+ * following the BTH.
+ */
+#define RVT_KDETH_QP_PREFIX       0x80
+#define RVT_KDETH_QP_SUFFIX       0xffff
+#define RVT_KDETH_QP_PREFIX_MASK  0x00ff0000
+#define RVT_KDETH_QP_PREFIX_SHIFT 16
+#define RVT_KDETH_QP_BASE         (u32)(RVT_KDETH_QP_PREFIX << \
+					RVT_KDETH_QP_PREFIX_SHIFT)
+#define RVT_KDETH_QP_MAX          (u32)(RVT_KDETH_QP_BASE + RVT_KDETH_QP_SUFFIX)
+
+/*
+ * If a packet's LNH == BTH and DEST QPN[23:16] in the BTH match this
+ * prefix value, then it is an AIP packet with a DETH containing the entropy
+ * value in byte 4 following the BTH.
+ */
+#define RVT_AIP_QP_PREFIX       0x81
+#define RVT_AIP_QP_SUFFIX       0xffff
+#define RVT_AIP_QP_PREFIX_MASK  0x00ff0000
+#define RVT_AIP_QP_PREFIX_SHIFT 16
+#define RVT_AIP_QP_BASE         (u32)(RVT_AIP_QP_PREFIX << \
+				      RVT_AIP_QP_PREFIX_SHIFT)
+#define RVT_AIP_QP_MAX          (u32)(RVT_AIP_QP_BASE + RVT_AIP_QP_SUFFIX)
+#define RVT_AIP_ENTROPY_SHIFT   24
+
+/*
  * Bit definitions for s_flags.
  *
  * RVT_S_SIGNAL_REQ_WR - set if QP send WRs contain completion signaled
@@ -91,8 +118,7 @@
  * RVT_S_WAIT_ACK - waiting for an ACK packet before sending more requests
  * RVT_S_SEND_ONE - send one packet, request ACK, then wait for ACK
  * RVT_S_ECN - a BECN was queued to the send engine
- * RVT_S_WAIT_TID_SPACE - a QP is waiting for TID resource
- * RVT_S_WAIT_TID_INTERLCK - a QP is waiting on TID RDMA interlock completion
+ * RVT_S_MAX_BIT_MASK - The max bit that can be used by rdmavt
  */
 #define RVT_S_SIGNAL_REQ_WR	0x0001
 #define RVT_S_BUSY		0x0002
@@ -113,19 +139,19 @@
 #define RVT_S_SEND_ONE		0x10000
 #define RVT_S_UNLIMITED_CREDIT	0x20000
 #define RVT_S_ECN		0x40000
-#define RVT_S_WAIT_TID_RESP     0x80000
-#define RVT_S_WAIT_TID_SPACE	0x100000
+#define RVT_S_MAX_BIT_MASK	0x800000
 
 /*
- * Drivers should use s_flags starting with bit 31
+ * Drivers should use s_flags starting with bit 31 down to the bit next to
+ * RVT_S_MAX_BIT_MASK
  */
 
 /*
  * Wait flags that would prevent any packet type from being sent.
  */
 #define RVT_S_ANY_WAIT_IO \
-	(RVT_S_WAIT_PIO | RVT_S_WAIT_TX | RVT_S_WAIT_DMA_DESC | \
-	 RVT_S_WAIT_KMEM)
+	(RVT_S_WAIT_PIO | RVT_S_WAIT_TX | \
+	 RVT_S_WAIT_DMA_DESC | RVT_S_WAIT_KMEM)
 
 /*
  * Wait flags that would prevent send work requests from making progress.
@@ -247,6 +273,7 @@ struct rvt_ack_entry {
 #define RVT_OPERATION_ATOMIC_SGE  0x00000004
 #define RVT_OPERATION_LOCAL       0x00000008
 #define RVT_OPERATION_USE_RESERVE 0x00000010
+#define RVT_OPERATION_IGN_RNR_CNT 0x00000020
 
 #define RVT_OPERATION_MAX (IB_WR_RESERVED10 + 1)
 
@@ -276,8 +303,8 @@ struct rvt_qp {
 	struct ib_qp ibqp;
 	void *priv; /* Driver private data */
 	/* read mostly fields above and below */
-	struct ib_ah_attr remote_ah_attr;
-	struct ib_ah_attr alt_ah_attr;
+	struct rdma_ah_attr remote_ah_attr;
+	struct rdma_ah_attr alt_ah_attr;
 	struct rvt_qp __rcu *next;           /* link list for QPN hash table */
 	struct rvt_swqe *s_wq;  /* send work queue */
 	struct rvt_mmap_info *ip;
@@ -289,7 +316,6 @@ struct rvt_qp {
 	u32 remote_qpn;
 	u32 qkey;               /* QKEY for this QP (for UD or RD) */
 	u32 s_size;             /* send work queue size */
-	u32 s_ahgpsn;           /* set to the psn in the copy of the header */
 
 	u16 pmtu;		/* decoded from path_mtu */
 	u8 log_pmtu;		/* shift for pmtu */
@@ -351,7 +377,6 @@ struct rvt_qp {
 	struct rvt_swqe *s_wqe;
 	struct rvt_sge_state s_sge;     /* current send request data */
 	struct rvt_mregion *s_rdma_mr;
-	u32 s_cur_size;         /* size of send packet in bytes */
 	u32 s_len;              /* total length of s_sge */
 	u32 s_rdma_read_len;    /* total length of s_rdma_read_sge */
 	u32 s_last_psn;         /* last response PSN processed */
@@ -365,8 +390,10 @@ struct rvt_qp {
 	u32 s_acked;            /* last un-ACK'ed entry */
 	u32 s_last;             /* last completed entry */
 	u32 s_lsn;              /* limit sequence number (credit) */
-	u16 s_hdrwords;         /* size of s_hdr in 32 bit words */
+	u32 s_ahgpsn;           /* set to the psn in the copy of the header */
+	u16 s_cur_size;         /* size of send packet in bytes */
 	u16 s_rdma_ack_cnt;
+	u8 s_hdrwords;         /* size of s_hdr in 32 bit words */
 	s8 s_ahgidx;
 	u8 s_state;             /* opcode of last packet sent */
 	u8 s_ack_state;         /* opcode of packet to ACK */
@@ -672,6 +699,7 @@ static inline unsigned long rvt_timeout_to_jiffies(u8 timeout)
 extern const int  ib_rvt_state_ops[];
 
 struct rvt_dev_info;
+int rvt_get_rwqe(struct rvt_qp *qp, bool wr_id_only);
 void rvt_comm_est(struct rvt_qp *qp);
 int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err);
 void rvt_rc_error(struct rvt_qp *qp, enum ib_wc_status err);

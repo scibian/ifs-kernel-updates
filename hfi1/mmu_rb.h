@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016 - 2017 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -84,5 +84,15 @@ void hfi1_mmu_rb_remove(struct mmu_rb_handler *handler,
 bool hfi1_mmu_rb_remove_unless_exact(struct mmu_rb_handler *handler,
 				     unsigned long addr, unsigned long len,
 				     struct mmu_rb_node **rb_node);
+
+
+#ifdef NVIDIA_GPU_DIRECT
+struct mmu_rb_node *hfi1_mmu_rb_first_cached(struct mmu_rb_handler *handler);
+struct mmu_rb_node *hfi1_mmu_rb_search_addr(struct mmu_rb_handler *handler,
+					    unsigned long addr,
+					    unsigned long len);
+void hfi1_gpu_cache_invalidate(struct mmu_rb_handler *handler,
+			       unsigned long start, unsigned long end);
+#endif /* NVIDIA_GPU_DIRECT */
 
 #endif /* _HFI1_MMU_RB_H */

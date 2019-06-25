@@ -1,0 +1,76 @@
+Description: Avoid flushing the workqueue from worker context 
+ From linux 4eae374:
+ .
+ The error flow of ipoib_ib_dev_open() invokes ipoib_ib_dev_stop() with
+ workqueue flushing enabled, which deadlocks if the open procedure
+ itself was called by a worker thread.
+ .
+ Fix this by adding a flush enabled flag to ipoib_ib_dev_open() and set
+ it accordingly from the locations where such a call is made.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Erez Shitrit <erezsh@mellanox.com>
+Origin: https://github.com/torvalds/linux/commit/4eae374845affc3ebf8ccfc38d554a86adc95003
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -473,7 +473,7 @@
+ void ipoib_pkey_event(struct work_struct *work);
+ void ipoib_ib_dev_cleanup(struct net_device *dev);
+ 
+-int ipoib_ib_dev_open(struct net_device *dev);
++int ipoib_ib_dev_open(struct net_device *dev, int flush);
+ int ipoib_ib_dev_up(struct net_device *dev);
+ int ipoib_ib_dev_down(struct net_device *dev, int flush);
+ int ipoib_ib_dev_stop(struct net_device *dev, int flush);
+--- a/ib_ipoib/ipoib_ib.c
++++ b/ib_ipoib/ipoib_ib.c
+@@ -664,7 +664,7 @@
+ 	drain_tx_cq((struct net_device *)ctx);
+ }
+ 
+-int ipoib_ib_dev_open(struct net_device *dev)
++int ipoib_ib_dev_open(struct net_device *dev, int flush)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	int ret;
+@@ -705,7 +705,7 @@
+ dev_stop:
+ 	if (!test_and_set_bit(IPOIB_FLAG_INITIALIZED, &priv->flags))
+ 		napi_enable(&priv->napi);
+-	ipoib_ib_dev_stop(dev, 1);
++	ipoib_ib_dev_stop(dev, flush);
+ 	return -1;
+ }
+ 
+@@ -916,7 +916,7 @@
+ 		    (unsigned long) dev);
+ 
+ 	if (dev->flags & IFF_UP) {
+-		if (ipoib_ib_dev_open(dev)) {
++		if (ipoib_ib_dev_open(dev, 1)) {
+ 			ipoib_transport_dev_cleanup(dev);
+ 			return -ENODEV;
+ 		}
+@@ -1042,7 +1042,7 @@
+ 
+ 	if (level == IPOIB_FLUSH_HEAVY) {
+ 		ipoib_ib_dev_stop(dev, 0);
+-		ipoib_ib_dev_open(dev);
++		ipoib_ib_dev_open(dev, 0);
+ 	}
+ 
+ 	/*
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -141,7 +141,7 @@
+ 	if (!test_bit(IPOIB_PKEY_ASSIGNED, &priv->flags))
+ 		return 0;
+ 
+-	if (ipoib_ib_dev_open(dev))
++	if (ipoib_ib_dev_open(dev, 1))
+ 		goto err_disable;
+ 
+ 	if (ipoib_ib_dev_up(dev))

@@ -1,0 +1,50 @@
+Description: Use RCU synchronization in __idr_get_uobj
+ Use RCU synchronization in __idr_get_uobj instead of spinlock.
+ This was specified in RHEL 7.2 IFS.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2018-06-04>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/ib_uverbs/uverbs_cmd.c
++++ b/ib_uverbs/uverbs_cmd.c
+@@ -61,9 +61,11 @@
+  * The ib_uobject locking scheme is as follows:
+  *
+  * - ib_uverbs_idr_lock protects the uverbs idrs themselves, so it
+- *   needs to be held during all idr operations.  When an object is
++ *   needs to be held during all idr write operations.  When an object is
+  *   looked up, a reference must be taken on the object's kref before
+- *   dropping this lock.
++ *   dropping this lock.  For read operations, the rcu_read_lock()
++ *   and rcu_write_lock() but similarly the kref reference is grabbed
++ *   before the rcu_read_unlock().
+  *
+  * - Each object also has an rwsem.  This rwsem must be held for
+  *   reading while an operation that uses the object is performed.
+@@ -95,6 +97,7 @@
+ 
+ static void release_uobj(struct kref *kref)
+ {
++	synchronize_rcu();
+ 	kfree(container_of(kref, struct ib_uobject, ref));
+ }
+ 
+@@ -144,7 +147,7 @@
+ {
+ 	struct ib_uobject *uobj;
+ 
+-	spin_lock(&ib_uverbs_idr_lock);
++	rcu_read_lock();
+ 	uobj = idr_find(idr, id);
+ 	if (uobj) {
+ 		if (uobj->context == context)
+@@ -152,7 +155,7 @@
+ 		else
+ 			uobj = NULL;
+ 	}
+-	spin_unlock(&ib_uverbs_idr_lock);
++	rcu_read_unlock();
+ 
+ 	return uobj;
+ }

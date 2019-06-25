@@ -1,0 +1,48 @@
+## Upgrading the upstream source for ifs-kernel-updates
+
+Obtain the SRPM for ifs-kernel-updates and install it:
+
+  rpm -i ifs-kernel-updates-VERSION.src.rpm
+
+This will extract the SRPM contents to:
+
+  $HOME/rpmbuild/SPEC - contains ifs-kernel-updates.spec
+  $HOME/rpmbuild/SOURCES - contains the source tarball and config files
+
+Look at ifs-kernel-updates.spec for the version and release information. The 
+upstream version to use with debian is VERSION-RELEASE, with underscores
+converted to dashes.
+
+For example, if version is 3.10.0_693 and release is 1514, the upstream 
+version would be 3.10.0-693-1514.
+
+The upstream source is upgraded via the gbp tool. The repository's upstream
+and pristine-tar branches need to be tracked locally.
+
+  $ git checkout pristine-tar
+  $ git checkout upstream
+  $ git checkout master   # or the branch to merge into
+
+Next, clean the working directory and use gbp to import the upstream code:
+
+  $ git clean -xfd .
+  $ git checkout .
+  $ gbp import-orig ~/rpmbuild/SOURCES/ifs-kernel-updates-VERSION.el7.x86_64.tgz
+
+If the branch to merge into is not master, add the flag --debian-branch= with 
+the branch to merge into.
+
+When prompted by gbp for the upstream version, enter the upstream version that
+was determined earlier in this process.
+
+After the merge, copy the following to debian/rhel and commit to git:
+
+  $HOME/rpmbuild/SPEC/ifs-kernel-updates.spec
+  $HOME/rpmbuild/SPEC/*.conf
+
+Once everything is merged and committed, execute the following from the 
+development branch:
+
+  $ git push
+  $ git push --tags
+

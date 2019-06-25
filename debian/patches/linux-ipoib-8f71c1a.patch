@@ -1,0 +1,25 @@
+Description: IPoIB/CM: Fix indentation level
+ From linux 8f71c1a:
+ .
+ See also patch "IPoIB/cm: Add connected mode support for devices
+ without SRQs" (commit ID 68e995a29572). Detected by smatch.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Bart Van Assche <bart.vanassche@sandisk.com>
+Origin: https://github.com/torvalds/linux/commit/8f71c1a27b84948720be17fffba71a67a1f0942d#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/ib_ipoib/ipoib_cm.c
++++ b/ib_ipoib/ipoib_cm.c
+@@ -386,8 +386,8 @@
+ 					   rx->rx_ring[i].mapping,
+ 					   GFP_KERNEL)) {
+ 			ipoib_warn(priv, "failed to allocate receive buffer %d\n", i);
+-				ret = -ENOMEM;
+-				goto err_count;
++			ret = -ENOMEM;
++			goto err_count;
+ 		}
+ 		ret = ipoib_cm_post_receive_nonsrq(dev, rx, &t->wr, t->sge, i);
+ 		if (ret) {

@@ -1,0 +1,38 @@
+Description: free dev_list if not added
+ From 8e37ab6:
+ .
+ In ipoib_add_one(), free the allocated dev_list if it was not added
+ to priv->list.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Michael Wang <yun.wang@profitbricks.com>
+Origin: https://github.com/torvalds/linux/commit/8e37ab68fe4d9ee47f2d7c5f45e04216ff68b2d7#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -1712,6 +1712,7 @@
+ 	struct net_device *dev;
+ 	struct ipoib_dev_priv *priv;
+ 	int s, e, p;
++	int count = 0;
+ 
+ 	if (rdma_node_get_transport(device->node_type) != RDMA_TRANSPORT_IB)
+ 		return;
+@@ -1737,9 +1738,15 @@
+ 		if (!IS_ERR(dev)) {
+ 			priv = netdev_priv(dev);
+ 			list_add_tail(&priv->list, dev_list);
++			count++;
+ 		}
+ 	}
+ 
++	if (!count) {
++		kfree(dev_list);
++		return;
++	}
++
+ 	ib_set_client_data(device, &ipoib_client, dev_list);
+ }
+ 

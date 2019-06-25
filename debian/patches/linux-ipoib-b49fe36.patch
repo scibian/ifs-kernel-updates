@@ -1,0 +1,46 @@
+Description: validate struct ipoib_cb size
+ From linux b49fe36:
+ .
+ To catch future errors sooner.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Eric Dumazet <edumazet@google.com>
+Origin: https://github.com/torvalds/linux/commit/b49fe36208b45f76dfbcfcd3afd952a33fa9f5ce#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -132,6 +132,12 @@
+ 	u8			hwaddr[INFINIBAND_ALEN];
+ };
+ 
++static inline struct ipoib_cb *ipoib_skb_cb(const struct sk_buff *skb)
++{
++	BUILD_BUG_ON(sizeof(skb->cb) < sizeof(struct ipoib_cb));
++	return (struct ipoib_cb *)skb->cb;
++}
++
+ /* Used for all multicast joins (broadcast, IPv4 mcast and IPv6 mcast) */
+ struct ipoib_mcast {
+ 	struct ib_sa_mcmember_rec mcmember;
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -758,7 +758,7 @@
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	struct ipoib_neigh *neigh;
+-	struct ipoib_cb *cb = (struct ipoib_cb *) skb->cb;
++	struct ipoib_cb *cb = ipoib_skb_cb(skb);
+ 	struct ipoib_header *header;
+ 	unsigned long flags;
+ 
+@@ -856,7 +856,7 @@
+ 			     const void *daddr, const void *saddr, unsigned len)
+ {
+ 	struct ipoib_header *header;
+-	struct ipoib_cb *cb = (struct ipoib_cb *) skb->cb;
++	struct ipoib_cb *cb = ipoib_skb_cb(skb);
+ 
+ 	header = (struct ipoib_header *) skb_push(skb, sizeof *header);
+ 

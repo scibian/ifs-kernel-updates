@@ -1,0 +1,85 @@
+Description: Expire sendonly multicast joins
+ From linux bd99b2e:
+ .
+ On neighbor expiration, check to see if the neighbor was actually a
+ sendonly multicast join, and if so, leave the multicast group as we
+ expire the neighbor.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Author: Christoph Lameter <cl@linux.com>
+Origin: https://github.com/torvalds/linux/commit/bd99b2e05c4df2a428e5c9dd338289089d0e26df#diff-354653dff7ec9ddd6ac73f85f2956316
+Forwarded: not-needed
+Last-Update: <2017-12-14>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -551,6 +551,8 @@
+ 
+ int ipoib_mcast_attach(struct net_device *dev, u16 mlid,
+ 		       union ib_gid *mgid, int set_qkey);
++int ipoib_mcast_leave(struct net_device *dev, struct ipoib_mcast *mcast);
++struct ipoib_mcast *__ipoib_mcast_find(struct net_device *dev, void *mgid);
+ 
+ int ipoib_init_qp(struct net_device *dev);
+ int ipoib_transport_dev_init(struct net_device *dev, struct ib_device *ca);
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -955,6 +955,9 @@
+ 	unsigned long dt;
+ 	unsigned long flags;
+ 	int i;
++	LIST_HEAD(remove_list);
++	struct ipoib_mcast *mcast, *tmcast;
++	struct net_device *dev = priv->dev;
+ 
+ 	if (test_bit(IPOIB_STOP_NEIGH_GC, &priv->flags))
+ 		return;
+@@ -982,6 +985,19 @@
+ 							  lockdep_is_held(&priv->lock))) != NULL) {
+ 			/* was the neigh idle for two GC periods */
+ 			if (time_after(neigh_obsolete, neigh->alive)) {
++				u8 *mgid = neigh->daddr + 4;
++
++				/* Is this multicast ? */
++				if (*mgid == 0xff) {
++					mcast = __ipoib_mcast_find(dev, mgid);
++
++					if (mcast && test_bit(IPOIB_MCAST_FLAG_SENDONLY, &mcast->flags)) {
++						list_del(&mcast->list);
++						rb_erase(&mcast->rb_node, &priv->multicast_tree);
++						list_add_tail(&mcast->list, &remove_list);
++					}
++				}
++
+ 				rcu_assign_pointer(*np,
+ 						   rcu_dereference_protected(neigh->hnext,
+ 									     lockdep_is_held(&priv->lock)));
+@@ -997,6 +1013,8 @@
+ 
+ out_unlock:
+ 	spin_unlock_irqrestore(&priv->lock, flags);
++	list_for_each_entry_safe(mcast, tmcast, &remove_list, list)
++		ipoib_mcast_leave(dev, mcast);
+ }
+ 
+ static void ipoib_reap_neigh(struct work_struct *work)
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -153,7 +153,7 @@
+ 	return mcast;
+ }
+ 
+-static struct ipoib_mcast *__ipoib_mcast_find(struct net_device *dev, void *mgid)
++struct ipoib_mcast *__ipoib_mcast_find(struct net_device *dev, void *mgid)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	struct rb_node *n = priv->multicast_tree.rb_node;
+@@ -678,7 +678,7 @@
+ 	return 0;
+ }
+ 
+-static int ipoib_mcast_leave(struct net_device *dev, struct ipoib_mcast *mcast)
++int ipoib_mcast_leave(struct net_device *dev, struct ipoib_mcast *mcast)
+ {
+ 	struct ipoib_dev_priv *priv = netdev_priv(dev);
+ 	int ret = 0;

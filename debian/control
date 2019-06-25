@@ -1,0 +1,32 @@
+Source: ifs-kernel-updates
+Maintainer: Brian T. Smith <bsmith@systemfabricworks.com>
+Section: kernel
+Priority: extra
+Standards-Version: 3.9.6
+Homepage: http://www.intel.com
+Build-Depends: debhelper (>= 9),
+               linux-headers-3.16.0-10-amd64,
+               unifdef,
+
+Package: ifs-kernel-updates-dev
+Architecture: amd64
+Section: libdevel
+Depends: ${misc:Depends},
+Conflicts: compat-rdma,
+Description: Development headers for Intel HFI1 driver interface
+ Development header files for Intel HFI1 driver interface. This is
+ used for software that communicates directly with the HFI1 driver,
+ as opposed to using an API such as PSM2 or libibverbs.
+
+Package: kmod-ifs-kernel-updates-3.16.0-10-amd64
+Architecture: amd64
+Depends: linux-image-3.16.0-10-amd64,
+         ${misc:Depends},
+Conflicts: compat-rdma,
+Replaces: compat-rdma,
+Description: Extra kernel modules for IFS
+ Updated kernel modules for OPA IFS, compiled for kernel
+ 3.16.0-10-amd64. This includes the hfi1 driver for
+ Omni-Path hardware, patched ib_ipoib for performance and stability
+ improvements, ib_mad with OPA MAD enhancements and core IB modules
+ recompiled against the OPA MAD headers.

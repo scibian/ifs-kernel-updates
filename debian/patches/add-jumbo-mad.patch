@@ -1,0 +1,4866 @@
+Description: Bring in Jumbo MAD changes to ib_mad and ib_umad
+ Adds Jumbo MAD processing to ib_mad. This code was derived
+ from diffing ifs-kernel-updates SLES121 10.5.0.0.155 against
+ linux-3.12.62-60.62.1.vSMP.1-vanilla. Changed "jumbo" symbols
+ to "opa" in order to better match the code in kernel 4.x.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2018-10-18>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/ib_mad/agent.c
++++ b/ib_mad/agent.c
+@@ -78,39 +78,48 @@
+ 	return entry;
+ }
+ 
+-void agent_send_response(struct ib_mad *mad, struct ib_grh *grh,
+-			 struct ib_wc *wc, struct ib_device *device,
+-			 int port_num, int qpn)
++static int get_agent_ah(struct ib_device *device, int port_num,
++			struct ib_grh *grh, struct ib_wc *wc, int qpn,
++			struct ib_mad_agent **agent, struct ib_ah **ah)
+ {
+ 	struct ib_agent_port_private *port_priv;
+-	struct ib_mad_agent *agent;
+-	struct ib_mad_send_buf *send_buf;
+-	struct ib_ah *ah;
+-	struct ib_mad_send_wr_private *mad_send_wr;
+-
+ 	if (device->node_type == RDMA_NODE_IB_SWITCH)
+ 		port_priv = ib_get_agent_port(device, 0);
+ 	else
+ 		port_priv = ib_get_agent_port(device, port_num);
+ 
+ 	if (!port_priv) {
+-		printk(KERN_ERR SPFX "Unable to find port agent\n");
+-		return;
++		dev_err(&device->dev, "Unable to find port agent\n");
++		return 1;
+ 	}
+ 
+-	agent = port_priv->agent[qpn];
+-	ah = ib_create_ah_from_wc(agent->qp->pd, wc, grh, port_num);
+-	if (IS_ERR(ah)) {
+-		printk(KERN_ERR SPFX "ib_create_ah_from_wc error %ld\n",
++	*agent = port_priv->agent[qpn];
++	*ah = ib_create_ah_from_wc((*agent)->qp->pd, wc, grh, port_num);
++	if (IS_ERR(*ah)) {
++		dev_err(&device->dev, "ib_create_ah_from_wc error %ld\n",
+ 			PTR_ERR(ah));
+-		return;
++		return 1;
+ 	}
++	return 0;
++}
++
++void agent_send_response(struct ib_mad *mad, struct ib_grh *grh,
++			 struct ib_wc *wc, struct ib_device *device,
++			 int port_num, int qpn)
++{
++	struct ib_mad_agent *agent;
++	struct ib_mad_send_buf *send_buf;
++	struct ib_ah *ah;
++	struct ib_mad_send_wr_private *mad_send_wr;
++
++	if (get_agent_ah(device, port_num, grh, wc, qpn, &agent, &ah))
++		return;
+ 
+ 	send_buf = ib_create_send_mad(agent, wc->src_qp, wc->pkey_index, 0,
+ 				      IB_MGMT_MAD_HDR, IB_MGMT_MAD_DATA,
+ 				      GFP_KERNEL);
+ 	if (IS_ERR(send_buf)) {
+-		printk(KERN_ERR SPFX "ib_create_send_mad error\n");
++		dev_err(&device->dev, "ib_create_send_mad error\n");
+ 		goto err1;
+ 	}
+ 
+@@ -125,7 +134,62 @@
+ 	}
+ 
+ 	if (ib_post_send_mad(send_buf, NULL)) {
+-		printk(KERN_ERR SPFX "ib_post_send_mad error\n");
++		dev_err(&device->dev, "ib_post_send_mad error\n");
++		goto err2;
++	}
++	return;
++err2:
++	ib_free_send_mad(send_buf);
++err1:
++	ib_destroy_ah(ah);
++}
++
++/* FIXME merge with agent_send_response */
++void agent_send_opa_response(struct opa_mad *mad, struct ib_grh *grh,
++			 struct ib_wc *wc, struct ib_device *device,
++			 int port_num, int qpn, u32 resp_len)
++{
++	struct ib_mad_agent *agent;
++	struct ib_mad_send_buf *send_buf;
++	struct ib_ah *ah;
++	//struct ib_mad_send_wr_private *mad_send_wr;
++	size_t data_len;
++	u8 base_version;
++
++	if (get_agent_ah(device, port_num, grh, wc, qpn, &agent, &ah))
++		return;
++
++	/* base version determines MAD size */
++	base_version = mad->mad_hdr.base_version;
++	if (base_version == OPA_MGMT_BASE_VERSION)
++		data_len = resp_len - OPA_MGMT_MAD_HDR;
++	else
++		data_len = IB_MGMT_MAD_DATA;
++
++	send_buf = ib_create_send_mad(agent, wc->src_qp | (base_version << 24),
++				      wc->pkey_index, 0,
++				      OPA_MGMT_MAD_HDR, data_len,
++				      GFP_KERNEL);
++	if (IS_ERR(send_buf)) {
++		pr_err("ib_create_send_mad error\n");
++		goto err1;
++	}
++
++	memcpy(send_buf->mad, mad, OPA_MGMT_MAD_HDR + data_len);
++	send_buf->ah = ah;
++
++/* FIXME for upstream
++ * embedded linux on a switch?
++	if (device->node_type == RDMA_NODE_IB_SWITCH) {
++		mad_send_wr = container_of(send_buf,
++					   struct ib_mad_send_wr_private,
++					   send_buf);
++		mad_send_wr->send_wr.wr.ud.port_num = port_num;
++	}
++*/
++
++	if (ib_post_send_mad(send_buf, NULL)) {
++		pr_err("ib_post_send_mad error\n");
+ 		goto err2;
+ 	}
+ 	return;
+@@ -151,7 +215,7 @@
+ 	/* Create new device info */
+ 	port_priv = kzalloc(sizeof *port_priv, GFP_KERNEL);
+ 	if (!port_priv) {
+-		printk(KERN_ERR SPFX "No memory for ib_agent_port_private\n");
++		dev_err(&device->dev, "No memory for ib_agent_port_private\n");
+ 		ret = -ENOMEM;
+ 		goto error1;
+ 	}
+@@ -202,7 +266,7 @@
+ 	port_priv = __ib_get_agent_port(device, port_num);
+ 	if (port_priv == NULL) {
+ 		spin_unlock_irqrestore(&ib_agent_port_list_lock, flags);
+-		printk(KERN_ERR SPFX "Port %d not found\n", port_num);
++		dev_err(&device->dev, "Port %d not found\n", port_num);
+ 		return -ENODEV;
+ 	}
+ 	list_del(&port_priv->port_list);
+--- a/ib_mad/agent.h
++++ b/ib_mad/agent.h
+@@ -48,4 +48,8 @@
+ 				struct ib_wc *wc, struct ib_device *device,
+ 				int port_num, int qpn);
+ 
++extern void agent_send_opa_response(struct opa_mad *mad, struct ib_grh *grh,
++				struct ib_wc *wc, struct ib_device *device,
++				int port_num, int qpn, u32 resp_len);
++
+ #endif	/* __AGENT_H_ */
+--- a/ib_mad/mad.c
++++ b/ib_mad/mad.c
+@@ -33,6 +33,9 @@
+  * SOFTWARE.
+  *
+  */
++
++#define pr_fmt(fmt) PFX fmt
++
+ #include <linux/dma-mapping.h>
+ #include <linux/slab.h>
+ #include <linux/module.h>
+@@ -41,22 +44,49 @@
+ #include "mad_priv.h"
+ #include "mad_rmpp.h"
+ #include "smi.h"
++#include "opa_smi.h"
+ #include "agent.h"
++#include "jumbo_mad.h"
++#include "jumbo_mad_rmpp.h"
+ 
+ MODULE_LICENSE("Dual BSD/GPL");
+ MODULE_DESCRIPTION("kernel IB MAD API");
+ MODULE_AUTHOR("Hal Rosenstock");
+ MODULE_AUTHOR("Sean Hefty");
++MODULE_AUTHOR("Ira Weiny");
+ 
+ static int mad_sendq_size = IB_MAD_QP_SEND_SIZE;
+ static int mad_recvq_size = IB_MAD_QP_RECV_SIZE;
++/* FIXME add opa_recvq_size mod param */
+ 
+ module_param_named(send_queue_size, mad_sendq_size, int, 0444);
+ MODULE_PARM_DESC(send_queue_size, "Size of send queue in number of work requests");
+ module_param_named(recv_queue_size, mad_recvq_size, int, 0444);
+ MODULE_PARM_DESC(recv_queue_size, "Size of receive queue in number of work requests");
+ 
++static int mad_support_opa = 1;
++module_param_named(support_opa, mad_support_opa, int, 0444);
++MODULE_PARM_DESC(support_opa,
++	"Enable Opa MAD support on devices which support them (default 1)");
++
++static int mad_fix_opa_size = 0;
++module_param_named(fix_opa_size, mad_fix_opa_size, int, S_IRUGO | S_IWUSR | S_IWGRP);
++MODULE_PARM_DESC(fix_opa_size, "Fix Opa MAD's to be 2K (default 0)");
++
+ static struct kmem_cache *ib_mad_cache;
++struct kmem_cache *opa_mad_cache;
++
++/*
++ * Define a limit on the number of completions which will be processed by the
++ * worker thread in a single work item.  This ensures that other work items
++ * (potentially from other users) are processed fairly.
++ *
++ * The number of completions was derived from the default queue sizes above.
++ * We use a value which is double the larger of the 2 queues (receive @ 512)
++ * but keep it fixed such that an increase in that value does not introduce
++ * unfairness.
++ */
++#define MAD_COMPLETION_PROC_LIMIT 1024
+ 
+ static struct list_head ib_mad_port_list;
+ static u32 ib_mad_client_id = 0;
+@@ -68,9 +98,6 @@
+ static int method_in_use(struct ib_mad_mgmt_method_table **method,
+ 			 struct ib_mad_reg_req *mad_reg_req);
+ static void remove_mad_reg_req(struct ib_mad_agent_private *priv);
+-static struct ib_mad_agent_private *find_mad_agent(
+-					struct ib_mad_port_private *port_priv,
+-					struct ib_mad *mad);
+ static int ib_mad_post_receive_mads(struct ib_mad_qp_info *qp_info,
+ 				    struct ib_mad_private *mad);
+ static void cancel_mads(struct ib_mad_agent_private *mad_agent_priv);
+@@ -192,7 +219,7 @@
+ 					   u8 port_num,
+ 					   enum ib_qp_type qp_type,
+ 					   struct ib_mad_reg_req *mad_reg_req,
+-					   u8 rmpp_version,
++					   u8 rmpp_flags,
+ 					   ib_mad_send_handler send_handler,
+ 					   ib_mad_recv_handler recv_handler,
+ 					   void *context)
+@@ -208,71 +235,114 @@
+ 	int ret2, qpn;
+ 	unsigned long flags;
+ 	u8 mgmt_class, vclass;
++	u8 rmpp_version = RMPP_VERSION(rmpp_flags);
++	u32 registration_flags = RMPP_FLAGS(rmpp_flags);
+ 
+ 	/* Validate parameters */
+ 	qpn = get_spl_qp_index(qp_type);
+-	if (qpn == -1)
++	if (qpn == -1) {
++		dev_notice(&device->dev,
++			   "ib_register_mad_agent: invalid QP Type %d\n",
++			   qp_type);
+ 		goto error1;
++	}
+ 
+-	if (rmpp_version && rmpp_version != IB_MGMT_RMPP_VERSION)
++	if (rmpp_version && rmpp_version != IB_MGMT_RMPP_VERSION) {
++		dev_notice(&device->dev,
++			   "ib_register_mad_agent: invalid RMPP Version %u\n",
++			   rmpp_version);
+ 		goto error1;
++	}
+ 
+ 	/* Validate MAD registration request if supplied */
+ 	if (mad_reg_req) {
+-		if (mad_reg_req->mgmt_class_version >= MAX_MGMT_VERSION)
++		if (mad_reg_req->mgmt_class_version >= MAX_MGMT_VERSION) {
++			dev_notice(&device->dev,
++				   "ib_register_mad_agent: invalid Class Version %u\n",
++				   mad_reg_req->mgmt_class_version);
+ 			goto error1;
+-		if (!recv_handler)
++		}
++		if (!recv_handler) {
++			dev_notice(&device->dev,
++				   "ib_register_mad_agent: no recv_handler\n");
+ 			goto error1;
++		}
+ 		if (mad_reg_req->mgmt_class >= MAX_MGMT_CLASS) {
+ 			/*
+ 			 * IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE is the only
+ 			 * one in this range currently allowed
+ 			 */
+ 			if (mad_reg_req->mgmt_class !=
+-			    IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
++			    IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE) {
++				dev_notice(&device->dev,
++					   "ib_register_mad_agent: Invalid Mgmt Class 0x%x\n",
++					   mad_reg_req->mgmt_class);
+ 				goto error1;
++			}
+ 		} else if (mad_reg_req->mgmt_class == 0) {
+ 			/*
+ 			 * Class 0 is reserved in IBA and is used for
+ 			 * aliasing of IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE
+ 			 */
++			dev_notice(&device->dev,
++				   "ib_register_mad_agent: Invalid Mgmt Class 0\n");
+ 			goto error1;
+ 		} else if (is_vendor_class(mad_reg_req->mgmt_class)) {
+ 			/*
+ 			 * If class is in "new" vendor range,
+ 			 * ensure supplied OUI is not zero
+ 			 */
+-			if (!is_vendor_oui(mad_reg_req->oui))
++			if (!is_vendor_oui(mad_reg_req->oui)) {
++				dev_notice(&device->dev,
++					   "ib_register_mad_agent: No OUI specified for class 0x%x\n",
++					   mad_reg_req->mgmt_class);
+ 				goto error1;
++			}
+ 		}
+ 		/* Make sure class supplied is consistent with RMPP */
+ 		if (!ib_is_mad_class_rmpp(mad_reg_req->mgmt_class)) {
+-			if (rmpp_version)
++			if (rmpp_version) {
++				dev_notice(&device->dev,
++					   "ib_register_mad_agent: RMPP version for non-RMPP class 0x%x\n",
++					   mad_reg_req->mgmt_class);
+ 				goto error1;
++			}
+ 		}
++
+ 		/* Make sure class supplied is consistent with QP type */
+ 		if (qp_type == IB_QPT_SMI) {
+ 			if ((mad_reg_req->mgmt_class !=
+ 					IB_MGMT_CLASS_SUBN_LID_ROUTED) &&
+ 			    (mad_reg_req->mgmt_class !=
+-					IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE))
++					IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)) {
++				dev_notice(&device->dev,
++					   "ib_register_mad_agent: Invalid SM QP type: class 0x%x\n",
++					   mad_reg_req->mgmt_class);
+ 				goto error1;
++			}
+ 		} else {
+ 			if ((mad_reg_req->mgmt_class ==
+ 					IB_MGMT_CLASS_SUBN_LID_ROUTED) ||
+ 			    (mad_reg_req->mgmt_class ==
+-					IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE))
++					IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)) {
++				dev_notice(&device->dev,
++					   "ib_register_mad_agent: Invalid GS QP type: class 0x%x\n",
++					   mad_reg_req->mgmt_class);
+ 				goto error1;
++			}
+ 		}
+ 	} else {
+ 		/* No registration request supplied */
+ 		if (!send_handler)
+ 			goto error1;
++		if (registration_flags & IB_MAD_USER_RMPP)
++			goto error1;
+ 	}
+ 
+ 	/* Validate device and port */
+ 	port_priv = ib_get_mad_port(device, port_num);
+ 	if (!port_priv) {
++		dev_notice(&device->dev, "ib_register_mad_agent: Invalid port\n");
+ 		ret = ERR_PTR(-ENODEV);
+ 		goto error1;
+ 	}
+@@ -280,6 +350,8 @@
+ 	/* Verify the QP requested is supported.  For example, Ethernet devices
+ 	 * will not have QP0 */
+ 	if (!port_priv->qp_info[qpn].qp) {
++		dev_notice(&device->dev,
++			   "ib_register_mad_agent: QP %d not supported\n", qpn);
+ 		ret = ERR_PTR(-EPROTONOSUPPORT);
+ 		goto error1;
+ 	}
+@@ -316,6 +388,7 @@
+ 	mad_agent_priv->agent.context = context;
+ 	mad_agent_priv->agent.qp = port_priv->qp_info[qpn].qp;
+ 	mad_agent_priv->agent.port_num = port_num;
++	mad_agent_priv->agent.flags = registration_flags;
+ 	spin_lock_init(&mad_agent_priv->lock);
+ 	INIT_LIST_HEAD(&mad_agent_priv->send_list);
+ 	INIT_LIST_HEAD(&mad_agent_priv->wait_list);
+@@ -503,12 +576,6 @@
+ }
+ EXPORT_SYMBOL(ib_register_mad_snoop);
+ 
+-static inline void deref_mad_agent(struct ib_mad_agent_private *mad_agent_priv)
+-{
+-	if (atomic_dec_and_test(&mad_agent_priv->refcount))
+-		complete(&mad_agent_priv->comp);
+-}
+-
+ static inline void deref_snoop_agent(struct ib_mad_snoop_private *mad_snoop_priv)
+ {
+ 	if (atomic_dec_and_test(&mad_snoop_priv->refcount))
+@@ -587,7 +654,7 @@
+ }
+ EXPORT_SYMBOL(ib_unregister_mad_agent);
+ 
+-static void dequeue_mad(struct ib_mad_list_head *mad_list)
++void dequeue_mad(struct ib_mad_list_head *mad_list)
+ {
+ 	struct ib_mad_queue *mad_queue;
+ 	unsigned long flags;
+@@ -626,7 +693,7 @@
+ 	spin_unlock_irqrestore(&qp_info->snoop_lock, flags);
+ }
+ 
+-static void snoop_recv(struct ib_mad_qp_info *qp_info,
++void snoop_recv(struct ib_mad_qp_info *qp_info,
+ 		       struct ib_mad_recv_wc *mad_recv_wc,
+ 		       int mad_snoop_flags)
+ {
+@@ -679,15 +746,17 @@
+ {
+ 	int ret = 0;
+ 	struct ib_smp *smp = mad_send_wr->send_buf.mad;
++	struct opa_smp *opa_smp = (struct opa_smp *)smp;
+ 	unsigned long flags;
+ 	struct ib_mad_local_private *local;
+-	struct ib_mad_private *mad_priv;
++	struct ib_mad_private *mad_priv; /* or opa_mad_priv */
+ 	struct ib_mad_port_private *port_priv;
+ 	struct ib_mad_agent_private *recv_mad_agent = NULL;
+ 	struct ib_device *device = mad_agent_priv->agent.device;
+ 	u8 port_num;
+ 	struct ib_wc mad_wc;
+ 	struct ib_send_wr *send_wr = &mad_send_wr->send_wr;
++	u32 opa_drslid;
+ 
+ 	if (device->node_type == RDMA_NODE_IB_SWITCH &&
+ 	    smp->mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
+@@ -701,13 +770,34 @@
+ 	 * If we are at the start of the LID routed part, don't update the
+ 	 * hop_ptr or hop_cnt.  See section 14.2.2, Vol 1 IB spec.
+ 	 */
+-	if ((ib_get_smp_direction(smp) ? smp->dr_dlid : smp->dr_slid) ==
+-	     IB_LID_PERMISSIVE &&
+-	     smi_handle_dr_smp_send(smp, device->node_type, port_num) ==
+-	     IB_SMI_DISCARD) {
+-		ret = -EINVAL;
+-		printk(KERN_ERR PFX "Invalid directed route\n");
+-		goto out;
++	if (smp->base_version == OPA_MGMT_BASE_VERSION) {
++		if ((opa_get_smp_direction(opa_smp)
++		     ? opa_smp->route.dr.dr_dlid : opa_smp->route.dr.dr_slid) ==
++		     OPA_LID_PERMISSIVE &&
++		     opa_smi_handle_dr_smp_send(opa_smp, device->node_type,
++						port_num) == IB_SMI_DISCARD) {
++			ret = -EINVAL;
++			dev_err(&device->dev, "Invalid directed route\n");
++			goto out;
++		}
++		opa_drslid = be32_to_cpu(opa_smp->route.dr.dr_slid);
++		if (opa_drslid != OPA_LID_PERMISSIVE &&
++		    opa_drslid & 0xffff0000) {
++			ret = -EINVAL;
++			dev_err(&device->dev, "STL Invalid dr_slid 0x%x\n",
++			       opa_drslid);
++			goto out;
++		}
++	} else {
++		if ((ib_get_smp_direction(smp) ? smp->dr_dlid : smp->dr_slid) ==
++		     IB_LID_PERMISSIVE &&
++		     smi_handle_dr_smp_send(smp, device->node_type, port_num) ==
++		     IB_SMI_DISCARD) {
++			ret = -EINVAL;
++			dev_err(&device->dev, "Invalid directed route\n");
++			goto out;
++		}
++		opa_drslid = be16_to_cpu(smp->dr_slid);
+ 	}
+ 
+ 	/* Check to post send on QP or process locally */
+@@ -718,25 +808,45 @@
+ 	local = kmalloc(sizeof *local, GFP_ATOMIC);
+ 	if (!local) {
+ 		ret = -ENOMEM;
+-		printk(KERN_ERR PFX "No memory for ib_mad_local_private\n");
++		dev_err(&device->dev, "No memory for ib_mad_local_private\n");
+ 		goto out;
+ 	}
+ 	local->mad_priv = NULL;
+ 	local->recv_mad_agent = NULL;
+-	mad_priv = kmem_cache_alloc(ib_mad_cache, GFP_ATOMIC);
++
++	if (mad_agent_priv->qp_info->supports_opa_mads)
++		mad_priv = kmem_cache_alloc(opa_mad_cache, GFP_ATOMIC);
++	else
++		mad_priv = kmem_cache_alloc(ib_mad_cache, GFP_ATOMIC);
++
+ 	if (!mad_priv) {
+ 		ret = -ENOMEM;
+-		printk(KERN_ERR PFX "No memory for local response MAD\n");
++		dev_err(&device->dev, "No memory for local response MAD\n");
+ 		kfree(local);
+ 		goto out;
+ 	}
++	mad_priv->header.flags = 0;
++	if (mad_agent_priv->qp_info->supports_opa_mads)
++		mad_priv->header.flags = IB_MAD_PRIV_FLAG_OPA;
+ 
+ 	build_smp_wc(mad_agent_priv->agent.qp,
+-		     send_wr->wr_id, be16_to_cpu(smp->dr_slid),
++		     send_wr->wr_id, (u16)(opa_drslid & 0x0000ffff),
+ 		     send_wr->wr.ud.pkey_index,
+ 		     send_wr->wr.ud.port_num, &mad_wc);
+ 
++	if (smp->base_version == OPA_MGMT_BASE_VERSION) {
++		mad_wc.byte_len = mad_send_wr->send_buf.hdr_len
++					+ mad_send_wr->send_buf.data_len
++					+ sizeof(struct ib_grh);
++	}
++
+ 	/* No GRH for DR SMP */
++	/* FIXME for upstream:
++	 * Once again drivers which support opa MADS know we will be passing them
++	 * a opa mad for the response.
++	 * Also we need to add a parameter here for the response length
++	 * For now we use the WC.byte_len
++	 */
+ 	ret = device->process_mad(device, 0, port_num, &mad_wc, NULL,
+ 				  (struct ib_mad *)smp,
+ 				  (struct ib_mad *)&mad_priv->mad);
+@@ -752,11 +862,18 @@
+ 			 * side of local completion handled
+ 			 */
+ 			atomic_inc(&mad_agent_priv->refcount);
+-		} else
+-			kmem_cache_free(ib_mad_cache, mad_priv);
++		} else {
++			if (mad_priv->header.flags & IB_MAD_PRIV_FLAG_OPA)
++				kmem_cache_free(opa_mad_cache, mad_priv);
++			else
++				kmem_cache_free(ib_mad_cache, mad_priv);
++		}
+ 		break;
+ 	case IB_MAD_RESULT_SUCCESS | IB_MAD_RESULT_CONSUMED:
+-		kmem_cache_free(ib_mad_cache, mad_priv);
++		if (mad_priv->header.flags & IB_MAD_PRIV_FLAG_OPA)
++			kmem_cache_free(opa_mad_cache, mad_priv);
++		else
++			kmem_cache_free(ib_mad_cache, mad_priv);
+ 		break;
+ 	case IB_MAD_RESULT_SUCCESS:
+ 		/* Treat like an incoming receive MAD */
+@@ -772,20 +889,34 @@
+ 			 * No receiving agent so drop packet and
+ 			 * generate send completion.
+ 			 */
+-			kmem_cache_free(ib_mad_cache, mad_priv);
++			if (mad_priv->header.flags & IB_MAD_PRIV_FLAG_OPA)
++				kmem_cache_free(opa_mad_cache, mad_priv);
++			else
++				kmem_cache_free(ib_mad_cache, mad_priv);
+ 			break;
+ 		}
+ 		local->mad_priv = mad_priv;
+ 		local->recv_mad_agent = recv_mad_agent;
+ 		break;
+ 	default:
+-		kmem_cache_free(ib_mad_cache, mad_priv);
++		if (mad_priv->header.flags & IB_MAD_PRIV_FLAG_OPA)
++			kmem_cache_free(opa_mad_cache, mad_priv);
++		else
++			kmem_cache_free(ib_mad_cache, mad_priv);
+ 		kfree(local);
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+ 
+ 	local->mad_send_wr = mad_send_wr;
++	/* FIXME upstream; pkey_index valid for IB ??? */
++	local->mad_send_wr->send_wr.wr.ud.pkey_index = mad_wc.pkey_index;
++	/* FIXME upstream; mad_wc.byte_len should be additional param in
++	 * process_mad */
++	if (mad_fix_opa_size)
++		local->return_wc_byte_len = sizeof(struct opa_mad);
++	else
++		local->return_wc_byte_len = mad_wc.byte_len;
+ 	/* Reference MAD agent until send side of local completion handled */
+ 	atomic_inc(&mad_agent_priv->refcount);
+ 	/* Queue local completion to local list */
+@@ -799,11 +930,11 @@
+ 	return ret;
+ }
+ 
+-static int get_pad_size(int hdr_len, int data_len)
++static int get_pad_size(int hdr_len, int data_len, size_t mad_size)
+ {
+ 	int seg_size, pad;
+ 
+-	seg_size = sizeof(struct ib_mad) - hdr_len;
++	seg_size = mad_size - hdr_len;
+ 	if (data_len && seg_size) {
+ 		pad = seg_size - data_len % seg_size;
+ 		return pad == seg_size ? 0 : pad;
+@@ -822,14 +953,22 @@
+ }
+ 
+ static int alloc_send_rmpp_list(struct ib_mad_send_wr_private *send_wr,
+-				gfp_t gfp_mask)
++				gfp_t gfp_mask, size_t mad_size)
+ {
++/**
++ * FIXME this is wrong if we are a opa device sending to a non-opa device
++ * User will need to specify if they want the RMPP to be segmented on opa or
++ * IB MAD boundaries.  Specification mechanism is TBD...
++ *
++ * FIXED == mad_size will only be larger when base_version is
++ * OPA_MGMT_BASE_VERSION as specified by our caller
++ */
+ 	struct ib_mad_send_buf *send_buf = &send_wr->send_buf;
+-	struct ib_rmpp_mad *rmpp_mad = send_buf->mad;
++	struct ib_rmpp_base *rmpp_base = send_buf->mad;
+ 	struct ib_rmpp_segment *seg = NULL;
+ 	int left, seg_size, pad;
+ 
+-	send_buf->seg_size = sizeof (struct ib_mad) - send_buf->hdr_len;
++	send_buf->seg_size = mad_size - send_buf->hdr_len;
+ 	seg_size = send_buf->seg_size;
+ 	pad = send_wr->pad;
+ 
+@@ -837,9 +976,9 @@
+ 	for (left = send_buf->data_len + pad; left > 0; left -= seg_size) {
+ 		seg = kmalloc(sizeof (*seg) + seg_size, gfp_mask);
+ 		if (!seg) {
+-			printk(KERN_ERR "alloc_send_rmpp_segs: RMPP mem "
+-			       "alloc failed for len %zd, gfp %#x\n",
+-			       sizeof (*seg) + seg_size, gfp_mask);
++			dev_err(&send_buf->mad_agent->device->dev,
++				"alloc_send_rmpp_segs: RMPP mem alloc failed for len %zd, gfp %#x\n",
++				sizeof (*seg) + seg_size, gfp_mask);
+ 			free_send_rmpp_list(send_wr);
+ 			return -ENOMEM;
+ 		}
+@@ -851,10 +990,10 @@
+ 	if (pad)
+ 		memset(seg->data + seg_size - pad, 0, pad);
+ 
+-	rmpp_mad->rmpp_hdr.rmpp_version = send_wr->mad_agent_priv->
++	rmpp_base->rmpp_hdr.rmpp_version = send_wr->mad_agent_priv->
+ 					  agent.rmpp_version;
+-	rmpp_mad->rmpp_hdr.rmpp_type = IB_MGMT_RMPP_TYPE_DATA;
+-	ib_set_rmpp_flags(&rmpp_mad->rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
++	rmpp_base->rmpp_hdr.rmpp_type = IB_MGMT_RMPP_TYPE_DATA;
++	ib_set_rmpp_flags(&rmpp_base->rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
+ 
+ 	send_wr->cur_seg = container_of(send_wr->rmpp_list.next,
+ 					struct ib_rmpp_segment, list);
+@@ -862,6 +1001,24 @@
+ 	return 0;
+ }
+ 
++int ib_mad_kernel_rmpp_agent(struct ib_mad_agent *agent)
++{
++	return agent->rmpp_version && !(agent->flags & IB_MAD_USER_RMPP);
++}
++EXPORT_SYMBOL(ib_mad_kernel_rmpp_agent);
++
++/**
++ * ib_create_send_mad needs some way to tell if the MAD/(RMPP seq) being created
++ * is to be opa or IB based.  The way to tell this is by the base_version
++ * specified.  Unfortunately, we don't have a parameter to specify the
++ * base_version and we don't want to break users outside of our modified
++ * modules.
++ *
++ * For now add the base_version as the upper byte of "remote_qpn".  This
++ * means that a value of 0x0 or 0x1 == IB MAD and 0x80 == Opa MAD.
++ *
++ * FIXME for upstream; add parameter for base_version
++ */
+ struct ib_mad_send_buf * ib_create_send_mad(struct ib_mad_agent *mad_agent,
+ 					    u32 remote_qpn, u16 pkey_index,
+ 					    int rmpp_active,
+@@ -872,18 +1029,30 @@
+ 	struct ib_mad_send_wr_private *mad_send_wr;
+ 	int pad, message_size, ret, size;
+ 	void *buf;
++	size_t mad_size;
++	u8 base_version = remote_qpn >> 24;
++	remote_qpn &= 0x00FFFFFF;
+ 
+ 	mad_agent_priv = container_of(mad_agent, struct ib_mad_agent_private,
+ 				      agent);
+-	pad = get_pad_size(hdr_len, data_len);
++
++	if (mad_agent_priv->qp_info->supports_opa_mads
++	    && base_version == OPA_MGMT_BASE_VERSION)
++		mad_size = sizeof(struct opa_mad);
++	else
++		mad_size = sizeof(struct ib_mad);
++
++	pad = get_pad_size(hdr_len, data_len, mad_size);
+ 	message_size = hdr_len + data_len + pad;
+ 
+-	if ((!mad_agent->rmpp_version &&
+-	     (rmpp_active || message_size > sizeof(struct ib_mad))) ||
+-	    (!rmpp_active && message_size > sizeof(struct ib_mad)))
+-		return ERR_PTR(-EINVAL);
++	if (ib_mad_kernel_rmpp_agent(mad_agent)) {
++		if (!rmpp_active && message_size > mad_size)
++			return ERR_PTR(-EINVAL);
++	} else
++		if (rmpp_active || message_size > mad_size)
++			return ERR_PTR(-EINVAL);
+ 
+-	size = rmpp_active ? hdr_len : sizeof(struct ib_mad);
++	size = rmpp_active ? hdr_len : mad_size;
+ 	buf = kzalloc(sizeof *mad_send_wr + size, gfp_mask);
+ 	if (!buf)
+ 		return ERR_PTR(-ENOMEM);
+@@ -898,7 +1067,15 @@
+ 	mad_send_wr->mad_agent_priv = mad_agent_priv;
+ 	mad_send_wr->sg_list[0].length = hdr_len;
+ 	mad_send_wr->sg_list[0].lkey = mad_agent->mr->lkey;
+-	mad_send_wr->sg_list[1].length = sizeof(struct ib_mad) - hdr_len;
++
++	/* individual opa MADs don't have to be 2048 bytes */
++	if (mad_agent_priv->qp_info->supports_opa_mads
++	    && base_version == OPA_MGMT_BASE_VERSION
++	    && data_len < mad_size - hdr_len)
++		mad_send_wr->sg_list[1].length = data_len;
++	else
++		mad_send_wr->sg_list[1].length = mad_size - hdr_len;
++
+ 	mad_send_wr->sg_list[1].lkey = mad_agent->mr->lkey;
+ 
+ 	mad_send_wr->send_wr.wr_id = (unsigned long) mad_send_wr;
+@@ -911,7 +1088,7 @@
+ 	mad_send_wr->send_wr.wr.ud.pkey_index = pkey_index;
+ 
+ 	if (rmpp_active) {
+-		ret = alloc_send_rmpp_list(mad_send_wr, gfp_mask);
++		ret = alloc_send_rmpp_list(mad_send_wr, gfp_mask, mad_size);
+ 		if (ret) {
+ 			kfree(buf);
+ 			return ERR_PTR(ret);
+@@ -1121,6 +1298,15 @@
+ 		mad_send_wr->tid = ((struct ib_mad_hdr *) send_buf->mad)->tid;
+ 		/* Timeout will be updated after send completes */
+ 		mad_send_wr->timeout = msecs_to_jiffies(send_buf->timeout_ms);
++
++		/*
++		 * Add 1 sec to detect a send queue problem.
++		 * This will give send only MAD's 1 sec to get on the wire
++		 */
++		mad_send_wr->sq_timeout = msecs_to_jiffies(send_buf->timeout_ms);
++		mad_send_wr->sq_timeout += msecs_to_jiffies(1000);
++		mad_send_wr->sq_timeout += jiffies;
++
+ 		mad_send_wr->max_retries = send_buf->retries;
+ 		mad_send_wr->retries_left = send_buf->retries;
+ 		send_buf->retries = 0;
+@@ -1135,7 +1321,7 @@
+ 			      &mad_agent_priv->send_list);
+ 		spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
+ 
+-		if (mad_agent_priv->agent.rmpp_version) {
++		if (ib_mad_kernel_rmpp_agent(&mad_agent_priv->agent)) {
+ 			ret = ib_send_rmpp_mad(mad_send_wr);
+ 			if (ret >= 0 && ret != IB_RMPP_RESULT_CONSUMED)
+ 				ret = ib_send_mad(mad_send_wr);
+@@ -1181,7 +1367,10 @@
+ 					    recv_wc);
+ 		priv = container_of(mad_priv_hdr, struct ib_mad_private,
+ 				    header);
+-		kmem_cache_free(ib_mad_cache, priv);
++		if (priv->header.flags & IB_MAD_PRIV_FLAG_OPA)
++			kmem_cache_free(opa_mad_cache, priv);
++		else
++			kmem_cache_free(ib_mad_cache, priv);
+ 	}
+ }
+ EXPORT_SYMBOL(ib_free_recv_mad);
+@@ -1199,7 +1388,8 @@
+ int ib_process_mad_wc(struct ib_mad_agent *mad_agent,
+ 		      struct ib_wc *wc)
+ {
+-	printk(KERN_ERR PFX "ib_process_mad_wc() not implemented yet\n");
++	dev_err(&mad_agent->device->dev,
++		"ib_process_mad_wc() not implemented yet\n");
+ 	return 0;
+ }
+ EXPORT_SYMBOL(ib_process_mad_wc);
+@@ -1211,7 +1401,7 @@
+ 
+ 	for_each_set_bit(i, mad_reg_req->method_mask, IB_MGMT_MAX_METHODS) {
+ 		if ((*method)->agent[i]) {
+-			printk(KERN_ERR PFX "Method %d already in use\n", i);
++			pr_err("Method %d already in use\n", i);
+ 			return -EINVAL;
+ 		}
+ 	}
+@@ -1223,8 +1413,7 @@
+ 	/* Allocate management method table */
+ 	*method = kzalloc(sizeof **method, GFP_ATOMIC);
+ 	if (!*method) {
+-		printk(KERN_ERR PFX "No memory for "
+-		       "ib_mad_mgmt_method_table\n");
++		pr_err("No memory for ib_mad_mgmt_method_table\n");
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -1319,8 +1508,8 @@
+ 		/* Allocate management class table for "new" class version */
+ 		*class = kzalloc(sizeof **class, GFP_ATOMIC);
+ 		if (!*class) {
+-			printk(KERN_ERR PFX "No memory for "
+-			       "ib_mad_mgmt_class_table\n");
++			dev_err(&agent_priv->agent.device->dev,
++				"No memory for ib_mad_mgmt_class_table\n");
+ 			ret = -ENOMEM;
+ 			goto error1;
+ 		}
+@@ -1386,8 +1575,8 @@
+ 		/* Allocate mgmt vendor class table for "new" class version */
+ 		vendor = kzalloc(sizeof *vendor, GFP_ATOMIC);
+ 		if (!vendor) {
+-			printk(KERN_ERR PFX "No memory for "
+-			       "ib_mad_mgmt_vendor_class_table\n");
++			dev_err(&agent_priv->agent.device->dev,
++				"No memory for ib_mad_mgmt_vendor_class_table\n");
+ 			goto error1;
+ 		}
+ 
+@@ -1397,8 +1586,8 @@
+ 		/* Allocate table for this management vendor class */
+ 		vendor_class = kzalloc(sizeof *vendor_class, GFP_ATOMIC);
+ 		if (!vendor_class) {
+-			printk(KERN_ERR PFX "No memory for "
+-			       "ib_mad_mgmt_vendor_class\n");
++			dev_err(&agent_priv->agent.device->dev,
++				"No memory for ib_mad_mgmt_vendor_class\n");
+ 			goto error2;
+ 		}
+ 
+@@ -1429,7 +1618,7 @@
+ 			goto check_in_use;
+ 		}
+ 	}
+-	printk(KERN_ERR PFX "All OUI slots in use\n");
++	dev_err(&agent_priv->agent.device->dev, "All OUI slots in use\n");
+ 	goto error3;
+ 
+ check_in_use:
+@@ -1564,7 +1753,7 @@
+ 	return;
+ }
+ 
+-static struct ib_mad_agent_private *
++struct ib_mad_agent_private *
+ find_mad_agent(struct ib_mad_port_private *port_priv,
+ 	       struct ib_mad *mad)
+ {
+@@ -1640,9 +1829,9 @@
+ 		if (mad_agent->agent.recv_handler)
+ 			atomic_inc(&mad_agent->refcount);
+ 		else {
+-			printk(KERN_NOTICE PFX "No receive handler for client "
+-			       "%p on port %d\n",
+-			       &mad_agent->agent, port_priv->port_num);
++			dev_notice(&port_priv->device->dev,
++				   "No receive handler for client %p on port %d\n",
++				   &mad_agent->agent, port_priv->port_num);
+ 			mad_agent = NULL;
+ 		}
+ 	}
+@@ -1658,8 +1847,8 @@
+ 
+ 	/* Make sure MAD base version is understood */
+ 	if (mad->mad_hdr.base_version != IB_MGMT_BASE_VERSION) {
+-		printk(KERN_ERR PFX "MAD received with unsupported base "
+-		       "version %d\n", mad->mad_hdr.base_version);
++		pr_err("MAD received with unsupported base version %d\n",
++			mad->mad_hdr.base_version);
+ 		goto out;
+ 	}
+ 
+@@ -1678,16 +1867,17 @@
+ 	return valid;
+ }
+ 
+-static int is_data_mad(struct ib_mad_agent_private *mad_agent_priv,
++static int is_rmpp_data_mad(struct ib_mad_agent_private *mad_agent_priv,
+ 		       struct ib_mad_hdr *mad_hdr)
+ {
+-	struct ib_rmpp_mad *rmpp_mad;
++	struct ib_rmpp_base *rmpp_base;
+ 
+-	rmpp_mad = (struct ib_rmpp_mad *)mad_hdr;
++	rmpp_base = (struct ib_rmpp_base *)mad_hdr;
+ 	return !mad_agent_priv->agent.rmpp_version ||
+-		!(ib_get_rmpp_flags(&rmpp_mad->rmpp_hdr) &
++		!ib_mad_kernel_rmpp_agent(&mad_agent_priv->agent) ||
++		!(ib_get_rmpp_flags(&rmpp_base->rmpp_hdr) &
+ 				    IB_MGMT_RMPP_FLAG_ACTIVE) ||
+-		(rmpp_mad->rmpp_hdr.rmpp_type == IB_MGMT_RMPP_TYPE_DATA);
++		(rmpp_base->rmpp_hdr.rmpp_type == IB_MGMT_RMPP_TYPE_DATA);
+ }
+ 
+ static inline int rcv_has_same_class(struct ib_mad_send_wr_private *wr,
+@@ -1758,18 +1948,18 @@
+ 		 struct ib_mad_recv_wc *wc)
+ {
+ 	struct ib_mad_send_wr_private *wr;
+-	struct ib_mad *mad;
++	struct ib_mad_hdr *mad_hdr;
+ 
+-	mad = (struct ib_mad *)wc->recv_buf.mad;
++	mad_hdr = (struct ib_mad_hdr *)wc->recv_buf.mad;
+ 
+ 	list_for_each_entry(wr, &mad_agent_priv->wait_list, agent_list) {
+-		if ((wr->tid == mad->mad_hdr.tid) &&
++		if ((wr->tid == mad_hdr->tid) &&
+ 		    rcv_has_same_class(wr, wc) &&
+ 		    /*
+ 		     * Don't check GID for direct routed MADs.
+ 		     * These might have permissive LIDs.
+ 		     */
+-		    (is_direct(wc->recv_buf.mad->mad_hdr.mgmt_class) ||
++		    (is_direct(mad_hdr->mgmt_class) ||
+ 		     rcv_has_same_gid(mad_agent_priv, wr, wc)))
+ 			return (wr->status == IB_WC_SUCCESS) ? wr : NULL;
+ 	}
+@@ -1779,15 +1969,15 @@
+ 	 * been notified that the send has completed
+ 	 */
+ 	list_for_each_entry(wr, &mad_agent_priv->send_list, agent_list) {
+-		if (is_data_mad(mad_agent_priv, wr->send_buf.mad) &&
+-		    wr->tid == mad->mad_hdr.tid &&
++		if (is_rmpp_data_mad(mad_agent_priv, wr->send_buf.mad) &&
++		    wr->tid == mad_hdr->tid &&
+ 		    wr->timeout &&
+ 		    rcv_has_same_class(wr, wc) &&
+ 		    /*
+ 		     * Don't check GID for direct routed MADs.
+ 		     * These might have permissive LIDs.
+ 		     */
+-		    (is_direct(wc->recv_buf.mad->mad_hdr.mgmt_class) ||
++		    (is_direct(mad_hdr->mgmt_class) ||
+ 		     rcv_has_same_gid(mad_agent_priv, wr, wc)))
+ 			/* Verify request has not been canceled */
+ 			return (wr->status == IB_WC_SUCCESS) ? wr : NULL;
+@@ -1812,7 +2002,7 @@
+ 
+ 	INIT_LIST_HEAD(&mad_recv_wc->rmpp_list);
+ 	list_add(&mad_recv_wc->recv_buf.list, &mad_recv_wc->rmpp_list);
+-	if (mad_agent_priv->agent.rmpp_version) {
++	if (ib_mad_kernel_rmpp_agent(&mad_agent_priv->agent)) {
+ 		mad_recv_wc = ib_process_rmpp_recv_wc(mad_agent_priv,
+ 						      mad_recv_wc);
+ 		if (!mad_recv_wc) {
+@@ -1827,23 +2017,39 @@
+ 		mad_send_wr = ib_find_send_mad(mad_agent_priv, mad_recv_wc);
+ 		if (!mad_send_wr) {
+ 			spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
+-			ib_free_recv_mad(mad_recv_wc);
+-			deref_mad_agent(mad_agent_priv);
+-			return;
+-		}
+-		ib_mark_mad_done(mad_send_wr);
+-		spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
++			if (!ib_mad_kernel_rmpp_agent(&mad_agent_priv->agent)
++			   && ib_is_mad_class_rmpp(mad_recv_wc->recv_buf.mad->mad_hdr.mgmt_class)
++			   && (ib_get_rmpp_flags(&((struct ib_rmpp_base *)mad_recv_wc->recv_buf.mad)->rmpp_hdr)
++					& IB_MGMT_RMPP_FLAG_ACTIVE)) {
++				/* user rmpp is in effect
++				 * and this is an active RMPP MAD
++				 */
++				mad_recv_wc->wc->wr_id = 0;
++				mad_agent_priv->agent.recv_handler(&mad_agent_priv->agent,
++								   mad_recv_wc);
++				atomic_dec(&mad_agent_priv->refcount);
++			} else {
++				/* not user rmpp, revert to normal behavior and
++				 * drop the mad */
++				ib_free_recv_mad(mad_recv_wc);
++				deref_mad_agent(mad_agent_priv);
++				return;
++			}
++		} else {
++			ib_mark_mad_done(mad_send_wr);
++			spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
+ 
+-		/* Defined behavior is to complete response before request */
+-		mad_recv_wc->wc->wr_id = (unsigned long) &mad_send_wr->send_buf;
+-		mad_agent_priv->agent.recv_handler(&mad_agent_priv->agent,
+-						   mad_recv_wc);
+-		atomic_dec(&mad_agent_priv->refcount);
++			/* Defined behavior is to complete response before request */
++			mad_recv_wc->wc->wr_id = (unsigned long) &mad_send_wr->send_buf;
++			mad_agent_priv->agent.recv_handler(&mad_agent_priv->agent,
++							   mad_recv_wc);
++			atomic_dec(&mad_agent_priv->refcount);
+ 
+-		mad_send_wc.status = IB_WC_SUCCESS;
+-		mad_send_wc.vendor_err = 0;
+-		mad_send_wc.send_buf = &mad_send_wr->send_buf;
+-		ib_mad_complete_send_wr(mad_send_wr, &mad_send_wc);
++			mad_send_wc.status = IB_WC_SUCCESS;
++			mad_send_wc.vendor_err = 0;
++			mad_send_wc.send_buf = &mad_send_wr->send_buf;
++			ib_mad_complete_send_wr(mad_send_wr, &mad_send_wc);
++		}
+ 	} else {
+ 		mad_agent_priv->agent.recv_handler(&mad_agent_priv->agent,
+ 						   mad_recv_wc);
+@@ -1851,6 +2057,56 @@
+ 	}
+ }
+ 
++enum smi_action handle_ib_smi(struct ib_mad_port_private *port_priv,
++			      struct ib_mad_qp_info *qp_info,
++			      struct ib_wc *wc,
++			      int port_num,
++			      struct ib_mad_private *recv,
++			      struct ib_mad_private *response)
++{
++	enum smi_forward_action retsmi;
++
++	if (smi_handle_dr_smp_recv(&recv->mad.smp,
++				   port_priv->device->node_type,
++				   port_num,
++				   port_priv->device->phys_port_cnt) ==
++				   IB_SMI_DISCARD)
++		return (IB_SMI_DISCARD);
++
++	retsmi = smi_check_forward_dr_smp(&recv->mad.smp);
++	if (retsmi == IB_SMI_LOCAL)
++		return (IB_SMI_HANDLE);
++
++	if (retsmi == IB_SMI_SEND) { /* don't forward */
++		if (smi_handle_dr_smp_send(&recv->mad.smp,
++					   port_priv->device->node_type,
++					   port_num) == IB_SMI_DISCARD)
++			return (IB_SMI_DISCARD);
++
++		if (smi_check_local_smp(&recv->mad.smp, port_priv->device) == IB_SMI_DISCARD)
++			return (IB_SMI_DISCARD);
++	} else if (port_priv->device->node_type == RDMA_NODE_IB_SWITCH) {
++
++		/* FIXME for upstream */
++		BUG_ON(response->header.flags & IB_MAD_PRIV_FLAG_OPA);
++
++		/* forward case for switches */
++		memcpy(response, recv, sizeof(*response));
++		response->header.recv_wc.wc = &response->header.wc;
++		response->header.recv_wc.recv_buf.mad = &response->mad.mad;
++		response->header.recv_wc.recv_buf.grh = &response->grh;
++
++		agent_send_response(&response->mad.mad,
++				    &response->grh, wc,
++				    port_priv->device,
++				    smi_get_fwd_port(&recv->mad.smp),
++				    qp_info->qp->qp_num);
++
++		return (IB_SMI_DISCARD);
++	}
++	return (IB_SMI_HANDLE);
++}
++
+ static bool generate_unmatched_resp(struct ib_mad_private *recv,
+ 				    struct ib_mad_private *response)
+ {
+@@ -1872,22 +2128,15 @@
+ 	}
+ }
+ static void ib_mad_recv_done_handler(struct ib_mad_port_private *port_priv,
+-				     struct ib_wc *wc)
++				     struct ib_wc *wc,
++				     struct ib_mad_private_header *mad_priv_hdr,
++				     struct ib_mad_qp_info *qp_info)
+ {
+-	struct ib_mad_qp_info *qp_info;
+-	struct ib_mad_private_header *mad_priv_hdr;
+ 	struct ib_mad_private *recv, *response = NULL;
+-	struct ib_mad_list_head *mad_list;
+ 	struct ib_mad_agent_private *mad_agent;
+ 	int port_num;
+ 	int ret = IB_MAD_RESULT_SUCCESS;
+ 
+-	mad_list = (struct ib_mad_list_head *)(unsigned long)wc->wr_id;
+-	qp_info = mad_list->mad_queue->qp_info;
+-	dequeue_mad(mad_list);
+-
+-	mad_priv_hdr = container_of(mad_list, struct ib_mad_private_header,
+-				    mad_list);
+ 	recv = container_of(mad_priv_hdr, struct ib_mad_private, header);
+ 	ib_dma_unmap_single(port_priv->device,
+ 			    recv->header.mapping,
+@@ -1911,10 +2160,11 @@
+ 
+ 	response = kmem_cache_alloc(ib_mad_cache, GFP_KERNEL);
+ 	if (!response) {
+-		printk(KERN_ERR PFX "ib_mad_recv_done_handler no memory "
+-		       "for response buffer\n");
++		dev_err(&port_priv->device->dev,
++			"ib_mad_recv_done_handler no memory for response buffer\n");
+ 		goto out;
+ 	}
++	response->header.flags = 0;
+ 
+ 	if (port_priv->device->node_type == RDMA_NODE_IB_SWITCH)
+ 		port_num = wc->port_num;
+@@ -1923,45 +2173,12 @@
+ 
+ 	if (recv->mad.mad.mad_hdr.mgmt_class ==
+ 	    IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE) {
+-		enum smi_forward_action retsmi;
+-
+-		if (smi_handle_dr_smp_recv(&recv->mad.smp,
+-					   port_priv->device->node_type,
+-					   port_num,
+-					   port_priv->device->phys_port_cnt) ==
+-					   IB_SMI_DISCARD)
+-			goto out;
+-
+-		retsmi = smi_check_forward_dr_smp(&recv->mad.smp);
+-		if (retsmi == IB_SMI_LOCAL)
+-			goto local;
+-
+-		if (retsmi == IB_SMI_SEND) { /* don't forward */
+-			if (smi_handle_dr_smp_send(&recv->mad.smp,
+-						   port_priv->device->node_type,
+-						   port_num) == IB_SMI_DISCARD)
+-				goto out;
+-
+-			if (smi_check_local_smp(&recv->mad.smp, port_priv->device) == IB_SMI_DISCARD)
+-				goto out;
+-		} else if (port_priv->device->node_type == RDMA_NODE_IB_SWITCH) {
+-			/* forward case for switches */
+-			memcpy(response, recv, sizeof(*response));
+-			response->header.recv_wc.wc = &response->header.wc;
+-			response->header.recv_wc.recv_buf.mad = &response->mad.mad;
+-			response->header.recv_wc.recv_buf.grh = &response->grh;
+-
+-			agent_send_response(&response->mad.mad,
+-					    &response->grh, wc,
+-					    port_priv->device,
+-					    smi_get_fwd_port(&recv->mad.smp),
+-					    qp_info->qp->qp_num);
+-
++		if (handle_ib_smi(port_priv, qp_info, wc, port_num, recv,
++				  response)
++		    == IB_SMI_DISCARD)
+ 			goto out;
+-		}
+ 	}
+ 
+-local:
+ 	/* Give driver "right of first refusal" on incoming MAD */
+ 	if (port_priv->device->process_mad) {
+ 		ret = port_priv->device->process_mad(port_priv->device, 0,
+@@ -1973,6 +2190,8 @@
+ 			if (ret & IB_MAD_RESULT_CONSUMED)
+ 				goto out;
+ 			if (ret & IB_MAD_RESULT_REPLY) {
++				if (mad_fix_opa_size)
++					wc->byte_len = sizeof(struct opa_mad);
+ 				agent_send_response(&response->mad.mad,
+ 						    &recv->grh, wc,
+ 						    port_priv->device,
+@@ -2001,13 +2220,15 @@
+ 	/* Post another receive request for this QP */
+ 	if (response) {
+ 		ib_mad_post_receive_mads(qp_info, response);
+-		if (recv)
++		if (recv) {
++			BUG_ON(recv->header.flags & IB_MAD_PRIV_FLAG_OPA);
+ 			kmem_cache_free(ib_mad_cache, recv);
++		}
+ 	} else
+ 		ib_mad_post_receive_mads(qp_info, recv);
+ }
+ 
+-static void adjust_timeout(struct ib_mad_agent_private *mad_agent_priv)
++void adjust_timeout(struct ib_mad_agent_private *mad_agent_priv)
+ {
+ 	struct ib_mad_send_wr_private *mad_send_wr;
+ 	unsigned long delay;
+@@ -2031,7 +2252,7 @@
+ 	}
+ }
+ 
+-static void wait_for_response(struct ib_mad_send_wr_private *mad_send_wr)
++void wait_for_response(struct ib_mad_send_wr_private *mad_send_wr)
+ {
+ 	struct ib_mad_agent_private *mad_agent_priv;
+ 	struct ib_mad_send_wr_private *temp_mad_send_wr;
+@@ -2083,7 +2304,7 @@
+ 
+ 	mad_agent_priv = mad_send_wr->mad_agent_priv;
+ 	spin_lock_irqsave(&mad_agent_priv->lock, flags);
+-	if (mad_agent_priv->agent.rmpp_version) {
++	if (ib_mad_kernel_rmpp_agent(&mad_agent_priv->agent)) {
+ 		ret = ib_process_rmpp_send_wc(mad_send_wr, mad_send_wc);
+ 		if (ret == IB_RMPP_RESULT_CONSUMED)
+ 			goto done;
+@@ -2176,7 +2397,8 @@
+ 		ret = ib_post_send(qp_info->qp, &queued_send_wr->send_wr,
+ 				   &bad_send_wr);
+ 		if (ret) {
+-			printk(KERN_ERR PFX "ib_post_send failed: %d\n", ret);
++			dev_err(&port_priv->device->dev,
++				"ib_post_send failed: %d\n", ret);
+ 			mad_send_wr = queued_send_wr;
+ 			wc->status = IB_WC_LOC_QP_OP_ERR;
+ 			goto retry;
+@@ -2248,8 +2470,9 @@
+ 					   IB_QP_STATE | IB_QP_CUR_STATE);
+ 			kfree(attr);
+ 			if (ret)
+-				printk(KERN_ERR PFX "mad_error_handler - "
+-				       "ib_modify_qp to RTS : %d\n", ret);
++				dev_err(&port_priv->device->dev,
++					"mad_error_handler - ib_modify_qp to RTS : %d\n",
++					ret);
+ 			else
+ 				mark_sends_for_retry(qp_info);
+ 		}
+@@ -2257,6 +2480,26 @@
+ 	}
+ }
+ 
++static void ib_mad_recv_mad(struct ib_mad_port_private *port_priv,
++			    struct ib_wc *wc)
++{
++	struct ib_mad_qp_info *qp_info;
++	struct ib_mad_list_head *mad_list;
++	struct ib_mad_private_header *mad_priv_hdr;
++
++	mad_list = (struct ib_mad_list_head *)(unsigned long)wc->wr_id;
++	qp_info = mad_list->mad_queue->qp_info;
++	dequeue_mad(mad_list);
++
++	mad_priv_hdr = container_of(mad_list, struct ib_mad_private_header,
++				    mad_list);
++
++	if (port_priv->supports_opa_mads)
++		ib_mad_recv_done_opa_handler(port_priv, wc, mad_priv_hdr, qp_info);
++	else
++		ib_mad_recv_done_handler(port_priv, wc, mad_priv_hdr, qp_info);
++}
++
+ /*
+  * IB MAD completion callback
+  */
+@@ -2264,6 +2507,7 @@
+ {
+ 	struct ib_mad_port_private *port_priv;
+ 	struct ib_wc wc;
++	int count = 0;
+ 
+ 	port_priv = container_of(work, struct ib_mad_port_private, work);
+ 	ib_req_notify_cq(port_priv->cq, IB_CQ_NEXT_COMP);
+@@ -2275,7 +2519,7 @@
+ 				ib_mad_send_done_handler(port_priv, &wc);
+ 				break;
+ 			case IB_WC_RECV:
+-				ib_mad_recv_done_handler(port_priv, &wc);
++				ib_mad_recv_mad(port_priv, &wc);
+ 				break;
+ 			default:
+ 				BUG_ON(1);
+@@ -2283,7 +2527,54 @@
+ 			}
+ 		} else
+ 			mad_error_handler(port_priv, &wc);
++
++		if (++count > MAD_COMPLETION_PROC_LIMIT) {
++			queue_work(port_priv->wq, &port_priv->work);
++			break;
++		}
++	}
++}
++
++/**
++ * mad_agent_priv->lock should be held
++ */
++static int check_send_queue_stall(struct ib_mad_agent_private *mad_agent_priv)
++{
++	struct ib_mad_send_wr_private *mad_send_wr;
++	int stalled = 0;
++
++	if (list_empty(&mad_agent_priv->send_list)) {
++		if (unlikely(mad_agent_priv->qp_info->send_queue_stalled)) {
++			mad_agent_priv->qp_info->send_queue_stalled = 0;
++			pr_err("QP %d of %s no longer stalled\n",
++				mad_agent_priv->qp_info->qp->qp_num,
++				mad_agent_priv->qp_info->qp->device->name);
++		}
++		return 0;
++	}
++
++	mad_send_wr = list_entry(mad_agent_priv->send_list.next,
++				 struct ib_mad_send_wr_private,
++				 agent_list);
++
++	if (time_after(jiffies, mad_send_wr->sq_timeout)) {
++		struct ib_qp *stuck_qp;
++		struct ib_qp_attr qp_attr;
++		struct ib_qp_init_attr iqp_attr;
++
++		stuck_qp = mad_agent_priv->qp_info->qp;
++
++		ib_query_qp(stuck_qp, &qp_attr, IB_QP_STATE, &iqp_attr);
++
++		if (!mad_agent_priv->qp_info->send_queue_stalled)
++			pr_err("Detected stalled send queue on QP %d of %s (QP state %d)\n",
++				stuck_qp->qp_num, stuck_qp->device->name,
++				qp_attr.qp_state);
++
++		mad_agent_priv->qp_info->send_queue_stalled = 1;
++		stalled = 1;
+ 	}
++	return stalled;
+ }
+ 
+ static void cancel_mads(struct ib_mad_agent_private *mad_agent_priv)
+@@ -2302,8 +2593,17 @@
+ 			mad_send_wr->status = IB_WC_WR_FLUSH_ERR;
+ 			mad_send_wr->refcount -= (mad_send_wr->timeout > 0);
+ 		}
++#if 0
++		list_del(&mad_send_wr->agent_list);
++		mad_agent_priv->agent.send_handler(&mad_agent_priv->agent,
++						   &mad_send_wc);
++		deref_mad_agent(mad_agent_priv);
++#endif
+ 	}
+ 
++	if (check_send_queue_stall(mad_agent_priv))
++		pr_crit("Detected stalled send queue while trying to cancel MAD's\n");
++
+ 	/* Empty wait list to prevent receives from finding a request */
+ 	list_splice_init(&mad_agent_priv->wait_list, &cancel_list);
+ 	spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
+@@ -2336,7 +2636,8 @@
+ 
+ 	list_for_each_entry(mad_send_wr, &mad_agent_priv->send_list,
+ 			    agent_list) {
+-		if (is_data_mad(mad_agent_priv, mad_send_wr->send_buf.mad) &&
++		if (is_rmpp_data_mad(mad_agent_priv,
++				     mad_send_wr->send_buf.mad) &&
+ 		    &mad_send_wr->send_buf == send_buf)
+ 			return mad_send_wr;
+ 	}
+@@ -2406,9 +2707,11 @@
+ 		spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
+ 		free_mad = 0;
+ 		if (local->mad_priv) {
++			u8 base_version;
+ 			recv_mad_agent = local->recv_mad_agent;
+ 			if (!recv_mad_agent) {
+-				printk(KERN_ERR PFX "No receive MAD agent for local completion\n");
++				dev_err(&mad_agent_priv->agent.device->dev,
++					"No receive MAD agent for local completion\n");
+ 				free_mad = 1;
+ 				goto local_send_completion;
+ 			}
+@@ -2420,11 +2723,18 @@
+ 			build_smp_wc(recv_mad_agent->agent.qp,
+ 				     (unsigned long) local->mad_send_wr,
+ 				     be16_to_cpu(IB_LID_PERMISSIVE),
+-				     0, recv_mad_agent->agent.port_num, &wc);
++				     /* FIXME upstream; pkey_index valid for IB ??? */
++				     local->mad_send_wr->send_wr.wr.ud.pkey_index,
++				     recv_mad_agent->agent.port_num, &wc);
+ 
+ 			local->mad_priv->header.recv_wc.wc = &wc;
+-			local->mad_priv->header.recv_wc.mad_len =
+-						sizeof(struct ib_mad);
++
++			base_version = local->mad_priv->mad.mad.mad_hdr.base_version;
++			if (base_version == OPA_MGMT_BASE_VERSION)
++				local->mad_priv->header.recv_wc.mad_len = local->return_wc_byte_len;
++			else
++				local->mad_priv->header.recv_wc.mad_len = sizeof(struct ib_mad);
++
+ 			INIT_LIST_HEAD(&local->mad_priv->header.recv_wc.rmpp_list);
+ 			list_add(&local->mad_priv->header.recv_wc.recv_buf.list,
+ 				 &local->mad_priv->header.recv_wc.rmpp_list);
+@@ -2457,8 +2767,12 @@
+ 
+ 		spin_lock_irqsave(&mad_agent_priv->lock, flags);
+ 		atomic_dec(&mad_agent_priv->refcount);
+-		if (free_mad)
+-			kmem_cache_free(ib_mad_cache, local->mad_priv);
++		if (free_mad) {
++			if (local->mad_priv->header.flags & IB_MAD_PRIV_FLAG_OPA)
++				kmem_cache_free(opa_mad_cache, local->mad_priv);
++			else
++				kmem_cache_free(ib_mad_cache, local->mad_priv);
++		}
+ 		kfree(local);
+ 	}
+ 	spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
+@@ -2476,7 +2790,7 @@
+ 
+ 	mad_send_wr->timeout = msecs_to_jiffies(mad_send_wr->send_buf.timeout_ms);
+ 
+-	if (mad_send_wr->mad_agent_priv->agent.rmpp_version) {
++	if (ib_mad_kernel_rmpp_agent(&mad_send_wr->mad_agent_priv->agent)) {
+ 		ret = ib_retry_rmpp(mad_send_wr);
+ 		switch (ret) {
+ 		case IB_RMPP_RESULT_UNHANDLED:
+@@ -2545,6 +2859,8 @@
+ 		atomic_dec(&mad_agent_priv->refcount);
+ 		spin_lock_irqsave(&mad_agent_priv->lock, flags);
+ 	}
++
++	check_send_queue_stall(mad_agent_priv);
+ 	spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
+ }
+ 
+@@ -2589,10 +2905,12 @@
+ 		} else {
+ 			mad_priv = kmem_cache_alloc(ib_mad_cache, GFP_KERNEL);
+ 			if (!mad_priv) {
+-				printk(KERN_ERR PFX "No memory for receive buffer\n");
++				dev_err(&qp_info->port_priv->device->dev,
++					"No memory for receive buffer\n");
+ 				ret = -ENOMEM;
+ 				break;
+ 			}
++			mad_priv->header.flags = 0;
+ 		}
+ 		sg_list.addr = ib_dma_map_single(qp_info->port_priv->device,
+ 						 &mad_priv->grh,
+@@ -2624,8 +2942,10 @@
+ 					    sizeof *mad_priv -
+ 					      sizeof mad_priv->header,
+ 					    DMA_FROM_DEVICE);
++			BUG_ON(mad_priv->header.flags & IB_MAD_PRIV_FLAG_OPA);
+ 			kmem_cache_free(ib_mad_cache, mad_priv);
+-			printk(KERN_ERR PFX "ib_post_recv failed: %d\n", ret);
++			dev_err(&qp_info->port_priv->device->dev,
++				"ib_post_recv failed: %d\n", ret);
+ 			break;
+ 		}
+ 	} while (post);
+@@ -2658,12 +2978,21 @@
+ 		/* Remove from posted receive MAD list */
+ 		list_del(&mad_list->list);
+ 
+-		ib_dma_unmap_single(qp_info->port_priv->device,
+-				    recv->header.mapping,
+-				    sizeof(struct ib_mad_private) -
+-				      sizeof(struct ib_mad_private_header),
+-				    DMA_FROM_DEVICE);
+-		kmem_cache_free(ib_mad_cache, recv);
++		if (recv->header.flags & IB_MAD_PRIV_FLAG_OPA) {
++			ib_dma_unmap_single(qp_info->port_priv->device,
++					    recv->header.mapping,
++					    sizeof(struct opa_mad_private) -
++					      sizeof(struct ib_mad_private_header),
++					    DMA_FROM_DEVICE);
++			kmem_cache_free(opa_mad_cache, recv);
++		} else {
++			ib_dma_unmap_single(qp_info->port_priv->device,
++					    recv->header.mapping,
++					    sizeof(struct ib_mad_private) -
++					      sizeof(struct ib_mad_private_header),
++					    DMA_FROM_DEVICE);
++			kmem_cache_free(ib_mad_cache, recv);
++		}
+ 	}
+ 
+ 	qp_info->recv_queue.count = 0;
+@@ -2681,7 +3010,8 @@
+ 
+ 	attr = kmalloc(sizeof *attr, GFP_KERNEL);
+ 	if (!attr) {
+-		printk(KERN_ERR PFX "Couldn't kmalloc ib_qp_attr\n");
++		dev_err(&port_priv->device->dev,
++			"Couldn't kmalloc ib_qp_attr\n");
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -2705,16 +3035,18 @@
+ 		ret = ib_modify_qp(qp, attr, IB_QP_STATE |
+ 					     IB_QP_PKEY_INDEX | IB_QP_QKEY);
+ 		if (ret) {
+-			printk(KERN_ERR PFX "Couldn't change QP%d state to "
+-			       "INIT: %d\n", i, ret);
++			dev_err(&port_priv->device->dev,
++				"Couldn't change QP%d state to INIT: %d\n",
++				i, ret);
+ 			goto out;
+ 		}
+ 
+ 		attr->qp_state = IB_QPS_RTR;
+ 		ret = ib_modify_qp(qp, attr, IB_QP_STATE);
+ 		if (ret) {
+-			printk(KERN_ERR PFX "Couldn't change QP%d state to "
+-			       "RTR: %d\n", i, ret);
++			dev_err(&port_priv->device->dev,
++				"Couldn't change QP%d state to RTR: %d\n",
++				i, ret);
+ 			goto out;
+ 		}
+ 
+@@ -2722,16 +3054,18 @@
+ 		attr->sq_psn = IB_MAD_SEND_Q_PSN;
+ 		ret = ib_modify_qp(qp, attr, IB_QP_STATE | IB_QP_SQ_PSN);
+ 		if (ret) {
+-			printk(KERN_ERR PFX "Couldn't change QP%d state to "
+-			       "RTS: %d\n", i, ret);
++			dev_err(&port_priv->device->dev,
++				"Couldn't change QP%d state to RTS: %d\n",
++				i, ret);
+ 			goto out;
+ 		}
+ 	}
+ 
+ 	ret = ib_req_notify_cq(port_priv->cq, IB_CQ_NEXT_COMP);
+ 	if (ret) {
+-		printk(KERN_ERR PFX "Failed to request completion "
+-		       "notification: %d\n", ret);
++		dev_err(&port_priv->device->dev,
++			"Failed to request completion notification: %d\n",
++			ret);
+ 		goto out;
+ 	}
+ 
+@@ -2739,9 +3073,13 @@
+ 		if (!port_priv->qp_info[i].qp)
+ 			continue;
+ 
+-		ret = ib_mad_post_receive_mads(&port_priv->qp_info[i], NULL);
++		if (port_priv->qp_info[i].supports_opa_mads)
++			ret = ib_mad_post_opa_rcv_mads(&port_priv->qp_info[i], NULL);
++		else
++			ret = ib_mad_post_receive_mads(&port_priv->qp_info[i], NULL);
+ 		if (ret) {
+-			printk(KERN_ERR PFX "Couldn't post receive WRs\n");
++			dev_err(&port_priv->device->dev,
++				"Couldn't post receive WRs\n");
+ 			goto out;
+ 		}
+ 	}
+@@ -2755,7 +3093,8 @@
+ 	struct ib_mad_qp_info	*qp_info = qp_context;
+ 
+ 	/* It's worse than that! He's dead, Jim! */
+-	printk(KERN_ERR PFX "Fatal error (%d) on MAD QP (%d)\n",
++	dev_err(&qp_info->port_priv->device->dev,
++		"Fatal error (%d) on MAD QP (%d)\n",
+ 		event->event, qp_info->qp->qp_num);
+ }
+ 
+@@ -2782,7 +3121,7 @@
+ }
+ 
+ static int create_mad_qp(struct ib_mad_qp_info *qp_info,
+-			 enum ib_qp_type qp_type)
++			 enum ib_qp_type qp_type, int supports_opa_mads)
+ {
+ 	struct ib_qp_init_attr	qp_init_attr;
+ 	int ret;
+@@ -2801,14 +3140,16 @@
+ 	qp_init_attr.event_handler = qp_event_handler;
+ 	qp_info->qp = ib_create_qp(qp_info->port_priv->pd, &qp_init_attr);
+ 	if (IS_ERR(qp_info->qp)) {
+-		printk(KERN_ERR PFX "Couldn't create ib_mad QP%d\n",
+-		       get_spl_qp_index(qp_type));
++		dev_err(&qp_info->port_priv->device->dev,
++			"Couldn't create ib_mad QP%d\n",
++			get_spl_qp_index(qp_type));
+ 		ret = PTR_ERR(qp_info->qp);
+ 		goto error;
+ 	}
+ 	/* Use minimum queue sizes unless the CQ is resized */
+ 	qp_info->send_queue.max_active = mad_sendq_size;
+ 	qp_info->recv_queue.max_active = mad_recvq_size;
++	qp_info->supports_opa_mads = supports_opa_mads;
+ 	return 0;
+ 
+ error:
+@@ -2824,6 +3165,19 @@
+ 	kfree(qp_info->snoop_table);
+ }
+ 
++static int
++mad_device_supports_opa_mads(struct ib_device *device)
++{
++	if (mad_support_opa) {
++		struct ib_device_attr attr;
++		if (!ib_query_device(device, &attr))
++			return ((attr.device_cap_flags
++				& IB_DEVICE_OPA_MAD_SUPPORT)
++				== IB_DEVICE_OPA_MAD_SUPPORT);
++	}
++	return (0);
++}
++
+ /*
+  * Open the port
+  * Create the QP, PD, MR, and CQ if needed
+@@ -2840,7 +3194,7 @@
+ 	/* Create new device info */
+ 	port_priv = kzalloc(sizeof *port_priv, GFP_KERNEL);
+ 	if (!port_priv) {
+-		printk(KERN_ERR PFX "No memory for ib_mad_port_private\n");
++		dev_err(&device->dev, "No memory for ib_mad_port_private\n");
+ 		return -ENOMEM;
+ 	}
+ 
+@@ -2860,36 +3214,44 @@
+ 				     ib_mad_thread_completion_handler,
+ 				     NULL, port_priv, cq_size, 0);
+ 	if (IS_ERR(port_priv->cq)) {
+-		printk(KERN_ERR PFX "Couldn't create ib_mad CQ\n");
++		dev_err(&device->dev, "Couldn't create ib_mad CQ\n");
+ 		ret = PTR_ERR(port_priv->cq);
+ 		goto error3;
+ 	}
+ 
+ 	port_priv->pd = ib_alloc_pd(device);
+ 	if (IS_ERR(port_priv->pd)) {
+-		printk(KERN_ERR PFX "Couldn't create ib_mad PD\n");
++		dev_err(&device->dev, "Couldn't create ib_mad PD\n");
+ 		ret = PTR_ERR(port_priv->pd);
+ 		goto error4;
+ 	}
+ 
+ 	port_priv->mr = ib_get_dma_mr(port_priv->pd, IB_ACCESS_LOCAL_WRITE);
+ 	if (IS_ERR(port_priv->mr)) {
+-		printk(KERN_ERR PFX "Couldn't get ib_mad DMA MR\n");
++		dev_err(&device->dev, "Couldn't get ib_mad DMA MR\n");
+ 		ret = PTR_ERR(port_priv->mr);
+ 		goto error5;
+ 	}
+ 
++	port_priv->supports_opa_mads = mad_device_supports_opa_mads(device);
++	if (port_priv->supports_opa_mads)
++		pr_info("Opa MAD support enabled for %s:%d\n",
++				device->name, port_num);
++
+ 	if (has_smi) {
+-		ret = create_mad_qp(&port_priv->qp_info[0], IB_QPT_SMI);
++		ret = create_mad_qp(&port_priv->qp_info[0], IB_QPT_SMI,
++				    port_priv->supports_opa_mads);
+ 		if (ret)
+ 			goto error6;
+ 	}
+-	ret = create_mad_qp(&port_priv->qp_info[1], IB_QPT_GSI);
++	ret = create_mad_qp(&port_priv->qp_info[1], IB_QPT_GSI,
++			    port_priv->supports_opa_mads);
+ 	if (ret)
+ 		goto error7;
+ 
+ 	snprintf(name, sizeof name, "ib_mad%d", port_num);
+-	port_priv->wq = create_singlethread_workqueue(name);
++	port_priv->wq = alloc_workqueue(name,
++				WQ_UNBOUND | WQ_HIGHPRI | WQ_MEM_RECLAIM, 1);
+ 	if (!port_priv->wq) {
+ 		ret = -ENOMEM;
+ 		goto error8;
+@@ -2902,7 +3264,7 @@
+ 
+ 	ret = ib_mad_port_start(port_priv);
+ 	if (ret) {
+-		printk(KERN_ERR PFX "Couldn't start port\n");
++		dev_err(&device->dev, "Couldn't start port\n");
+ 		goto error9;
+ 	}
+ 
+@@ -2946,7 +3308,7 @@
+ 	port_priv = __ib_get_mad_port(device, port_num);
+ 	if (port_priv == NULL) {
+ 		spin_unlock_irqrestore(&ib_mad_port_list_lock, flags);
+-		printk(KERN_ERR PFX "Port %d not found\n", port_num);
++		dev_err(&device->dev, "Port %d not found\n", port_num);
+ 		return -ENODEV;
+ 	}
+ 	list_del_init(&port_priv->port_list);
+@@ -2984,14 +3346,12 @@
+ 
+ 	for (i = start; i <= end; i++) {
+ 		if (ib_mad_port_open(device, i)) {
+-			printk(KERN_ERR PFX "Couldn't open %s port %d\n",
+-			       device->name, i);
++			dev_err(&device->dev, "Couldn't open port %d\n", i);
+ 			goto error;
+ 		}
+ 		if (ib_agent_port_open(device, i)) {
+-			printk(KERN_ERR PFX "Couldn't open %s port %d "
+-			       "for agents\n",
+-			       device->name, i);
++			dev_err(&device->dev,
++				"Couldn't open port %d for agents\n", i);
+ 			goto error_agent;
+ 		}
+ 	}
+@@ -2999,20 +3359,17 @@
+ 
+ error_agent:
+ 	if (ib_mad_port_close(device, i))
+-		printk(KERN_ERR PFX "Couldn't close %s port %d\n",
+-		       device->name, i);
++		dev_err(&device->dev, "Couldn't close port %d\n", i);
+ 
+ error:
+ 	i--;
+ 
+ 	while (i >= start) {
+ 		if (ib_agent_port_close(device, i))
+-			printk(KERN_ERR PFX "Couldn't close %s port %d "
+-			       "for agents\n",
+-			       device->name, i);
++			dev_err(&device->dev,
++				"Couldn't close port %d for agents\n", i);
+ 		if (ib_mad_port_close(device, i))
+-			printk(KERN_ERR PFX "Couldn't close %s port %d\n",
+-			       device->name, i);
++			dev_err(&device->dev, "Couldn't close port %d\n", i);
+ 		i--;
+ 	}
+ }
+@@ -3033,12 +3390,12 @@
+ 	}
+ 	for (i = 0; i < num_ports; i++, cur_port++) {
+ 		if (ib_agent_port_close(device, cur_port))
+-			printk(KERN_ERR PFX "Couldn't close %s port %d "
+-			       "for agents\n",
+-			       device->name, cur_port);
++			dev_err(&device->dev,
++				"Couldn't close port %d for agents\n",
++				cur_port);
+ 		if (ib_mad_port_close(device, cur_port))
+-			printk(KERN_ERR PFX "Couldn't close %s port %d\n",
+-			       device->name, cur_port);
++			dev_err(&device->dev, "Couldn't close port %d\n",
++				cur_port);
+ 	}
+ }
+ 
+@@ -3061,24 +3418,45 @@
+ 	ib_mad_cache = kmem_cache_create("ib_mad",
+ 					 sizeof(struct ib_mad_private),
+ 					 0,
++					 SLAB_DEBUG_FREE |
++					 SLAB_RED_ZONE |
++					 SLAB_POISON |
++					 SLAB_STORE_USER |
+ 					 SLAB_HWCACHE_ALIGN,
+ 					 NULL);
+ 	if (!ib_mad_cache) {
+-		printk(KERN_ERR PFX "Couldn't create ib_mad cache\n");
++		pr_err("Couldn't create ib_mad cache\n");
+ 		ret = -ENOMEM;
+ 		goto error1;
+ 	}
+ 
++	opa_mad_cache = kmem_cache_create("ib_mad_opa",
++					 sizeof(struct opa_mad_private),
++					 0,
++					 SLAB_DEBUG_FREE |
++					 SLAB_RED_ZONE |
++					 SLAB_POISON |
++					 SLAB_STORE_USER |
++					 SLAB_HWCACHE_ALIGN,
++					 NULL);
++	if (!opa_mad_cache) {
++		pr_err("Couldn't create ib_mad cache\n");
++		ret = -ENOMEM;
++		goto error2;
++	}
++
+ 	INIT_LIST_HEAD(&ib_mad_port_list);
+ 
+ 	if (ib_register_client(&mad_client)) {
+-		printk(KERN_ERR PFX "Couldn't register ib_mad client\n");
++		pr_err("Couldn't register ib_mad client\n");
+ 		ret = -EINVAL;
+-		goto error2;
++		goto error3;
+ 	}
+ 
+ 	return 0;
+ 
++error3:
++	kmem_cache_destroy(opa_mad_cache);
+ error2:
+ 	kmem_cache_destroy(ib_mad_cache);
+ error1:
+@@ -3088,6 +3466,7 @@
+ static void __exit ib_mad_cleanup_module(void)
+ {
+ 	ib_unregister_client(&mad_client);
++	kmem_cache_destroy(opa_mad_cache);
+ 	kmem_cache_destroy(ib_mad_cache);
+ }
+ 
+--- a/ib_mad/mad_priv.h
++++ b/ib_mad/mad_priv.h
+@@ -41,6 +41,7 @@
+ #include <linux/workqueue.h>
+ #include <rdma/ib_mad.h>
+ #include <rdma/ib_smi.h>
++#include <rdma/opa_smi.h>
+ 
+ 
+ #define PFX "ib_mad: "
+@@ -58,22 +59,33 @@
+ #define IB_MAD_SEND_Q_PSN	0
+ 
+ /* Registration table sizes */
+-#define MAX_MGMT_CLASS		80
+-#define MAX_MGMT_VERSION	8
++#define MAX_MGMT_CLASS         80
++#define MAX_MGMT_VERSION	0x83 /* FIXME -- STL specific
++					how big should this be for STL?
++					This makes the version table huge
++					for agent registrations */
+ #define MAX_MGMT_OUI		8
+ #define MAX_MGMT_VENDOR_RANGE2	(IB_MGMT_CLASS_VENDOR_RANGE2_END - \
+ 				IB_MGMT_CLASS_VENDOR_RANGE2_START + 1)
+ 
++/* shared between mad.c and jumbo_mad.c */
++extern struct kmem_cache *opa_mad_cache;
++
+ struct ib_mad_list_head {
+ 	struct list_head list;
+ 	struct ib_mad_queue *mad_queue;
+ };
+ 
++enum ib_mad_private_flags {
++	IB_MAD_PRIV_FLAG_OPA = (1 << 0)
++};
++
+ struct ib_mad_private_header {
+ 	struct ib_mad_list_head mad_list;
+ 	struct ib_mad_recv_wc recv_wc;
+ 	struct ib_wc wc;
+ 	u64 mapping;
++	u64 flags;
+ } __attribute__ ((packed));
+ 
+ struct ib_mad_private {
+@@ -86,6 +98,26 @@
+ 	} mad;
+ } __attribute__ ((packed));
+ 
++/**
++ * It might be possible to define this as part of the ib_mad_private by simply
++ * extending the union there.
++ * The problem is I don't know what other RDMA hardware will do if you attempt
++ * to post >256B Rcv WR on their managment QP's.
++ * Therefore we are going to try and keep this structure separate and only use
++ * it on opa_mad capable devices.
++ * Furthermore, this allows us to use smaller kmem_cache's on non-opa capable
++ * devices for less memory ussage.
++ */
++struct opa_mad_private {
++	struct ib_mad_private_header header;
++	struct ib_grh grh;
++	union {
++		struct opa_mad mad;
++		struct opa_rmpp_mad rmpp_mad;
++		struct opa_smp smp;
++	} mad;
++} __attribute__ ((packed));
++
+ struct ib_rmpp_segment {
+ 	struct list_head list;
+ 	u32 num;
+@@ -132,6 +164,7 @@
+ 	struct ib_sge sg_list[IB_MAD_SEND_REQ_MAX_SG];
+ 	__be64 tid;
+ 	unsigned long timeout;
++	unsigned long sq_timeout;
+ 	int max_retries;
+ 	int retries_left;
+ 	int retry;
+@@ -150,9 +183,10 @@
+ 
+ struct ib_mad_local_private {
+ 	struct list_head completion_list;
+-	struct ib_mad_private *mad_priv;
++	struct ib_mad_private *mad_priv; /* can be opa_mad_private */
+ 	struct ib_mad_agent_private *recv_mad_agent;
+ 	struct ib_mad_send_wr_private *mad_send_wr;
++	size_t return_wc_byte_len;
+ };
+ 
+ struct ib_mad_mgmt_method_table {
+@@ -195,6 +229,8 @@
+ 	struct ib_mad_snoop_private **snoop_table;
+ 	int snoop_table_size;
+ 	atomic_t snoop_count;
++	int supports_opa_mads;
++	int send_queue_stalled;
+ };
+ 
+ struct ib_mad_port_private {
+@@ -206,11 +242,13 @@
+ 	struct ib_mr *mr;
+ 
+ 	spinlock_t reg_lock;
++	/* FIXME with increased version range this table is huge */
+ 	struct ib_mad_mgmt_version_table version[MAX_MGMT_VERSION];
+ 	struct list_head agent_list;
+ 	struct workqueue_struct *wq;
+ 	struct work_struct work;
+ 	struct ib_mad_qp_info qp_info[IB_MAD_QPS_CORE];
++	int    supports_opa_mads;
+ };
+ 
+ int ib_send_mad(struct ib_mad_send_wr_private *mad_send_wr);
+@@ -227,4 +265,28 @@
+ void ib_reset_mad_timeout(struct ib_mad_send_wr_private *mad_send_wr,
+ 			  int timeout_ms);
+ 
++static inline void deref_mad_agent(struct ib_mad_agent_private *mad_agent_priv)
++{
++	if (atomic_dec_and_test(&mad_agent_priv->refcount))
++		complete(&mad_agent_priv->comp);
++}
++
++
++void dequeue_mad(struct ib_mad_list_head *mad_list);
++struct ib_mad_agent_private * find_mad_agent(
++				struct ib_mad_port_private *port_priv,
++				struct ib_mad *mad);
++
++void snoop_recv(struct ib_mad_qp_info *qp_info,
++		struct ib_mad_recv_wc *mad_recv_wc,
++		int mad_snoop_flags);
++void wait_for_response(struct ib_mad_send_wr_private *mad_send_wr);
++void adjust_timeout(struct ib_mad_agent_private *mad_agent_priv);
++enum smi_action handle_ib_smi(struct ib_mad_port_private *port_priv,
++			      struct ib_mad_qp_info *qp_info,
++			      struct ib_wc *wc,
++			      int port_num,
++			      struct ib_mad_private *recv,
++			      struct ib_mad_private *response);
++
+ #endif	/* __IB_MAD_PRIV_H__ */
+--- a/ib_mad/mad_rmpp.c
++++ b/ib_mad/mad_rmpp.c
+@@ -35,47 +35,10 @@
+ 
+ #include "mad_priv.h"
+ #include "mad_rmpp.h"
++#include "jumbo_mad.h"
+ 
+-enum rmpp_state {
+-	RMPP_STATE_ACTIVE,
+-	RMPP_STATE_TIMEOUT,
+-	RMPP_STATE_COMPLETE,
+-	RMPP_STATE_CANCELING
+-};
+-
+-struct mad_rmpp_recv {
+-	struct ib_mad_agent_private *agent;
+-	struct list_head list;
+-	struct delayed_work timeout_work;
+-	struct delayed_work cleanup_work;
+-	struct completion comp;
+-	enum rmpp_state state;
+-	spinlock_t lock;
+-	atomic_t refcount;
+ 
+-	struct ib_ah *ah;
+-	struct ib_mad_recv_wc *rmpp_wc;
+-	struct ib_mad_recv_buf *cur_seg_buf;
+-	int last_ack;
+-	int seg_num;
+-	int newwin;
+-	int repwin;
+-
+-	__be64 tid;
+-	u32 src_qp;
+-	u16 slid;
+-	u8 mgmt_class;
+-	u8 class_version;
+-	u8 method;
+-};
+-
+-static inline void deref_rmpp_recv(struct mad_rmpp_recv *rmpp_recv)
+-{
+-	if (atomic_dec_and_test(&rmpp_recv->refcount))
+-		complete(&rmpp_recv->comp);
+-}
+-
+-static void destroy_rmpp_recv(struct mad_rmpp_recv *rmpp_recv)
++void destroy_rmpp_recv(struct mad_rmpp_recv *rmpp_recv)
+ {
+ 	deref_rmpp_recv(rmpp_recv);
+ 	wait_for_completion(&rmpp_recv->comp);
+@@ -90,8 +53,9 @@
+ 
+ 	spin_lock_irqsave(&agent->lock, flags);
+ 	list_for_each_entry(rmpp_recv, &agent->rmpp_list, list) {
+-		if (rmpp_recv->state != RMPP_STATE_COMPLETE)
++		if (rmpp_recv->state != RMPP_STATE_COMPLETE) {
+ 			ib_free_recv_mad(rmpp_recv->rmpp_wc);
++		}
+ 		rmpp_recv->state = RMPP_STATE_CANCELING;
+ 	}
+ 	spin_unlock_irqrestore(&agent->lock, flags);
+@@ -110,11 +74,11 @@
+ 	}
+ }
+ 
+-static void format_ack(struct ib_mad_send_buf *msg,
+-		       struct ib_rmpp_mad *data,
++void format_ack(struct ib_mad_send_buf *msg,
++		       struct ib_rmpp_base *data,
+ 		       struct mad_rmpp_recv *rmpp_recv)
+ {
+-	struct ib_rmpp_mad *ack = msg->mad;
++	struct ib_rmpp_base *ack = msg->mad;
+ 	unsigned long flags;
+ 
+ 	memcpy(ack, &data->mad_hdr, msg->hdr_len);
+@@ -130,7 +94,7 @@
+ 	spin_unlock_irqrestore(&rmpp_recv->lock, flags);
+ }
+ 
+-static void ack_recv(struct mad_rmpp_recv *rmpp_recv,
++ void ack_recv(struct mad_rmpp_recv *rmpp_recv,
+ 		     struct ib_mad_recv_wc *recv_wc)
+ {
+ 	struct ib_mad_send_buf *msg;
+@@ -143,7 +107,7 @@
+ 	if (IS_ERR(msg))
+ 		return;
+ 
+-	format_ack(msg, (struct ib_rmpp_mad *) recv_wc->recv_buf.mad, rmpp_recv);
++	format_ack(msg, (struct ib_rmpp_base *) recv_wc->recv_buf.mad, rmpp_recv);
+ 	msg->ah = rmpp_recv->ah;
+ 	ret = ib_post_send_mad(msg, NULL);
+ 	if (ret)
+@@ -180,20 +144,20 @@
+ 		       struct ib_mad_recv_wc *recv_wc)
+ {
+ 	struct ib_mad_send_buf *msg;
+-	struct ib_rmpp_mad *rmpp_mad;
++	struct ib_rmpp_base *rmpp_base;
+ 	int ret;
+ 
+ 	msg = alloc_response_msg(&agent->agent, recv_wc);
+ 	if (IS_ERR(msg))
+ 		return;
+ 
+-	rmpp_mad = msg->mad;
+-	memcpy(rmpp_mad, recv_wc->recv_buf.mad, msg->hdr_len);
++	rmpp_base = msg->mad;
++	memcpy(rmpp_base, recv_wc->recv_buf.mad, msg->hdr_len);
+ 
+-	rmpp_mad->mad_hdr.method ^= IB_MGMT_METHOD_RESP;
+-	ib_set_rmpp_flags(&rmpp_mad->rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
+-	rmpp_mad->rmpp_hdr.seg_num = 0;
+-	rmpp_mad->rmpp_hdr.paylen_newwin = cpu_to_be32(1);
++	rmpp_base->mad_hdr.method ^= IB_MGMT_METHOD_RESP;
++	ib_set_rmpp_flags(&rmpp_base->rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
++	rmpp_base->rmpp_hdr.seg_num = 0;
++	rmpp_base->rmpp_hdr.paylen_newwin = cpu_to_be32(1);
+ 
+ 	ret = ib_post_send_mad(msg, NULL);
+ 	if (ret) {
+@@ -209,27 +173,27 @@
+ 	ib_free_send_mad(mad_send_wc->send_buf);
+ }
+ 
+-static void nack_recv(struct ib_mad_agent_private *agent,
+-		      struct ib_mad_recv_wc *recv_wc, u8 rmpp_status)
++void nack_recv(struct ib_mad_agent_private *agent,
++	       struct ib_mad_recv_wc *recv_wc, u8 rmpp_status)
+ {
+ 	struct ib_mad_send_buf *msg;
+-	struct ib_rmpp_mad *rmpp_mad;
++	struct ib_rmpp_base *rmpp_base;
+ 	int ret;
+ 
+ 	msg = alloc_response_msg(&agent->agent, recv_wc);
+ 	if (IS_ERR(msg))
+ 		return;
+ 
+-	rmpp_mad = msg->mad;
+-	memcpy(rmpp_mad, recv_wc->recv_buf.mad, msg->hdr_len);
++	rmpp_base = msg->mad;
++	memcpy(rmpp_base, recv_wc->recv_buf.mad, msg->hdr_len);
+ 
+-	rmpp_mad->mad_hdr.method ^= IB_MGMT_METHOD_RESP;
+-	rmpp_mad->rmpp_hdr.rmpp_version = IB_MGMT_RMPP_VERSION;
+-	rmpp_mad->rmpp_hdr.rmpp_type = IB_MGMT_RMPP_TYPE_ABORT;
+-	ib_set_rmpp_flags(&rmpp_mad->rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
+-	rmpp_mad->rmpp_hdr.rmpp_status = rmpp_status;
+-	rmpp_mad->rmpp_hdr.seg_num = 0;
+-	rmpp_mad->rmpp_hdr.paylen_newwin = 0;
++	rmpp_base->mad_hdr.method ^= IB_MGMT_METHOD_RESP;
++	rmpp_base->rmpp_hdr.rmpp_version = IB_MGMT_RMPP_VERSION;
++	rmpp_base->rmpp_hdr.rmpp_type = IB_MGMT_RMPP_TYPE_ABORT;
++	ib_set_rmpp_flags(&rmpp_base->rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
++	rmpp_base->rmpp_hdr.rmpp_status = rmpp_status;
++	rmpp_base->rmpp_hdr.seg_num = 0;
++	rmpp_base->rmpp_hdr.paylen_newwin = 0;
+ 
+ 	ret = ib_post_send_mad(msg, NULL);
+ 	if (ret) {
+@@ -260,7 +224,7 @@
+ 	ib_free_recv_mad(rmpp_wc);
+ }
+ 
+-static void recv_cleanup_handler(struct work_struct *work)
++void recv_cleanup_handler(struct work_struct *work)
+ {
+ 	struct mad_rmpp_recv *rmpp_recv =
+ 		container_of(work, struct mad_rmpp_recv, cleanup_work.work);
+@@ -276,7 +240,7 @@
+ 	destroy_rmpp_recv(rmpp_recv);
+ }
+ 
+-static struct mad_rmpp_recv *
++struct mad_rmpp_recv *
+ create_rmpp_recv(struct ib_mad_agent_private *agent,
+ 		 struct ib_mad_recv_wc *mad_recv_wc)
+ {
+@@ -316,13 +280,14 @@
+ 	rmpp_recv->mgmt_class = mad_hdr->mgmt_class;
+ 	rmpp_recv->class_version = mad_hdr->class_version;
+ 	rmpp_recv->method  = mad_hdr->method;
++	rmpp_recv->base_version  = mad_hdr->base_version;
+ 	return rmpp_recv;
+ 
+ error:	kfree(rmpp_recv);
+ 	return NULL;
+ }
+ 
+-static struct mad_rmpp_recv *
++struct mad_rmpp_recv *
+ find_rmpp_recv(struct ib_mad_agent_private *agent,
+ 	       struct ib_mad_recv_wc *mad_recv_wc)
+ {
+@@ -341,7 +306,7 @@
+ 	return NULL;
+ }
+ 
+-static struct mad_rmpp_recv *
++struct mad_rmpp_recv *
+ acquire_rmpp_recv(struct ib_mad_agent_private *agent,
+ 		  struct ib_mad_recv_wc *mad_recv_wc)
+ {
+@@ -356,7 +321,7 @@
+ 	return rmpp_recv;
+ }
+ 
+-static struct mad_rmpp_recv *
++struct mad_rmpp_recv *
+ insert_rmpp_recv(struct ib_mad_agent_private *agent,
+ 		 struct mad_rmpp_recv *rmpp_recv)
+ {
+@@ -369,22 +334,6 @@
+ 	return cur_rmpp_recv;
+ }
+ 
+-static inline int get_last_flag(struct ib_mad_recv_buf *seg)
+-{
+-	struct ib_rmpp_mad *rmpp_mad;
+-
+-	rmpp_mad = (struct ib_rmpp_mad *) seg->mad;
+-	return ib_get_rmpp_flags(&rmpp_mad->rmpp_hdr) & IB_MGMT_RMPP_FLAG_LAST;
+-}
+-
+-static inline int get_seg_num(struct ib_mad_recv_buf *seg)
+-{
+-	struct ib_rmpp_mad *rmpp_mad;
+-
+-	rmpp_mad = (struct ib_rmpp_mad *) seg->mad;
+-	return be32_to_cpu(rmpp_mad->rmpp_hdr.seg_num);
+-}
+-
+ static inline struct ib_mad_recv_buf * get_next_seg(struct list_head *rmpp_list,
+ 						    struct ib_mad_recv_buf *seg)
+ {
+@@ -415,7 +364,7 @@
+ 	return NULL;
+ }
+ 
+-static void update_seg_num(struct mad_rmpp_recv *rmpp_recv,
++void update_seg_num(struct mad_rmpp_recv *rmpp_recv,
+ 			   struct ib_mad_recv_buf *new_buf)
+ {
+ 	struct list_head *rmpp_list = &rmpp_recv->rmpp_wc->rmpp_list;
+@@ -434,9 +383,9 @@
+ 
+ 	rmpp_mad = (struct ib_rmpp_mad *)rmpp_recv->cur_seg_buf->mad;
+ 
+-	hdr_size = ib_get_mad_data_offset(rmpp_mad->mad_hdr.mgmt_class);
++	hdr_size = ib_get_mad_data_offset(rmpp_mad->base.mad_hdr.mgmt_class);
+ 	data_size = sizeof(struct ib_rmpp_mad) - hdr_size;
+-	pad = IB_MGMT_RMPP_DATA - be32_to_cpu(rmpp_mad->rmpp_hdr.paylen_newwin);
++	pad = IB_MGMT_RMPP_DATA - be32_to_cpu(rmpp_mad->base.rmpp_hdr.paylen_newwin);
+ 	if (pad > IB_MGMT_RMPP_DATA || pad < 0)
+ 		pad = 0;
+ 
+@@ -565,20 +514,20 @@
+ 	u32 paylen = 0;
+ 
+ 	rmpp_mad = mad_send_wr->send_buf.mad;
+-	ib_set_rmpp_flags(&rmpp_mad->rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
+-	rmpp_mad->rmpp_hdr.seg_num = cpu_to_be32(++mad_send_wr->seg_num);
++	ib_set_rmpp_flags(&rmpp_mad->base.rmpp_hdr, IB_MGMT_RMPP_FLAG_ACTIVE);
++	rmpp_mad->base.rmpp_hdr.seg_num = cpu_to_be32(++mad_send_wr->seg_num);
+ 
+ 	if (mad_send_wr->seg_num == 1) {
+-		rmpp_mad->rmpp_hdr.rmpp_rtime_flags |= IB_MGMT_RMPP_FLAG_FIRST;
++		rmpp_mad->base.rmpp_hdr.rmpp_rtime_flags |= IB_MGMT_RMPP_FLAG_FIRST;
+ 		paylen = mad_send_wr->send_buf.seg_count * IB_MGMT_RMPP_DATA -
+ 			 mad_send_wr->pad;
+ 	}
+ 
+ 	if (mad_send_wr->seg_num == mad_send_wr->send_buf.seg_count) {
+-		rmpp_mad->rmpp_hdr.rmpp_rtime_flags |= IB_MGMT_RMPP_FLAG_LAST;
++		rmpp_mad->base.rmpp_hdr.rmpp_rtime_flags |= IB_MGMT_RMPP_FLAG_LAST;
+ 		paylen = IB_MGMT_RMPP_DATA - mad_send_wr->pad;
+ 	}
+-	rmpp_mad->rmpp_hdr.paylen_newwin = cpu_to_be32(paylen);
++	rmpp_mad->base.rmpp_hdr.paylen_newwin = cpu_to_be32(paylen);
+ 
+ 	/* 2 seconds for an ACK until we can find the packet lifetime */
+ 	timeout = mad_send_wr->send_buf.timeout_ms;
+@@ -588,7 +537,7 @@
+ 	return ib_send_mad(mad_send_wr);
+ }
+ 
+-static void abort_send(struct ib_mad_agent_private *agent,
++void abort_send(struct ib_mad_agent_private *agent,
+ 		       struct ib_mad_recv_wc *mad_recv_wc, u8 rmpp_status)
+ {
+ 	struct ib_mad_send_wr_private *mad_send_wr;
+@@ -616,18 +565,6 @@
+ 	spin_unlock_irqrestore(&agent->lock, flags);
+ }
+ 
+-static inline void adjust_last_ack(struct ib_mad_send_wr_private *wr,
+-				   int seg_num)
+-{
+-	struct list_head *list;
+-
+-	wr->last_ack = seg_num;
+-	list = &wr->last_ack_seg->list;
+-	list_for_each_entry(wr->last_ack_seg, list, list)
+-		if (wr->last_ack_seg->num == seg_num)
+-			break;
+-}
+-
+ static void process_ds_ack(struct ib_mad_agent_private *agent,
+ 			   struct ib_mad_recv_wc *mad_recv_wc, int newwin)
+ {
+@@ -638,23 +575,23 @@
+ 		rmpp_recv->repwin = newwin;
+ }
+ 
+-static void process_rmpp_ack(struct ib_mad_agent_private *agent,
++void process_rmpp_ack(struct ib_mad_agent_private *agent,
+ 			     struct ib_mad_recv_wc *mad_recv_wc)
+ {
+ 	struct ib_mad_send_wr_private *mad_send_wr;
+-	struct ib_rmpp_mad *rmpp_mad;
++	struct ib_rmpp_base *rmpp_base;
+ 	unsigned long flags;
+ 	int seg_num, newwin, ret;
+ 
+-	rmpp_mad = (struct ib_rmpp_mad *)mad_recv_wc->recv_buf.mad;
+-	if (rmpp_mad->rmpp_hdr.rmpp_status) {
++	rmpp_base = (struct ib_rmpp_base *)mad_recv_wc->recv_buf.mad;
++	if (rmpp_base->rmpp_hdr.rmpp_status) {
+ 		abort_send(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BAD_STATUS);
+ 		nack_recv(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BAD_STATUS);
+ 		return;
+ 	}
+ 
+-	seg_num = be32_to_cpu(rmpp_mad->rmpp_hdr.seg_num);
+-	newwin = be32_to_cpu(rmpp_mad->rmpp_hdr.paylen_newwin);
++	seg_num = be32_to_cpu(rmpp_base->rmpp_hdr.seg_num);
++	newwin = be32_to_cpu(rmpp_base->rmpp_hdr.paylen_newwin);
+ 	if (newwin < seg_num) {
+ 		abort_send(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_W2S);
+ 		nack_recv(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_W2S);
+@@ -739,7 +676,7 @@
+ 	struct ib_rmpp_hdr *rmpp_hdr;
+ 	u8 rmpp_status;
+ 
+-	rmpp_hdr = &((struct ib_rmpp_mad *)mad_recv_wc->recv_buf.mad)->rmpp_hdr;
++	rmpp_hdr = &((struct ib_rmpp_base *)mad_recv_wc->recv_buf.mad)->rmpp_hdr;
+ 
+ 	if (rmpp_hdr->rmpp_status) {
+ 		rmpp_status = IB_MGMT_RMPP_STATUS_BAD_STATUS;
+@@ -765,33 +702,33 @@
+ 	return NULL;
+ }
+ 
+-static void process_rmpp_stop(struct ib_mad_agent_private *agent,
++void process_rmpp_stop(struct ib_mad_agent_private *agent,
+ 			      struct ib_mad_recv_wc *mad_recv_wc)
+ {
+-	struct ib_rmpp_mad *rmpp_mad;
++	struct ib_rmpp_base *rmpp_base;
+ 
+-	rmpp_mad = (struct ib_rmpp_mad *)mad_recv_wc->recv_buf.mad;
++	rmpp_base = (struct ib_rmpp_base *)mad_recv_wc->recv_buf.mad;
+ 
+-	if (rmpp_mad->rmpp_hdr.rmpp_status != IB_MGMT_RMPP_STATUS_RESX) {
++	if (rmpp_base->rmpp_hdr.rmpp_status != IB_MGMT_RMPP_STATUS_RESX) {
+ 		abort_send(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BAD_STATUS);
+ 		nack_recv(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BAD_STATUS);
+ 	} else
+-		abort_send(agent, mad_recv_wc, rmpp_mad->rmpp_hdr.rmpp_status);
++		abort_send(agent, mad_recv_wc, rmpp_base->rmpp_hdr.rmpp_status);
+ }
+ 
+-static void process_rmpp_abort(struct ib_mad_agent_private *agent,
++void process_rmpp_abort(struct ib_mad_agent_private *agent,
+ 			       struct ib_mad_recv_wc *mad_recv_wc)
+ {
+-	struct ib_rmpp_mad *rmpp_mad;
++	struct ib_rmpp_base *rmpp_base;
+ 
+-	rmpp_mad = (struct ib_rmpp_mad *)mad_recv_wc->recv_buf.mad;
++	rmpp_base = (struct ib_rmpp_base *)mad_recv_wc->recv_buf.mad;
+ 
+-	if (rmpp_mad->rmpp_hdr.rmpp_status < IB_MGMT_RMPP_STATUS_ABORT_MIN ||
+-	    rmpp_mad->rmpp_hdr.rmpp_status > IB_MGMT_RMPP_STATUS_ABORT_MAX) {
++	if (rmpp_base->rmpp_hdr.rmpp_status < IB_MGMT_RMPP_STATUS_ABORT_MIN ||
++	    rmpp_base->rmpp_hdr.rmpp_status > IB_MGMT_RMPP_STATUS_ABORT_MAX) {
+ 		abort_send(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BAD_STATUS);
+ 		nack_recv(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BAD_STATUS);
+ 	} else
+-		abort_send(agent, mad_recv_wc, rmpp_mad->rmpp_hdr.rmpp_status);
++		abort_send(agent, mad_recv_wc, rmpp_base->rmpp_hdr.rmpp_status);
+ }
+ 
+ struct ib_mad_recv_wc *
+@@ -801,16 +738,16 @@
+ 	struct ib_rmpp_mad *rmpp_mad;
+ 
+ 	rmpp_mad = (struct ib_rmpp_mad *)mad_recv_wc->recv_buf.mad;
+-	if (!(rmpp_mad->rmpp_hdr.rmpp_rtime_flags & IB_MGMT_RMPP_FLAG_ACTIVE))
++	if (!(rmpp_mad->base.rmpp_hdr.rmpp_rtime_flags & IB_MGMT_RMPP_FLAG_ACTIVE))
+ 		return mad_recv_wc;
+ 
+-	if (rmpp_mad->rmpp_hdr.rmpp_version != IB_MGMT_RMPP_VERSION) {
++	if (rmpp_mad->base.rmpp_hdr.rmpp_version != IB_MGMT_RMPP_VERSION) {
+ 		abort_send(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_UNV);
+ 		nack_recv(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_UNV);
+ 		goto out;
+ 	}
+ 
+-	switch (rmpp_mad->rmpp_hdr.rmpp_type) {
++	switch (rmpp_mad->base.rmpp_hdr.rmpp_type) {
+ 	case IB_MGMT_RMPP_TYPE_DATA:
+ 		return process_rmpp_data(agent, mad_recv_wc);
+ 	case IB_MGMT_RMPP_TYPE_ACK:
+@@ -871,11 +808,11 @@
+ 	int ret;
+ 
+ 	rmpp_mad = mad_send_wr->send_buf.mad;
+-	if (!(ib_get_rmpp_flags(&rmpp_mad->rmpp_hdr) &
++	if (!(ib_get_rmpp_flags(&rmpp_mad->base.rmpp_hdr) &
+ 	      IB_MGMT_RMPP_FLAG_ACTIVE))
+ 		return IB_RMPP_RESULT_UNHANDLED;
+ 
+-	if (rmpp_mad->rmpp_hdr.rmpp_type != IB_MGMT_RMPP_TYPE_DATA) {
++	if (rmpp_mad->base.rmpp_hdr.rmpp_type != IB_MGMT_RMPP_TYPE_DATA) {
+ 		mad_send_wr->seg_num = 1;
+ 		return IB_RMPP_RESULT_INTERNAL;
+ 	}
+@@ -893,15 +830,15 @@
+ int ib_process_rmpp_send_wc(struct ib_mad_send_wr_private *mad_send_wr,
+ 			    struct ib_mad_send_wc *mad_send_wc)
+ {
+-	struct ib_rmpp_mad *rmpp_mad;
++	struct ib_rmpp_base *rmpp_base;
+ 	int ret;
+ 
+-	rmpp_mad = mad_send_wr->send_buf.mad;
+-	if (!(ib_get_rmpp_flags(&rmpp_mad->rmpp_hdr) &
++	rmpp_base = mad_send_wr->send_buf.mad;
++	if (!(ib_get_rmpp_flags(&rmpp_base->rmpp_hdr) &
+ 	      IB_MGMT_RMPP_FLAG_ACTIVE))
+ 		return IB_RMPP_RESULT_UNHANDLED; /* RMPP not active */
+ 
+-	if (rmpp_mad->rmpp_hdr.rmpp_type != IB_MGMT_RMPP_TYPE_DATA)
++	if (rmpp_base->rmpp_hdr.rmpp_type != IB_MGMT_RMPP_TYPE_DATA)
+ 		return IB_RMPP_RESULT_INTERNAL;	 /* ACK, STOP, or ABORT */
+ 
+ 	if (mad_send_wc->status != IB_WC_SUCCESS ||
+@@ -935,7 +872,7 @@
+ 	int ret;
+ 
+ 	rmpp_mad = mad_send_wr->send_buf.mad;
+-	if (!(ib_get_rmpp_flags(&rmpp_mad->rmpp_hdr) &
++	if (!(ib_get_rmpp_flags(&rmpp_mad->base.rmpp_hdr) &
+ 	      IB_MGMT_RMPP_FLAG_ACTIVE))
+ 		return IB_RMPP_RESULT_UNHANDLED; /* RMPP not active */
+ 
+--- a/ib_mad/mad_rmpp.h
++++ b/ib_mad/mad_rmpp.h
+@@ -40,6 +40,40 @@
+ 	IB_RMPP_RESULT_UNHANDLED
+ };
+ 
++enum rmpp_state {
++	RMPP_STATE_ACTIVE,
++	RMPP_STATE_TIMEOUT,
++	RMPP_STATE_COMPLETE,
++	RMPP_STATE_CANCELING
++};
++
++struct mad_rmpp_recv {
++	struct ib_mad_agent_private *agent;
++	struct list_head list;
++	struct delayed_work timeout_work;
++	struct delayed_work cleanup_work;
++	struct completion comp;
++	enum rmpp_state state;
++	spinlock_t lock;
++	atomic_t refcount;
++
++	struct ib_ah *ah;
++	struct ib_mad_recv_wc *rmpp_wc;
++	struct ib_mad_recv_buf *cur_seg_buf;
++	int last_ack;
++	int seg_num;
++	int newwin;
++	int repwin;
++
++	__be64 tid;
++	u32 src_qp;
++	u16 slid;
++	u8 mgmt_class;
++	u8 class_version;
++	u8 method;
++	u8 base_version; /* indicates Jumbo or IB MAD */
++};
++
+ int ib_send_rmpp_mad(struct ib_mad_send_wr_private *mad_send_wr);
+ 
+ struct ib_mad_recv_wc *
+@@ -55,4 +89,71 @@
+ 
+ int ib_retry_rmpp(struct ib_mad_send_wr_private *mad_send_wr);
+ 
++static inline void deref_rmpp_recv(struct mad_rmpp_recv *rmpp_recv)
++{
++	if (atomic_dec_and_test(&rmpp_recv->refcount))
++		complete(&rmpp_recv->comp);
++}
++
++void destroy_rmpp_recv(struct mad_rmpp_recv *rmpp_recv);
++
++void format_ack(struct ib_mad_send_buf *msg,
++		       struct ib_rmpp_base *data,
++		       struct mad_rmpp_recv *rmpp_recv);
++
++void nack_recv(struct ib_mad_agent_private *agent,
++	       struct ib_mad_recv_wc *recv_wc, u8 rmpp_status);
++struct mad_rmpp_recv *
++find_rmpp_recv(struct ib_mad_agent_private *agent,
++	       struct ib_mad_recv_wc *mad_recv_wc);
++static inline int get_seg_num(struct ib_mad_recv_buf *seg)
++{
++	struct ib_rmpp_base *rmpp_base;
++
++	rmpp_base = (struct ib_rmpp_base *) seg->mad;
++	return be32_to_cpu(rmpp_base->rmpp_hdr.seg_num);
++}
++
++void ack_recv(struct mad_rmpp_recv *rmpp_recv,
++	      struct ib_mad_recv_wc *recv_wc);
++struct mad_rmpp_recv *
++acquire_rmpp_recv(struct ib_mad_agent_private *agent,
++		  struct ib_mad_recv_wc *mad_recv_wc);
++void update_seg_num(struct mad_rmpp_recv *rmpp_recv,
++		    struct ib_mad_recv_buf *new_buf);
++struct mad_rmpp_recv *
++insert_rmpp_recv(struct ib_mad_agent_private *agent,
++		 struct mad_rmpp_recv *rmpp_recv);
++struct mad_rmpp_recv *
++create_rmpp_recv(struct ib_mad_agent_private *agent,
++		 struct ib_mad_recv_wc *mad_recv_wc);
++static inline int get_last_flag(struct ib_mad_recv_buf *seg)
++{
++	struct ib_rmpp_base *rmpp_base;
++
++	rmpp_base = (struct ib_rmpp_base *) seg->mad;
++	return ib_get_rmpp_flags(&rmpp_base->rmpp_hdr) & IB_MGMT_RMPP_FLAG_LAST;
++}
++
++void abort_send(struct ib_mad_agent_private *agent,
++		       struct ib_mad_recv_wc *mad_recv_wc, u8 rmpp_status);
++void recv_cleanup_handler(struct work_struct *work);
++static inline void adjust_last_ack(struct ib_mad_send_wr_private *wr,
++				   int seg_num)
++{
++	struct list_head *list;
++
++	wr->last_ack = seg_num;
++	list = &wr->last_ack_seg->list;
++	list_for_each_entry(wr->last_ack_seg, list, list)
++		if (wr->last_ack_seg->num == seg_num)
++			break;
++}
++void process_rmpp_abort(struct ib_mad_agent_private *agent,
++			       struct ib_mad_recv_wc *mad_recv_wc);
++void process_rmpp_ack(struct ib_mad_agent_private *agent,
++			     struct ib_mad_recv_wc *mad_recv_wc);
++void process_rmpp_stop(struct ib_mad_agent_private *agent,
++			      struct ib_mad_recv_wc *mad_recv_wc);
++
+ #endif	/* __MAD_RMPP_H__ */
+--- a/ib_mad/smi.h
++++ b/ib_mad/smi.h
+@@ -62,6 +62,9 @@
+  * Return IB_SMI_HANDLE if the SMP should be handled by the local SMA/SM
+  * via process_mad
+  */
++/* NOTE: This is called on stl_smp's don't check fields which are not common
++ * between ib_smp and stl_smp
++ */
+ static inline enum smi_action smi_check_local_smp(struct ib_smp *smp,
+ 						  struct ib_device *device)
+ {
+@@ -77,6 +80,9 @@
+  * Return IB_SMI_HANDLE if the SMP should be handled by the local SMA/SM
+  * via process_mad
+  */
++/* NOTE: This is called on stl_smp's don't check fields which are not common
++ * between ib_smp and stl_smp
++ */
+ static inline enum smi_action smi_check_local_returning_smp(struct ib_smp *smp,
+ 						   struct ib_device *device)
+ {
+--- a/include/rdma/ib_mad.h
++++ b/include/rdma/ib_mad.h
+@@ -40,9 +40,18 @@
+ #include <linux/list.h>
+ 
+ #include <rdma/ib_verbs.h>
++#include <update/ib_user_mad.h>
++
++/* FIXME for upstream add to ib_verbs.h ASAP */
++enum {
++	IB_DEVICE_OPA_MAD_SUPPORT = (1<<31)
++};
+ 
+ /* Management base version */
+ #define IB_MGMT_BASE_VERSION			1
++#define OPA_MGMT_BASE_VERSION			0x80
++
++#define OPA_SM_CLASS_VERSION                    0x80
+ 
+ /* Management classes */
+ #define IB_MGMT_CLASS_SUBN_LID_ROUTED		0x01
+@@ -123,6 +132,23 @@
+ #define IB_DEFAULT_PKEY_PARTIAL 0x7FFF
+ #define IB_DEFAULT_PKEY_FULL	0xFFFF
+ 
++/*
++ * Generic trap/notice types
++ */
++#define IB_NOTICE_TYPE_FATAL    0x80
++#define IB_NOTICE_TYPE_URGENT   0x81
++#define IB_NOTICE_TYPE_SECURITY 0x82
++#define IB_NOTICE_TYPE_SM       0x83
++#define IB_NOTICE_TYPE_INFO     0x84
++
++/*
++ * Generic trap/notice producers
++ */
++#define IB_NOTICE_PROD_CA               cpu_to_be16(1)
++#define IB_NOTICE_PROD_SWITCH           cpu_to_be16(2)
++#define IB_NOTICE_PROD_ROUTER           cpu_to_be16(3)
++#define IB_NOTICE_PROD_CLASS_MGR        cpu_to_be16(4)
++
+ enum {
+ 	IB_MGMT_MAD_HDR = 24,
+ 	IB_MGMT_MAD_DATA = 232,
+@@ -134,6 +160,12 @@
+ 	IB_MGMT_SA_DATA = 200,
+ 	IB_MGMT_DEVICE_HDR = 64,
+ 	IB_MGMT_DEVICE_DATA = 192,
++
++	OPA_MGMT_MAD_HDR = IB_MGMT_MAD_HDR,
++	OPA_MGMT_MAD_DATA = 2024,
++	OPA_MGMT_RMPP_HDR = IB_MGMT_RMPP_HDR,
++	OPA_MGMT_RMPP_DATA = 2012,
++	OPA_MGMT_MAD_SIZE = IB_MGMT_MAD_HDR + OPA_MGMT_MAD_DATA,
+ };
+ 
+ struct ib_mad_hdr {
+@@ -180,12 +212,26 @@
+ 	u8			data[IB_MGMT_MAD_DATA];
+ };
+ 
+-struct ib_rmpp_mad {
++struct opa_mad {
++	struct ib_mad_hdr	mad_hdr;
++	u8			data[OPA_MGMT_MAD_DATA];
++};
++
++struct ib_rmpp_base {
+ 	struct ib_mad_hdr	mad_hdr;
+ 	struct ib_rmpp_hdr	rmpp_hdr;
++} __attribute__ ((packed));
++
++struct ib_rmpp_mad {
++	struct ib_rmpp_base	base;
+ 	u8			data[IB_MGMT_RMPP_DATA];
+ };
+ 
++struct opa_rmpp_mad {
++	struct ib_rmpp_base	base;
++	u8			data[OPA_MGMT_RMPP_DATA];
++};
++
+ struct ib_sa_mad {
+ 	struct ib_mad_hdr	mad_hdr;
+ 	struct ib_rmpp_hdr	rmpp_hdr;
+@@ -247,6 +293,9 @@
+ struct ib_mad_send_buf {
+ 	struct ib_mad_send_buf	*next;
+ 	void			*mad;
++			/* can be ib_mad or opa_mad
++			 * Depending on base_version in header
++			 */
+ 	struct ib_mad_agent	*mad_agent;
+ 	struct ib_ah		*ah;
+ 	void			*context[2];
+@@ -355,9 +404,18 @@
+  * @hi_tid: Access layer assigned transaction ID for this client.
+  *   Unsolicited MADs sent by this client will have the upper 32-bits
+  *   of their TID set to this value.
++ * @flags: registration flags
+  * @port_num: Port number on which QP is registered
+  * @rmpp_version: If set, indicates the RMPP version used by this agent.
+  */
++enum {
++	IB_MAD_USER_RMPP = IB_USER_MAD_USER_RMPP,
++};
++
++#define RMPP_VERSION(x) (x & 0x0f)
++#define RMPP_FLAGS(x) ((x & 0xf0) >> 4)
++#define SET_FLAGS_RMPP(ver, flags) (ver | ((flags & 0x0f) << 4))
++
+ struct ib_mad_agent {
+ 	struct ib_device	*device;
+ 	struct ib_qp		*qp;
+@@ -367,6 +425,7 @@
+ 	ib_mad_snoop_handler	snoop_handler;
+ 	void			*context;
+ 	u32			hi_tid;
++	u32			flags;
+ 	u8			port_num;
+ 	u8			rmpp_version;
+ };
+@@ -395,7 +454,8 @@
+ struct ib_mad_recv_buf {
+ 	struct list_head	list;
+ 	struct ib_grh		*grh;
+-	struct ib_mad		*mad;
++	struct ib_mad		*mad; /* Note can be a struct opa_mad
++					mad_len */
+ };
+ 
+ /**
+@@ -408,6 +468,17 @@
+  * For received response, the wr_id contains a pointer to the ib_mad_send_buf
+  *   for the corresponding send request.
+  */
++/* FIXME WARNING for upstream.
++ * recv_buf is not a continugous buffer but rather a list of the buffers which
++ * came in for the rmpp response (or a single buffer for non-rmpp).  I _think_
++ * this is fine if these buffers are opa sized as the old clients should not
++ * use the extra memory but I want to verify this.
++ *
++ * Regardless mad_len == num_segments * seg_size
++ *      where seg_size == IB or Opa mad size
++ *      depending on base_version
++ */
++/* FIXME when mad_recv_wc is opa it is not necessarily 2048 bytes */
+ struct ib_mad_recv_wc {
+ 	struct ib_wc		*wc;
+ 	struct ib_mad_recv_buf	recv_buf;
+@@ -661,4 +732,11 @@
+  */
+ void ib_free_send_mad(struct ib_mad_send_buf *send_buf);
+ 
++/**
++ * ib_mad_kernel_rmpp_agent - Returns if the agent is performing RMPP.
++ * @agent: the agent in question
++ * @return: true if agent is performing rmpp, false otherwise.
++ */
++int ib_mad_kernel_rmpp_agent(struct ib_mad_agent *agent);
++
+ #endif /* IB_MAD_H */
+--- /dev/null
++++ b/ib_mad/jumbo_mad.c
+@@ -0,0 +1,446 @@
++/*
++ * Copyright (c) 2013 Intel Corporation.  All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ */
++
++#define pr_fmt(fmt) PFX fmt
++
++#include <linux/slab.h>
++
++#include "mad_priv.h"
++#include "opa_smi.h"
++#include "jumbo_mad.h"
++#include "jumbo_mad_rmpp.h"
++#include "agent.h"
++
++
++/** =========================================================================
++ * The send side of 2k support is easier than the recv side.
++ * This is because we can allow the current callers of this function to use
++ * their previous lengths.
++ *
++ * The recv side however needs to either always allocate opa mad buffers
++ * which the QP may or may not accept or have some decision on the card type so
++ * that the STL card will always allocate opa's.  This is hard because on the
++ * recv side we are called to "free" mads from many places and I am not sure if
++ * I will know if the free is on a opa mad or not.
++ */
++
++
++
++static enum smi_action
++handle_opa_smi(struct ib_mad_port_private *port_priv,
++	       struct ib_mad_qp_info *qp_info,
++	       struct ib_wc *wc,
++	       int port_num,
++	       struct opa_mad_private *recv,
++	       struct opa_mad_private *response)
++{
++	enum smi_forward_action retsmi;
++
++	if (opa_smi_handle_dr_smp_recv(&recv->mad.smp,
++				   port_priv->device->node_type,
++				   port_num,
++				   port_priv->device->phys_port_cnt) ==
++				   IB_SMI_DISCARD)
++		return (IB_SMI_DISCARD);
++
++	retsmi = opa_smi_check_forward_dr_smp(&recv->mad.smp);
++	if (retsmi == IB_SMI_LOCAL)
++		return (IB_SMI_HANDLE);
++
++	if (retsmi == IB_SMI_SEND) { /* don't forward */
++		if (opa_smi_handle_dr_smp_send(&recv->mad.smp,
++					   port_priv->device->node_type,
++					   port_num) == IB_SMI_DISCARD)
++			return (IB_SMI_DISCARD);
++
++		if (opa_smi_check_local_smp(&recv->mad.smp, port_priv->device) == IB_SMI_DISCARD)
++			return (IB_SMI_DISCARD);
++
++	}
++#if 0
++OPA does not yet run Linux in the Switch
++ else if (port_priv->device->node_type == RDMA_NODE_IB_SWITCH) {
++		/* forward case for switches */
++		memcpy(response, recv, sizeof(*response));
++		response->header.recv_wc.wc = &response->header.wc;
++		response->header.recv_wc.recv_buf.mad = (struct ib_mad *)&response->mad.mad;
++		response->header.recv_wc.recv_buf.grh = &response->grh;
++
++		agent_send_response((struct ib_mad *)&response->mad.mad,
++				    &response->grh, wc,
++				    port_priv->device,
++				    opa_smi_get_fwd_port(&recv->mad.smp),
++				    qp_info->qp->qp_num);
++
++		return (IB_SMI_DISCARD);
++	}
++#endif
++
++	return (IB_SMI_HANDLE);
++}
++
++static enum smi_action
++opa_handle_smi(struct ib_mad_port_private *port_priv,
++		 struct ib_mad_qp_info *qp_info,
++		 struct ib_wc *wc,
++		 int port_num,
++		 struct opa_mad_private *recv,
++		 struct opa_mad_private *response)
++{
++	if (recv->mad.mad.mad_hdr.base_version == OPA_MGMT_BASE_VERSION) {
++		switch (recv->mad.mad.mad_hdr.class_version) {
++			case OPA_SMI_CLASS_VERSION:
++				return handle_opa_smi(port_priv, qp_info, wc, port_num, recv, response);
++			/* stub for other Opa SMI versions */
++		}
++	}
++
++	return handle_ib_smi(port_priv, qp_info, wc, port_num,
++			     (struct ib_mad_private *)recv,
++			     (struct ib_mad_private *)response);
++}
++
++static void opa_mad_complete_recv(struct ib_mad_agent_private *mad_agent_priv,
++				 struct ib_mad_recv_wc *mad_recv_wc)
++{
++	struct ib_mad_send_wr_private *mad_send_wr;
++	struct ib_mad_send_wc mad_send_wc;
++	unsigned long flags;
++
++	INIT_LIST_HEAD(&mad_recv_wc->rmpp_list);
++	list_add(&mad_recv_wc->recv_buf.list, &mad_recv_wc->rmpp_list);
++	if (ib_mad_kernel_rmpp_agent(&mad_agent_priv->agent)) {
++		mad_recv_wc = opa_process_rmpp_recv_wc(mad_agent_priv,
++						      mad_recv_wc);
++		if (!mad_recv_wc) {
++			deref_mad_agent(mad_agent_priv);
++			return;
++		}
++	}
++
++	/* Complete corresponding request */
++	if (ib_response_mad(mad_recv_wc->recv_buf.mad)) {
++		spin_lock_irqsave(&mad_agent_priv->lock, flags);
++		mad_send_wr = ib_find_send_mad(mad_agent_priv, mad_recv_wc);
++		if (!mad_send_wr) {
++			spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
++			if (!ib_mad_kernel_rmpp_agent(&mad_agent_priv->agent)
++			   && ib_is_mad_class_rmpp(mad_recv_wc->recv_buf.mad->mad_hdr.mgmt_class)
++			   && (ib_get_rmpp_flags(&((struct opa_rmpp_mad *)mad_recv_wc->recv_buf.mad)->base.rmpp_hdr)
++					& IB_MGMT_RMPP_FLAG_ACTIVE)) {
++				// user rmpp is in effect
++				mad_recv_wc->wc->wr_id = 0;
++				mad_agent_priv->agent.recv_handler(&mad_agent_priv->agent,
++								   mad_recv_wc);
++				atomic_dec(&mad_agent_priv->refcount);
++			} else {
++				// not user rmpp, revert to normal behavior and drop the mad
++				ib_free_recv_mad(mad_recv_wc);
++				deref_mad_agent(mad_agent_priv);
++				return;
++			}
++		} else {
++			ib_mark_mad_done(mad_send_wr);
++			spin_unlock_irqrestore(&mad_agent_priv->lock, flags);
++
++			/* Defined behavior is to complete response before request */
++			mad_recv_wc->wc->wr_id = (unsigned long) &mad_send_wr->send_buf;
++			mad_agent_priv->agent.recv_handler(&mad_agent_priv->agent,
++							   mad_recv_wc);
++			atomic_dec(&mad_agent_priv->refcount);
++
++			mad_send_wc.status = IB_WC_SUCCESS;
++			mad_send_wc.vendor_err = 0;
++			mad_send_wc.send_buf = &mad_send_wr->send_buf;
++			ib_mad_complete_send_wr(mad_send_wr, &mad_send_wc);
++		}
++	} else {
++		mad_agent_priv->agent.recv_handler(&mad_agent_priv->agent,
++						   mad_recv_wc);
++		deref_mad_agent(mad_agent_priv);
++	}
++}
++
++static int validate_opa_mad(struct opa_mad *mad, u32 qp_num)
++{
++	int valid = 0;
++
++	/* MAD version can be IB or OPA */
++	if (mad->mad_hdr.base_version != OPA_MGMT_BASE_VERSION
++	    && mad->mad_hdr.base_version != IB_MGMT_BASE_VERSION) {
++		pr_err("Opa MAD received with unsupported base "
++		       "version %d\n", mad->mad_hdr.base_version);
++		goto out;
++	}
++
++	/* Filter SMI packets sent to other than QP0 */
++	if ((mad->mad_hdr.mgmt_class == IB_MGMT_CLASS_SUBN_LID_ROUTED) ||
++	    (mad->mad_hdr.mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)) {
++		if (qp_num == 0)
++			valid = 1;
++	} else {
++		/* Filter GSI packets sent to QP0 */
++		if (qp_num != 0)
++			valid = 1;
++	}
++
++out:
++	return valid;
++}
++
++static bool generate_unmatched_resp(struct opa_mad_private *recv,
++				    struct opa_mad_private *response,
++				    u32 *resp_len)
++{
++	if (recv->mad.mad.mad_hdr.method == IB_MGMT_METHOD_GET ||
++	    recv->mad.mad.mad_hdr.method == IB_MGMT_METHOD_SET) {
++		memcpy(response, recv, sizeof *response);
++		response->header.recv_wc.wc = &response->header.wc;
++		response->header.recv_wc.recv_buf.mad = (struct ib_mad *)&response->mad.mad;
++		response->header.recv_wc.recv_buf.grh = &response->grh;
++		response->mad.mad.mad_hdr.method = IB_MGMT_METHOD_GET_RESP;
++		response->mad.mad.mad_hdr.status =
++			cpu_to_be16(IB_MGMT_MAD_STATUS_UNSUPPORTED_METHOD_ATTRIB);
++		if (recv->mad.mad.mad_hdr.mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
++			response->mad.mad.mad_hdr.status |= IB_SMP_DIRECTION;
++
++		if (recv->mad.mad.mad_hdr.base_version == OPA_MGMT_BASE_VERSION) {
++			if (recv->mad.mad.mad_hdr.mgmt_class ==
++			    IB_MGMT_CLASS_SUBN_LID_ROUTED ||
++			    recv->mad.mad.mad_hdr.mgmt_class ==
++			    IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
++				*resp_len = opa_get_smp_header_size(
++							(struct opa_smp *)&recv->mad.smp);
++			else
++				*resp_len = sizeof(struct ib_mad_hdr);
++		}
++
++		return true;
++	} else {
++		return false;
++	}
++}
++
++/**
++ * NOTE: Processing of recv opa MADs is kept separate for buffer handling
++ * however, incomming MAD's may not be opa.
++ */
++void ib_mad_recv_done_opa_handler(struct ib_mad_port_private *port_priv,
++				    struct ib_wc *wc,
++				    struct ib_mad_private_header *mad_priv_hdr,
++				    struct ib_mad_qp_info *qp_info)
++{
++	struct opa_mad_private *recv, *response = NULL;
++	struct ib_mad_agent_private *mad_agent;
++	int port_num;
++	int ret = IB_MAD_RESULT_SUCCESS;
++	u8 base_version;
++	u32 resp_len = 0;
++
++	recv = container_of(mad_priv_hdr, struct opa_mad_private, header);
++	ib_dma_unmap_single(port_priv->device,
++			    recv->header.mapping,
++			    sizeof(struct opa_mad_private) -
++			      sizeof(struct ib_mad_private_header),
++			    DMA_FROM_DEVICE);
++
++	/* Setup MAD receive work completion from "normal" work completion */
++	recv->header.wc = *wc;
++	recv->header.recv_wc.wc = &recv->header.wc;
++	base_version = recv->mad.mad.mad_hdr.base_version;
++	if (base_version == OPA_MGMT_BASE_VERSION)
++		recv->header.recv_wc.mad_len = wc->byte_len - sizeof(struct ib_grh);
++	else
++		recv->header.recv_wc.mad_len = sizeof(struct ib_mad);
++	recv->header.recv_wc.recv_buf.mad = (struct ib_mad *)&recv->mad.mad;
++	recv->header.recv_wc.recv_buf.grh = &recv->grh;
++
++	if (atomic_read(&qp_info->snoop_count))
++		snoop_recv(qp_info, &recv->header.recv_wc, IB_MAD_SNOOP_RECVS);
++
++	if (!validate_opa_mad((struct opa_mad *)&recv->mad.mad, qp_info->qp->qp_num))
++		goto out;
++
++	response = kmem_cache_alloc(opa_mad_cache, GFP_KERNEL);
++	if (!response) {
++		pr_err("ib_mad_recv_done_opa_handler no memory "
++		       "for response buffer (opa)\n");
++		goto out;
++	}
++	response->header.flags = IB_MAD_PRIV_FLAG_OPA;
++
++	if (port_priv->device->node_type == RDMA_NODE_IB_SWITCH)
++		port_num = wc->port_num;
++	else
++		port_num = port_priv->port_num;
++
++	if (recv->mad.mad.mad_hdr.mgmt_class ==
++	    IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE) {
++		if (opa_handle_smi(port_priv, qp_info, wc, port_num, recv, response)
++		    == IB_SMI_DISCARD)
++			goto out;
++	}
++
++	/* Give driver "right of first refusal" on incoming MAD */
++	if (port_priv->device->process_mad) {
++		/* FIXME for upstream:
++		 * Drivers which support opa mads know we are actually
++		 * passing them a opa_mad type through the ib_mad parameter
++		 */
++		ret = port_priv->device->process_mad(port_priv->device, 0,
++						     port_priv->port_num,
++						     wc, &recv->grh,
++						     (struct ib_mad *)&recv->mad.mad,
++						     (struct ib_mad *)&response->mad.mad);
++		resp_len = wc->byte_len;
++		if (ret & IB_MAD_RESULT_SUCCESS) {
++			if (ret & IB_MAD_RESULT_CONSUMED)
++				goto out;
++			if (ret & IB_MAD_RESULT_REPLY) {
++				agent_send_opa_response(&response->mad.mad,
++						    &recv->grh, wc,
++						    port_priv->device,
++						    port_num,
++						    qp_info->qp->qp_num,
++						    resp_len);
++				goto out;
++			}
++		}
++	}
++
++	mad_agent = find_mad_agent(port_priv, (struct ib_mad *)&recv->mad.mad);
++	if (mad_agent) {
++		opa_mad_complete_recv(mad_agent, &recv->header.recv_wc);
++		/*
++		 * recv is freed up in error cases in opa_mad_complete_recv
++		 * or via recv_handler in opa_mad_complete_recv()
++		 */
++		recv = NULL;
++	} else if ((ret & IB_MAD_RESULT_SUCCESS) &&
++		   generate_unmatched_resp(recv, response, &resp_len)) {
++		agent_send_opa_response(&response->mad.mad, &recv->grh, wc,
++				    port_priv->device, port_num,
++				    qp_info->qp->qp_num,
++				    resp_len);
++	}
++
++out:
++	/* Post another receive request for this QP */
++	if (response) {
++		ib_mad_post_opa_rcv_mads(qp_info, response);
++		if (recv) {
++			BUG_ON(!(recv->header.flags & IB_MAD_PRIV_FLAG_OPA));
++			kmem_cache_free(opa_mad_cache, recv);
++		}
++	} else
++		ib_mad_post_opa_rcv_mads(qp_info, recv);
++}
++
++
++/*
++ * Allocate opa receive MADs and post receive WRs for them
++ * FIXME: combine common code with ib_mad_post_receive_mads
++ */
++int ib_mad_post_opa_rcv_mads(struct ib_mad_qp_info *qp_info,
++				    struct opa_mad_private *mad)
++{
++	unsigned long flags;
++	int post, ret;
++	struct opa_mad_private *mad_priv;
++	struct ib_sge sg_list;
++	struct ib_recv_wr recv_wr, *bad_recv_wr;
++	struct ib_mad_queue *recv_queue = &qp_info->recv_queue;
++
++	if (unlikely(!qp_info->supports_opa_mads)) {
++		pr_err("Attempt to post opa MAD on non-opa QP\n");
++		return (-EINVAL);
++	}
++
++	/* Initialize common scatter list fields */
++	sg_list.length = sizeof *mad_priv - sizeof mad_priv->header;
++	sg_list.lkey = (*qp_info->port_priv->mr).lkey;
++
++	/* Initialize common receive WR fields */
++	recv_wr.next = NULL;
++	recv_wr.sg_list = &sg_list;
++	recv_wr.num_sge = 1;
++
++	do {
++		/* Allocate and map receive buffer */
++		if (mad) {
++			mad_priv = mad;
++			mad = NULL;
++		} else {
++			mad_priv = kmem_cache_alloc(opa_mad_cache, GFP_KERNEL);
++			if (!mad_priv) {
++				pr_err("No memory for opa receive buffer\n");
++				ret = -ENOMEM;
++				break;
++			}
++			mad_priv->header.flags = IB_MAD_PRIV_FLAG_OPA;
++		}
++		sg_list.addr = ib_dma_map_single(qp_info->port_priv->device,
++						 &mad_priv->grh,
++						 sizeof *mad_priv -
++						   sizeof mad_priv->header,
++						 DMA_FROM_DEVICE);
++		mad_priv->header.mapping = sg_list.addr;
++		recv_wr.wr_id = (unsigned long)&mad_priv->header.mad_list;
++		mad_priv->header.mad_list.mad_queue = recv_queue;
++
++		/* Post receive WR */
++		spin_lock_irqsave(&recv_queue->lock, flags);
++		post = (++recv_queue->count < recv_queue->max_active);
++		list_add_tail(&mad_priv->header.mad_list.list, &recv_queue->list);
++		spin_unlock_irqrestore(&recv_queue->lock, flags);
++		ret = ib_post_recv(qp_info->qp, &recv_wr, &bad_recv_wr);
++		if (ret) {
++			spin_lock_irqsave(&recv_queue->lock, flags);
++			list_del(&mad_priv->header.mad_list.list);
++			recv_queue->count--;
++			spin_unlock_irqrestore(&recv_queue->lock, flags);
++			ib_dma_unmap_single(qp_info->port_priv->device,
++					    mad_priv->header.mapping,
++					    sizeof *mad_priv -
++					      sizeof mad_priv->header,
++					    DMA_FROM_DEVICE);
++			BUG_ON(!(mad_priv->header.flags & IB_MAD_PRIV_FLAG_OPA));
++			kmem_cache_free(opa_mad_cache, mad_priv);
++			pr_err("ib_post_recv failed: %d\n", ret);
++			break;
++		}
++	} while (post);
++
++	return ret;
++}
++
+--- /dev/null
++++ b/ib_mad/jumbo_mad.h
+@@ -0,0 +1,50 @@
++/*
++ * Copyright (c) 2013 Intel Corporation.  All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ */
++
++#ifndef __JUMBO_MAD_H__
++#define __JUMBO_MAD_H__
++
++#include "mad_priv.h"
++
++int ib_mad_post_opa_rcv_mads(struct ib_mad_qp_info *qp_info,
++				    struct opa_mad_private *mad);
++void ib_mad_recv_done_opa_handler(struct ib_mad_port_private *port_priv,
++				    struct ib_wc *wc,
++				    struct ib_mad_private_header *mad_priv_hdr,
++				    struct ib_mad_qp_info *qp_info);
++
++void opa_free_recv_mad(struct ib_mad_recv_wc *mad_recv_wc);
++
++void opa_mad_complete_send_wr(struct ib_mad_send_wr_private *mad_send_wr,
++			     struct ib_mad_send_wc *mad_send_wc);
++#endif /* __JUMBO_MAD_H__ */
+--- /dev/null
++++ b/ib_mad/jumbo_mad_rmpp.c
+@@ -0,0 +1,269 @@
++/*
++ * Copyright (c) 2005 Intel Inc. All rights reserved.
++ * Copyright (c) 2005-2006 Voltaire, Inc. All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#include <linux/slab.h>
++
++#include "mad_priv.h"
++#include "jumbo_mad_rmpp.h"
++#include "jumbo_mad.h"
++
++static inline int window_size(struct ib_mad_agent_private *agent)
++{
++	return max(agent->qp_info->recv_queue.max_active >> 3, 1);
++}
++
++static struct ib_mad_recv_buf * find_seg_location(struct list_head *rmpp_list,
++						  int seg_num)
++{
++	struct ib_mad_recv_buf *seg_buf;
++	int cur_seg_num;
++
++	list_for_each_entry_reverse(seg_buf, rmpp_list, list) {
++		cur_seg_num = get_seg_num(seg_buf);
++		if (seg_num > cur_seg_num)
++			return seg_buf;
++		if (seg_num == cur_seg_num)
++			break;
++	}
++	return NULL;
++}
++
++static inline int opa_get_mad_len(struct mad_rmpp_recv *rmpp_recv)
++{
++	struct ib_rmpp_base *rmpp_base;
++	int hdr_size, data_size, pad;
++
++	rmpp_base = &((struct opa_rmpp_mad *)rmpp_recv->cur_seg_buf->mad)->base;
++
++	hdr_size = ib_get_mad_data_offset(rmpp_base->mad_hdr.mgmt_class);
++	if (rmpp_recv->base_version == OPA_MGMT_BASE_VERSION) {
++		data_size = sizeof(struct opa_rmpp_mad) - hdr_size;
++		pad = OPA_MGMT_RMPP_DATA - be32_to_cpu(rmpp_base->rmpp_hdr.paylen_newwin);
++		if (pad > OPA_MGMT_RMPP_DATA || pad < 0)
++			pad = 0;
++	} else {
++		data_size = sizeof(struct ib_rmpp_mad) - hdr_size;
++		pad = IB_MGMT_RMPP_DATA - be32_to_cpu(rmpp_base->rmpp_hdr.paylen_newwin);
++		if (pad > IB_MGMT_RMPP_DATA || pad < 0)
++			pad = 0;
++	}
++
++	return hdr_size + rmpp_recv->seg_num * data_size - pad;
++}
++
++static struct ib_mad_recv_wc * opa_complete_rmpp(struct mad_rmpp_recv *rmpp_recv)
++{
++	struct ib_mad_recv_wc *rmpp_wc;
++
++	ack_recv(rmpp_recv, rmpp_recv->rmpp_wc);
++	if (rmpp_recv->seg_num > 1)
++		cancel_delayed_work(&rmpp_recv->timeout_work);
++
++	rmpp_wc = rmpp_recv->rmpp_wc;
++	rmpp_wc->mad_len = opa_get_mad_len(rmpp_recv);
++	/* 10 seconds until we can find the packet lifetime */
++	queue_delayed_work(rmpp_recv->agent->qp_info->port_priv->wq,
++			   &rmpp_recv->cleanup_work, msecs_to_jiffies(10000));
++	return rmpp_wc;
++}
++
++static struct ib_mad_recv_wc *
++continue_rmpp(struct ib_mad_agent_private *agent,
++	      struct ib_mad_recv_wc *mad_recv_wc)
++{
++	struct mad_rmpp_recv *rmpp_recv;
++	struct ib_mad_recv_buf *prev_buf;
++	struct ib_mad_recv_wc *done_wc;
++	int seg_num;
++	unsigned long flags;
++
++	rmpp_recv = acquire_rmpp_recv(agent, mad_recv_wc);
++	if (!rmpp_recv)
++		goto drop1;
++
++	seg_num = get_seg_num(&mad_recv_wc->recv_buf);
++
++	spin_lock_irqsave(&rmpp_recv->lock, flags);
++	if ((rmpp_recv->state == RMPP_STATE_TIMEOUT) ||
++	    (seg_num > rmpp_recv->newwin))
++		goto drop3;
++
++	if ((seg_num <= rmpp_recv->last_ack) ||
++	    (rmpp_recv->state == RMPP_STATE_COMPLETE)) {
++		spin_unlock_irqrestore(&rmpp_recv->lock, flags);
++		ack_recv(rmpp_recv, mad_recv_wc);
++		goto drop2;
++	}
++
++	prev_buf = find_seg_location(&rmpp_recv->rmpp_wc->rmpp_list, seg_num);
++	if (!prev_buf)
++		goto drop3;
++
++	done_wc = NULL;
++	list_add(&mad_recv_wc->recv_buf.list, &prev_buf->list);
++	if (rmpp_recv->cur_seg_buf == prev_buf) {
++		update_seg_num(rmpp_recv, &mad_recv_wc->recv_buf);
++		if (get_last_flag(rmpp_recv->cur_seg_buf)) {
++			rmpp_recv->state = RMPP_STATE_COMPLETE;
++			spin_unlock_irqrestore(&rmpp_recv->lock, flags);
++			done_wc = opa_complete_rmpp(rmpp_recv);
++			goto out;
++		} else if (rmpp_recv->seg_num == rmpp_recv->newwin) {
++			rmpp_recv->newwin += window_size(agent);
++			spin_unlock_irqrestore(&rmpp_recv->lock, flags);
++			ack_recv(rmpp_recv, mad_recv_wc);
++			goto out;
++		}
++	}
++	spin_unlock_irqrestore(&rmpp_recv->lock, flags);
++out:
++	deref_rmpp_recv(rmpp_recv);
++	return done_wc;
++
++drop3:	spin_unlock_irqrestore(&rmpp_recv->lock, flags);
++drop2:	deref_rmpp_recv(rmpp_recv);
++drop1:	ib_free_recv_mad(mad_recv_wc);
++	return NULL;
++}
++
++static struct ib_mad_recv_wc *
++start_rmpp(struct ib_mad_agent_private *agent,
++	   struct ib_mad_recv_wc *mad_recv_wc)
++{
++	struct mad_rmpp_recv *rmpp_recv;
++	unsigned long flags;
++
++	rmpp_recv = create_rmpp_recv(agent, mad_recv_wc);
++	if (!rmpp_recv) {
++		ib_free_recv_mad(mad_recv_wc);
++		return NULL;
++	}
++
++	spin_lock_irqsave(&agent->lock, flags);
++	if (insert_rmpp_recv(agent, rmpp_recv)) {
++		spin_unlock_irqrestore(&agent->lock, flags);
++		/* duplicate first MAD */
++		destroy_rmpp_recv(rmpp_recv);
++		return continue_rmpp(agent, mad_recv_wc);
++	}
++	atomic_inc(&rmpp_recv->refcount);
++
++	if (get_last_flag(&mad_recv_wc->recv_buf)) {
++		rmpp_recv->state = RMPP_STATE_COMPLETE;
++		spin_unlock_irqrestore(&agent->lock, flags);
++		opa_complete_rmpp(rmpp_recv);
++	} else {
++		spin_unlock_irqrestore(&agent->lock, flags);
++		/* 40 seconds until we can find the packet lifetimes */
++		queue_delayed_work(agent->qp_info->port_priv->wq,
++				   &rmpp_recv->timeout_work,
++				   msecs_to_jiffies(40000));
++		rmpp_recv->newwin += window_size(agent);
++		ack_recv(rmpp_recv, mad_recv_wc);
++		mad_recv_wc = NULL;
++	}
++	deref_rmpp_recv(rmpp_recv);
++	return mad_recv_wc;
++}
++
++
++static struct ib_mad_recv_wc *
++opa_process_rmpp_data(struct ib_mad_agent_private *agent,
++		  struct ib_mad_recv_wc *mad_recv_wc)
++{
++	struct ib_rmpp_hdr *rmpp_hdr;
++	u8 rmpp_status;
++
++	rmpp_hdr = &((struct opa_rmpp_mad *)mad_recv_wc->recv_buf.mad)->base.rmpp_hdr;
++
++	if (rmpp_hdr->rmpp_status) {
++		rmpp_status = IB_MGMT_RMPP_STATUS_BAD_STATUS;
++		goto bad;
++	}
++
++	if (rmpp_hdr->seg_num == cpu_to_be32(1)) {
++		if (!(ib_get_rmpp_flags(rmpp_hdr) & IB_MGMT_RMPP_FLAG_FIRST)) {
++			rmpp_status = IB_MGMT_RMPP_STATUS_BAD_SEG;
++			goto bad;
++		}
++		return start_rmpp(agent, mad_recv_wc);
++	} else {
++		if (ib_get_rmpp_flags(rmpp_hdr) & IB_MGMT_RMPP_FLAG_FIRST) {
++			rmpp_status = IB_MGMT_RMPP_STATUS_BAD_SEG;
++			goto bad;
++		}
++		return continue_rmpp(agent, mad_recv_wc);
++	}
++bad:
++	nack_recv(agent, mad_recv_wc, rmpp_status);
++	ib_free_recv_mad(mad_recv_wc);
++	return NULL;
++}
++
++struct ib_mad_recv_wc *
++opa_process_rmpp_recv_wc(struct ib_mad_agent_private *agent,
++			struct ib_mad_recv_wc *mad_recv_wc)
++{
++	struct opa_rmpp_mad *rmpp_mad;
++
++	rmpp_mad = (struct opa_rmpp_mad *)mad_recv_wc->recv_buf.mad;
++	if (!(rmpp_mad->base.rmpp_hdr.rmpp_rtime_flags & IB_MGMT_RMPP_FLAG_ACTIVE))
++		return mad_recv_wc;
++
++	if (rmpp_mad->base.rmpp_hdr.rmpp_version != IB_MGMT_RMPP_VERSION) {
++		abort_send(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_UNV);
++		nack_recv(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_UNV);
++		goto out;
++	}
++
++	switch (rmpp_mad->base.rmpp_hdr.rmpp_type) {
++	case IB_MGMT_RMPP_TYPE_DATA:
++		return opa_process_rmpp_data(agent, mad_recv_wc);
++	case IB_MGMT_RMPP_TYPE_ACK:
++		process_rmpp_ack(agent, mad_recv_wc);
++		break;
++	case IB_MGMT_RMPP_TYPE_STOP:
++		process_rmpp_stop(agent, mad_recv_wc);
++		break;
++	case IB_MGMT_RMPP_TYPE_ABORT:
++		process_rmpp_abort(agent, mad_recv_wc);
++		break;
++	default:
++		abort_send(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BADT);
++		nack_recv(agent, mad_recv_wc, IB_MGMT_RMPP_STATUS_BADT);
++		break;
++	}
++out:
++	ib_free_recv_mad(mad_recv_wc);
++	return NULL;
++}
+--- /dev/null
++++ b/ib_mad/jumbo_mad_rmpp.h
+@@ -0,0 +1,53 @@
++/*
++ * Copyright (c) 2013 Intel Inc. All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#ifndef __JUMBO_MAD_RMPP_H__
++#define __JUMBO_MAD_RMPP_H__
++
++#include "mad_rmpp.h"
++
++int opa_send_rmpp_mad(struct ib_mad_send_wr_private *mad_send_wr);
++
++struct ib_mad_recv_wc *
++opa_process_rmpp_recv_wc(struct ib_mad_agent_private *agent,
++			struct ib_mad_recv_wc *mad_recv_wc);
++
++int opa_process_rmpp_send_wc(struct ib_mad_send_wr_private *mad_send_wr,
++			    struct ib_mad_send_wc *mad_send_wc);
++
++void opa_rmpp_send_handler(struct ib_mad_send_wc *mad_send_wc);
++
++void opa_cancel_rmpp_recvs(struct ib_mad_agent_private *agent);
++
++int opa_retry_rmpp(struct ib_mad_send_wr_private *mad_send_wr);
++
++#endif	/* __MAD_RMPP_H__ */
+--- /dev/null
++++ b/ib_mad/opa_smi.c
+@@ -0,0 +1,247 @@
++/*
++ * Copyright (c) 2013 Intel Corporation.  All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ */
++
++#include "opa_smi.h"
++
++/*
++ * Fixup a directed route SMP for sending
++ * Return 0 if the SMP should be discarded
++ */
++enum smi_action opa_smi_handle_dr_smp_send(struct opa_smp *smp,
++				       u8 node_type, int port_num)
++{
++	u8 hop_ptr, hop_cnt;
++
++	hop_ptr = smp->hop_ptr;
++	hop_cnt = smp->hop_cnt;
++
++	/* See section 14.2.2.2, Vol 1 IB spec */
++	/* C14-6 -- valid hop_cnt values are from 0 to 63 */
++	if (hop_cnt >= IB_SMP_MAX_PATH_HOPS)
++		return IB_SMI_DISCARD;
++
++	if (!opa_get_smp_direction(smp)) {
++		/* C14-9:1 */
++		if (hop_cnt && hop_ptr == 0) {
++			smp->hop_ptr++;
++			return (smp->route.dr.initial_path[smp->hop_ptr] ==
++				port_num ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-9:2 */
++		if (hop_ptr && hop_ptr < hop_cnt) {
++			if (node_type != RDMA_NODE_IB_SWITCH)
++				return IB_SMI_DISCARD;
++
++			/* smp->return_path set when received */
++			smp->hop_ptr++;
++			return (smp->route.dr.initial_path[smp->hop_ptr] ==
++				port_num ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-9:3 -- We're at the end of the DR segment of path */
++		if (hop_ptr == hop_cnt) {
++			/* smp->return_path set when received */
++			smp->hop_ptr++;
++			return (node_type == RDMA_NODE_IB_SWITCH ||
++				smp->route.dr.dr_dlid == OPA_LID_PERMISSIVE ?
++				IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-9:4 -- hop_ptr = hop_cnt + 1 -> give to SMA/SM */
++		/* C14-9:5 -- Fail unreasonable hop pointer */
++		return (hop_ptr == hop_cnt + 1 ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++
++	} else {
++		/* C14-13:1 */
++		if (hop_cnt && hop_ptr == hop_cnt + 1) {
++			smp->hop_ptr--;
++			return (smp->route.dr.return_path[smp->hop_ptr] ==
++				port_num ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-13:2 */
++		if (2 <= hop_ptr && hop_ptr <= hop_cnt) {
++			if (node_type != RDMA_NODE_IB_SWITCH)
++				return IB_SMI_DISCARD;
++
++			smp->hop_ptr--;
++			return (smp->route.dr.return_path[smp->hop_ptr] ==
++				port_num ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-13:3 -- at the end of the DR segment of path */
++		if (hop_ptr == 1) {
++			smp->hop_ptr--;
++			/* C14-13:3 -- SMPs destined for SM shouldn't be here */
++			return (node_type == RDMA_NODE_IB_SWITCH ||
++				smp->route.dr.dr_slid == OPA_LID_PERMISSIVE ?
++				IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-13:4 -- hop_ptr = 0 -> should have gone to SM */
++		if (hop_ptr == 0)
++			return IB_SMI_HANDLE;
++
++		/* C14-13:5 -- Check for unreasonable hop pointer */
++		return IB_SMI_DISCARD;
++	}
++}
++
++/*
++ * Adjust information for a received SMP
++ * Return 0 if the SMP should be dropped
++ */
++enum smi_action opa_smi_handle_dr_smp_recv(struct opa_smp *smp, u8 node_type,
++				       int port_num, int phys_port_cnt)
++{
++	u8 hop_ptr, hop_cnt;
++
++	hop_ptr = smp->hop_ptr;
++	hop_cnt = smp->hop_cnt;
++
++	/* See section 14.2.2.2, Vol 1 IB spec */
++	/* C14-6 -- valid hop_cnt values are from 0 to 63 */
++	if (hop_cnt >= IB_SMP_MAX_PATH_HOPS)
++		return IB_SMI_DISCARD;
++
++	if (!opa_get_smp_direction(smp)) {
++		/* C14-9:1 -- sender should have incremented hop_ptr */
++		if (hop_cnt && hop_ptr == 0)
++			return IB_SMI_DISCARD;
++
++		/* C14-9:2 -- intermediate hop */
++		if (hop_ptr && hop_ptr < hop_cnt) {
++			if (node_type != RDMA_NODE_IB_SWITCH)
++				return IB_SMI_DISCARD;
++
++			smp->route.dr.return_path[hop_ptr] = port_num;
++			/* smp->hop_ptr updated when sending */
++			return (smp->route.dr.initial_path[hop_ptr+1] <= phys_port_cnt ?
++				IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-9:3 -- We're at the end of the DR segment of path */
++		if (hop_ptr == hop_cnt) {
++			if (hop_cnt)
++				smp->route.dr.return_path[hop_ptr] = port_num;
++			/* smp->hop_ptr updated when sending */
++
++			return (node_type == RDMA_NODE_IB_SWITCH ||
++				smp->route.dr.dr_dlid == OPA_LID_PERMISSIVE ?
++				IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-9:4 -- hop_ptr = hop_cnt + 1 -> give to SMA/SM */
++		/* C14-9:5 -- fail unreasonable hop pointer */
++		return (hop_ptr == hop_cnt + 1 ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++
++	} else {
++
++		/* C14-13:1 */
++		if (hop_cnt && hop_ptr == hop_cnt + 1) {
++			smp->hop_ptr--;
++			return (smp->route.dr.return_path[smp->hop_ptr] ==
++				port_num ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-13:2 */
++		if (2 <= hop_ptr && hop_ptr <= hop_cnt) {
++			if (node_type != RDMA_NODE_IB_SWITCH)
++				return IB_SMI_DISCARD;
++
++			/* smp->hop_ptr updated when sending */
++			return (smp->route.dr.return_path[hop_ptr-1] <= phys_port_cnt ?
++				IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-13:3 -- We're at the end of the DR segment of path */
++		if (hop_ptr == 1) {
++			if (smp->route.dr.dr_slid == OPA_LID_PERMISSIVE) {
++				/* giving SMP to SM - update hop_ptr */
++				smp->hop_ptr--;
++				return IB_SMI_HANDLE;
++			}
++			/* smp->hop_ptr updated when sending */
++			return (node_type == RDMA_NODE_IB_SWITCH ?
++				IB_SMI_HANDLE : IB_SMI_DISCARD);
++		}
++
++		/* C14-13:4 -- hop_ptr = 0 -> give to SM */
++		/* C14-13:5 -- Check for unreasonable hop pointer */
++		return (hop_ptr == 0 ? IB_SMI_HANDLE : IB_SMI_DISCARD);
++	}
++}
++
++enum smi_forward_action opa_smi_check_forward_dr_smp(struct opa_smp *smp)
++{
++	u8 hop_ptr, hop_cnt;
++
++	hop_ptr = smp->hop_ptr;
++	hop_cnt = smp->hop_cnt;
++
++	if (!opa_get_smp_direction(smp)) {
++		/* C14-9:2 -- intermediate hop */
++		if (hop_ptr && hop_ptr < hop_cnt)
++			return IB_SMI_FORWARD;
++
++		/* C14-9:3 -- at the end of the DR segment of path */
++		if (hop_ptr == hop_cnt)
++			return (smp->route.dr.dr_dlid == OPA_LID_PERMISSIVE ?
++				IB_SMI_SEND : IB_SMI_LOCAL);
++
++		/* C14-9:4 -- hop_ptr = hop_cnt + 1 -> give to SMA/SM */
++		if (hop_ptr == hop_cnt + 1)
++			return IB_SMI_SEND;
++	} else {
++		/* C14-13:2  -- intermediate hop */
++		if (2 <= hop_ptr && hop_ptr <= hop_cnt)
++			return IB_SMI_FORWARD;
++
++		/* C14-13:3 -- at the end of the DR segment of path */
++		if (hop_ptr == 1)
++			return (smp->route.dr.dr_slid != OPA_LID_PERMISSIVE ?
++				IB_SMI_SEND : IB_SMI_LOCAL);
++	}
++	return IB_SMI_LOCAL;
++}
++
++/*
++ * Return the forwarding port number from initial_path for outgoing SMP and
++ * from return_path for returning SMP
++ */
++int opa_smi_get_fwd_port(struct opa_smp *smp)
++{
++	return (!opa_get_smp_direction(smp) ? smp->route.dr.initial_path[smp->hop_ptr+1] :
++		smp->route.dr.return_path[smp->hop_ptr-1]);
++}
+--- /dev/null
++++ b/ib_mad/opa_smi.h
+@@ -0,0 +1,78 @@
++/*
++ * Copyright (c) 2014 Intel Corporation.  All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ *
++ */
++
++#ifndef __OPA_SMI_H_
++#define __OPA_SMI_H_
++
++#include <rdma/ib_smi.h>
++#include <rdma/opa_smi.h>
++
++#include "smi.h"
++
++enum smi_action opa_smi_handle_dr_smp_recv(struct opa_smp *smp, u8 node_type,
++				       int port_num, int phys_port_cnt);
++int opa_smi_get_fwd_port(struct opa_smp *smp);
++extern enum smi_forward_action opa_smi_check_forward_dr_smp(struct opa_smp *smp);
++extern enum smi_action opa_smi_handle_dr_smp_send(struct opa_smp *smp,
++					      u8 node_type, int port_num);
++
++/*
++ * Return IB_SMI_HANDLE if the SMP should be handled by the local SMA/SM
++ * via process_mad
++ */
++static inline enum smi_action opa_smi_check_local_smp(struct opa_smp *smp,
++						  struct ib_device *device)
++{
++	/* C14-9:3 -- We're at the end of the DR segment of path */
++	/* C14-9:4 -- Hop Pointer = Hop Count + 1 -> give to SMA/SM */
++	return (device->process_mad &&
++		!opa_get_smp_direction(smp) &&
++		(smp->hop_ptr == smp->hop_cnt + 1)) ?
++		IB_SMI_HANDLE : IB_SMI_DISCARD;
++}
++
++/*
++ * Return IB_SMI_HANDLE if the SMP should be handled by the local SMA/SM
++ * via process_mad
++ */
++static inline enum smi_action opa_smi_check_local_returning_smp(struct opa_smp *smp,
++						   struct ib_device *device)
++{
++	/* C14-13:3 -- We're at the end of the DR segment of path */
++	/* C14-13:4 -- Hop Pointer == 0 -> give to SM */
++	return (device->process_mad &&
++		opa_get_smp_direction(smp) &&
++		!smp->hop_ptr) ? IB_SMI_HANDLE : IB_SMI_DISCARD;
++}
++
++#endif	/* __OPA_SMI_H_ */
+--- a/ib_mad/Makefile
++++ b/ib_mad/Makefile
+@@ -12,7 +12,7 @@
+ 
+ obj-$(CONFIG_INFINIBAND) += ib_mad.o
+ 
+-ib_mad-y := mad.o smi.o agent.o mad_rmpp.o
++ib_mad-y := mad.o smi.o agent.o mad_rmpp.o opa_smi.o jumbo_mad.o jumbo_mad_rmpp.o
+ 
+ else
+ #normal makefile
+--- a/include/update/ib_user_mad.h
++++ b/include/update/ib_user_mad.h
+@@ -191,6 +191,45 @@
+ 	__u8	rmpp_version;
+ };
+ 
++/**
++ * ib_user_mad_reg_req2 - MAD registration request
++ *
++ * @id                 - Set by the _kernel_; used by userspace to identify the
++ *                       registered agent in future requests.
++ * @qpn                - Queue pair number; must be 0 or 1.
++ * @mgmt_class         - Indicates which management class of MADs should be
++ *                       receive by the caller.  This field is only required if
++ *                       the user wishes to receive unsolicited MADs, otherwise
++ *                       it should be 0.
++ * @mgmt_class_version - Indicates which version of MADs for the given
++ *                       management class to receive.
++ * @res                - Ignored.
++ * @flags              - additional registration flags; Must be in the set of
++ *                       flags defined in IB_USER_MAD_REG_FLAGS_CAP
++ * @method_mask        - The caller wishes to receive unsolicited MADs for the
++ *                       methods whose bit(s) is(are) set.
++ * @oui                - Indicates IEEE OUI to use when mgmt_class is a vendor
++ *                       class in the range from 0x30 to 0x4f. Otherwise not
++ *                       used.
++ * @rmpp_version       - If set, indicates the RMPP version to use.
++ */
++enum {
++	IB_USER_MAD_USER_RMPP = (1 << 0),
++};
++#define IB_USER_MAD_REG_FLAGS_CAP (IB_USER_MAD_USER_RMPP)
++struct ib_user_mad_reg_req2 {
++	__u32	id;
++	__u32	qpn;
++	__u8	mgmt_class;
++	__u8	mgmt_class_version;
++	__u16   res;
++	__u32   flags;
++	__u64   method_mask[2];
++	__u32   oui;
++	__u8	rmpp_version;
++	__u8	reserved[3];
++};
++
+ #define IB_IOCTL_MAGIC		0x1b
+ 
+ #define IB_USER_MAD_REGISTER_AGENT	_IOWR(IB_IOCTL_MAGIC, 1, \
+@@ -200,4 +239,7 @@
+ 
+ #define IB_USER_MAD_ENABLE_PKEY		_IO(IB_IOCTL_MAGIC, 3)
+ 
++#define IB_USER_MAD_REGISTER_AGENT2     _IOWR(IB_IOCTL_MAGIC, 4, \
++					      struct ib_user_mad_reg_req2)
++
+ #endif /* IB_USER_MAD_H */
+--- /dev/null
++++ b/include/rdma/opa_port_info.h
+@@ -0,0 +1,417 @@
++/*
++ * Copyright (c) 2014 Intel Corporation.  All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#if !defined(OPA_PORT_INFO_H)
++#define OPA_PORT_INFO_H
++
++#define OPA_PORT_LINK_MODE_NOP	0		/* No change */
++#define OPA_PORT_LINK_MODE_OPA	4		/* Port mode is OPA */
++
++#define OPA_PORT_PACKET_FORMAT_NOP	0		/* No change */
++#define OPA_PORT_PACKET_FORMAT_8B	1		/* Format 8B */
++#define OPA_PORT_PACKET_FORMAT_9B	2		/* Format 9B */
++#define OPA_PORT_PACKET_FORMAT_10B	4		/* Format 10B */
++#define OPA_PORT_PACKET_FORMAT_16B	8		/* Format 16B */
++
++#define OPA_PORT_LTP_CRC_MODE_NONE	0	/* No change */
++#define OPA_PORT_LTP_CRC_MODE_14	1	/* 14-bit LTP CRC mode (optional) */
++#define OPA_PORT_LTP_CRC_MODE_16	2	/* 16-bit LTP CRC mode */
++#define OPA_PORT_LTP_CRC_MODE_48	4	/* 48-bit LTP CRC mode (optional) */
++#define OPA_PORT_LTP_CRC_MODE_PER_LANE  8	/* 12/16-bit per lane LTP CRC mode */
++
++/* Link Down / Neighbor Link Down Reason; indicated as follows: */
++#define OPA_LINKDOWN_REASON_NONE				0	/* No specified reason */
++#define OPA_LINKDOWN_REASON_RCV_ERROR_0				1
++#define OPA_LINKDOWN_REASON_BAD_PKT_LEN				2
++#define OPA_LINKDOWN_REASON_PKT_TOO_LONG			3
++#define OPA_LINKDOWN_REASON_PKT_TOO_SHORT			4
++#define OPA_LINKDOWN_REASON_BAD_SLID				5
++#define OPA_LINKDOWN_REASON_BAD_DLID				6
++#define OPA_LINKDOWN_REASON_BAD_L2				7
++#define OPA_LINKDOWN_REASON_BAD_SC				8
++#define OPA_LINKDOWN_REASON_RCV_ERROR_8				9
++#define OPA_LINKDOWN_REASON_BAD_MID_TAIL			10
++#define OPA_LINKDOWN_REASON_RCV_ERROR_10			11
++#define OPA_LINKDOWN_REASON_PREEMPT_ERROR			12
++#define OPA_LINKDOWN_REASON_PREEMPT_VL15			13
++#define OPA_LINKDOWN_REASON_BAD_VL_MARKER			14
++#define OPA_LINKDOWN_REASON_RCV_ERROR_14			15
++#define OPA_LINKDOWN_REASON_RCV_ERROR_15			16
++#define OPA_LINKDOWN_REASON_BAD_HEAD_DIST			17
++#define OPA_LINKDOWN_REASON_BAD_TAIL_DIST			18
++#define OPA_LINKDOWN_REASON_BAD_CTRL_DIST			19
++#define OPA_LINKDOWN_REASON_BAD_CREDIT_ACK			20
++#define OPA_LINKDOWN_REASON_UNSUPPORTED_VL_MARKER		21
++#define OPA_LINKDOWN_REASON_BAD_PREEMPT				22
++#define OPA_LINKDOWN_REASON_BAD_CONTROL_FLIT			23
++#define OPA_LINKDOWN_REASON_EXCEED_MULTICAST_LIMIT		24
++#define OPA_LINKDOWN_REASON_RCV_ERROR_24			25
++#define OPA_LINKDOWN_REASON_RCV_ERROR_25			26
++#define OPA_LINKDOWN_REASON_RCV_ERROR_26			27
++#define OPA_LINKDOWN_REASON_RCV_ERROR_27			28
++#define OPA_LINKDOWN_REASON_RCV_ERROR_28			29
++#define OPA_LINKDOWN_REASON_RCV_ERROR_29			30
++#define OPA_LINKDOWN_REASON_RCV_ERROR_30			31
++#define OPA_LINKDOWN_REASON_EXCESSIVE_BUFFER_OVERRUN		32
++#define OPA_LINKDOWN_REASON_UNKNOWN				33
++/* 34 -reserved */
++#define OPA_LINKDOWN_REASON_REBOOT				35
++#define OPA_LINKDOWN_REASON_NEIGHBOR_UNKNOWN			36
++/* 37-38 reserved */
++#define OPA_LINKDOWN_REASON_FM_BOUNCE				39
++#define OPA_LINKDOWN_REASON_SPEED_POLICY			40
++#define OPA_LINKDOWN_REASON_WIDTH_POLICY			41
++/* 42-48 reserved */
++#define OPA_LINKDOWN_REASON_DISCONNECTED			49
++#define OPA_LINKDOWN_REASON_LOCAL_MEDIA_NOT_INSTALLED		50
++#define OPA_LINKDOWN_REASON_NOT_INSTALLED			51
++#define OPA_LINKDOWN_REASON_CHASSIS_CONFIG			52
++/* 53 reserved */
++#define OPA_LINKDOWN_REASON_END_TO_END_NOT_INSTALLED		54
++/* 55 reserved */
++#define OPA_LINKDOWN_REASON_POWER_POLICY			56
++#define OPA_LINKDOWN_REASON_LINKSPEED_POLICY			57
++#define OPA_LINKDOWN_REASON_LINKWIDTH_POLICY			58
++/* 59 reserved */
++#define OPA_LINKDOWN_REASON_SWITCH_MGMT				60
++#define OPA_LINKDOWN_REASON_SMA_DISABLED			61
++/* 62 reserved */
++#define OPA_LINKDOWN_REASON_TRANSIENT				63
++/* 64-255 reserved */
++
++/* OPA Link Init reason; indicated as follows: */
++/* 3-7; 11-15 reserved; 8-15 cleared on Polling->LinkUp */
++#define OPA_LINKINIT_REASON_NOP                 0
++#define OPA_LINKINIT_REASON_LINKUP              (1 << 4)
++#define OPA_LINKINIT_REASON_FLAPPING            (2 << 4)
++#define OPA_LINKINIT_REASON_CLEAR               (8 << 4)
++#define OPA_LINKINIT_OUTSIDE_POLICY             (8 << 4)
++#define OPA_LINKINIT_QUARANTINED                (9 << 4)
++#define OPA_LINKINIT_INSUFIC_CAPABILITY         (10 << 4)
++
++#define OPA_LINK_SPEED_NOP              0x0000  /*  Reserved (1-5 Gbps) */
++#define OPA_LINK_SPEED_12_5G            0x0001  /*  12.5 Gbps */
++#define OPA_LINK_SPEED_25G              0x0002  /*  25.78125?  Gbps (EDR) */
++
++#define OPA_LINK_WIDTH_1X            0x0001
++#define OPA_LINK_WIDTH_2X            0x0002
++#define OPA_LINK_WIDTH_3X            0x0004
++#define OPA_LINK_WIDTH_4X            0x0008
++
++#define OPA_CAP_MASK3_IsSnoopSupported            (1 << 7)
++#define OPA_CAP_MASK3_IsAsyncSC2VLSupported       (1 << 6)
++#define OPA_CAP_MASK3_IsAddrRangeConfigSupported  (1 << 5)
++#define OPA_CAP_MASK3_IsPassThroughSupported      (1 << 4)
++#define OPA_CAP_MASK3_IsSharedSpaceSupported      (1 << 3)
++/* reserved (1 << 2) */
++#define OPA_CAP_MASK3_IsVLMarkerSupported         (1 << 1)
++#define OPA_CAP_MASK3_IsVLrSupported              (1 << 0)
++
++/**
++ * new MTU values
++ */
++enum {
++	OPA_MTU_8192  = 6,
++	OPA_MTU_10240 = 7,
++};
++
++enum {
++	OPA_PORT_PHYS_CONF_DISCONNECTED = 0,
++	OPA_PORT_PHYS_CONF_STANDARD     = 1,
++	OPA_PORT_PHYS_CONF_FIXED        = 2,
++	OPA_PORT_PHYS_CONF_VARIABLE     = 3,
++	OPA_PORT_PHYS_CONF_SI_PHOTO     = 4
++};
++
++enum port_info_field_masks {
++	/* vl.cap */
++	OPA_PI_MASK_VL_CAP                        = 0x1F,
++	/* port_states.ledenable_offlinereason */
++	OPA_PI_MASK_OFFLINE_REASON                = 0x0F,
++	OPA_PI_MASK_LED_ENABLE                    = 0x40,
++	/* port_states.unsleepstate_downdefstate */
++	OPA_PI_MASK_UNSLEEP_STATE                 = 0xF0,
++	OPA_PI_MASK_DOWNDEF_STATE                 = 0x0F,
++	/* port_states.portphysstate_portstate */
++	OPA_PI_MASK_PORT_PHYSICAL_STATE           = 0xF0,
++	OPA_PI_MASK_PORT_STATE                    = 0x0F,
++	/* port_phys_conf */
++	OPA_PI_MASK_PORT_PHYSICAL_CONF            = 0x0F,
++	/* collectivemask_multicastmask */
++	OPA_PI_MASK_COLLECT_MASK                  = 0x38,
++	OPA_PI_MASK_MULTICAST_MASK                = 0x07,
++	/* mkeyprotect_lmc */
++	OPA_PI_MASK_MKEY_PROT_BIT                 = 0xC0,
++	OPA_PI_MASK_LMC                           = 0x0F,
++	/* smsl */
++	OPA_PI_MASK_SMSL                          = 0x1F,
++	/* partenforce_filterraw */
++	/* Filter Raw In/Out bits 1 and 2 were removed */
++	OPA_PI_MASK_LINKINIT_REASON               = 0xF0,
++	OPA_PI_MASK_PARTITION_ENFORCE_IN          = 0x08,
++	OPA_PI_MASK_PARTITION_ENFORCE_OUT         = 0x04,
++	/* operational_vls */
++	OPA_PI_MASK_OPERATIONAL_VL                = 0x1F,
++	/* sa_qp */
++	OPA_PI_MASK_SA_QP                         = 0x00FFFFFF,
++	/* sm_trap_qp */
++	OPA_PI_MASK_SM_TRAP_QP                    = 0x00FFFFFF,
++	/* localphy_overrun_errors */
++	OPA_PI_MASK_LOCAL_PHY_ERRORS              = 0xF0,
++	OPA_PI_MASK_OVERRUN_ERRORS                = 0x0F,
++	/* clientrereg_subnettimeout */
++	OPA_PI_MASK_CLIENT_REREGISTER             = 0x80,
++	OPA_PI_MASK_SUBNET_TIMEOUT                = 0x1F,
++	/* port_link_mode */
++	OPA_PI_MASK_PORT_LINK_SUPPORTED           = (0x001F << 10),
++	OPA_PI_MASK_PORT_LINK_ENABLED             = (0x001F <<  5),
++	OPA_PI_MASK_PORT_LINK_ACTIVE              = (0x001F <<  0),
++	/* port_link_crc_mode */
++	OPA_PI_MASK_PORT_LINK_CRC_SUPPORTED       = 0x0F00,
++	OPA_PI_MASK_PORT_LINK_CRC_ENABLED         = 0x00F0,
++	OPA_PI_MASK_PORT_LINK_CRC_ACTIVE          = 0x000F,
++	/* port_mode */
++	OPA_PI_MASK_PORT_MODE_SECURITY_CHECK      = 0x0001,
++	OPA_PI_MASK_PORT_MODE_16B_TRAP_QUERY      = 0x0002,
++	OPA_PI_MASK_PORT_MODE_PKEY_CONVERT        = 0x0004,
++	OPA_PI_MASK_PORT_MODE_SC2SC_MAPPING       = 0x0008,
++	OPA_PI_MASK_PORT_MODE_VL_MARKER           = 0x0010,
++	OPA_PI_MASK_PORT_PASS_THROUGH             = 0x0020,
++	OPA_PI_MASK_PORT_ACTIVE_OPTOMIZE          = 0x0040,
++	/* flit_control.interleave */
++	OPA_PI_MASK_INTERLEAVE_DIST_SUP           = (0x0003 << 12),
++	OPA_PI_MASK_INTERLEAVE_DIST_ENABLE        = (0x0003 << 10),
++	OPA_PI_MASK_INTERLEAVE_MAX_NEST_TX        = (0x001F <<  5),
++	OPA_PI_MASK_INTERLEAVE_MAX_NEST_RX        = (0x001F <<  0),
++
++	/* port_error_action */
++	OPA_PI_MASK_EX_BUFFER_OVERRUN                  = 0x80000000,
++		/* 7 bits reserved */
++	OPA_PI_MASK_FM_CFG_ERR_EXCEED_MULTICAST_LIMIT  = 0x00800000,
++	OPA_PI_MASK_FM_CFG_BAD_CONTROL_FLIT            = 0x00400000,
++	OPA_PI_MASK_FM_CFG_BAD_PREEMPT                 = 0x00200000,
++	OPA_PI_MASK_FM_CFG_UNSUPPORTED_VL_MARKER       = 0x00100000,
++	OPA_PI_MASK_FM_CFG_BAD_CRDT_ACK                = 0x00080000,
++	OPA_PI_MASK_FM_CFG_BAD_CTRL_DIST               = 0x00040000,
++	OPA_PI_MASK_FM_CFG_BAD_TAIL_DIST               = 0x00020000,
++	OPA_PI_MASK_FM_CFG_BAD_HEAD_DIST               = 0x00010000,
++		/* 2 bits reserved */
++	OPA_PI_MASK_PORT_RCV_BAD_VL_MARKER             = 0x00002000,
++	OPA_PI_MASK_PORT_RCV_PREEMPT_VL15              = 0x00001000,
++	OPA_PI_MASK_PORT_RCV_PREEMPT_ERROR             = 0x00000800,
++		/* 1 bit reserved */
++	OPA_PI_MASK_PORT_RCV_BAD_MidTail               = 0x00000200,
++		/* 1 bit reserved */
++	OPA_PI_MASK_PORT_RCV_BAD_SC                    = 0x00000080,
++	OPA_PI_MASK_PORT_RCV_BAD_L2                    = 0x00000040,
++	OPA_PI_MASK_PORT_RCV_BAD_DLID                  = 0x00000020,
++	OPA_PI_MASK_PORT_RCV_BAD_SLID                  = 0x00000010,
++	OPA_PI_MASK_PORT_RCV_PKTLEN_TOOSHORT           = 0x00000008,
++	OPA_PI_MASK_PORT_RCV_PKTLEN_TOOLONG            = 0x00000004,
++	OPA_PI_MASK_PORT_RCV_BAD_PKTLEN                = 0x00000002,
++	OPA_PI_MASK_PORT_RCV_BAD_LT                    = 0x00000001,
++
++	/* pass_through.res_drctl */
++	OPA_PI_MASK_PASS_THROUGH_DR_CONTROL       = 0x01,
++
++	/* buffer_units */
++	OPA_PI_MASK_BUF_UNIT_VL15_INIT            = (0x00000FFF  << 11),
++	OPA_PI_MASK_BUF_UNIT_VL15_CREDIT_RATE     = (0x0000001F  <<  6),
++	OPA_PI_MASK_BUF_UNIT_CREDIT_ACK           = (0x00000003  <<  3),
++	OPA_PI_MASK_BUF_UNIT_BUF_ALLOC            = (0x00000003  <<  0),
++
++	/* neigh_mtu.pvlx_to_mtu */
++	OPA_PI_MASK_NEIGH_MTU_PVL0                = 0xF0,
++	OPA_PI_MASK_NEIGH_MTU_PVL1                = 0x0F,
++
++	/* neigh_mtu.vlstall_hoq_life */
++	OPA_PI_MASK_VL_STALL                      = (0x03 << 5),
++	OPA_PI_MASK_HOQ_LIFE                      = (0x1F << 0),
++
++	/* port_neigh_mode */
++	OPA_PI_MASK_NEIGH_MGMT_ALLOWED            = (0x01 << 3),
++	OPA_PI_MASK_NEIGH_FW_AUTH_BYPASS          = (0x01 << 2),
++	OPA_PI_MASK_NEIGH_NODE_TYPE               = (0x03 << 0),
++
++	/* resptime_value */
++	OPA_PI_MASK_RESPONSE_TIME_VALUE           = 0x1F,
++
++	/* mtucap */
++	OPA_PI_MASK_MTU_CAP                       = 0x0F,
++};
++
++struct opa_port_states {
++	u8     reserved;
++	u8     ledenable_offlinereason;   /* 1 res, 1 bit, 6 bits */
++	u8     reserved2;
++	u8     portphysstate_portstate;   /* 4 bits, 4 bits */
++};
++
++struct opa_port_state_info {
++	struct opa_port_states port_states;
++	__be16 link_width_downgrade_tx_active;
++	__be16 link_width_downgrade_rx_active;
++};
++
++struct opa_port_info {
++	__be32 lid;
++	__be32 flow_control_mask;
++
++	struct {
++		u8     res;                       /* was inittype */
++		u8     cap;                       /* 3 res, 5 bits */
++		__be16 high_limit;
++		__be16 preempt_limit;
++		u8     arb_high_cap;
++		u8     arb_low_cap;
++	} vl;
++
++	struct opa_port_states  port_states;
++	u8     port_phys_conf;                    /* 4 res, 4 bits */
++	u8     collectivemask_multicastmask;      /* 2 res, 3, 3 */
++	u8     mkeyprotect_lmc;                   /* 2 bits, 2 res, 4 bits */
++	u8     smsl;                              /* 3 res, 5 bits */
++
++	u8     partenforce_filterraw;             /* bit fields */
++	u8     operational_vls;                    /* 3 res, 5 bits */
++	__be16 pkey_8b;
++	__be16 pkey_10b;
++	__be16 mkey_violations;
++
++	__be16 pkey_violations;
++	__be16 qkey_violations;
++	__be32 sm_trap_qp;                        /* 8 bits, 24 bits */
++
++	__be32 sa_qp;                             /* 8 bits, 24 bits */
++	u8     neigh_port_num;
++	u8     link_down_reason;
++	u8     neigh_link_down_reason;
++	u8     clientrereg_subnettimeout;	  /* 1 bit, 2 bits, 5 */
++
++	struct {
++		__be16 supported;
++		__be16 enabled;
++		__be16 active;
++	} link_speed;
++	struct {
++		__be16 supported;
++		__be16 enabled;
++		__be16 active;
++	} link_width;
++	struct {
++		__be16 supported;
++		__be16 enabled;
++		__be16 tx_active;
++		__be16 rx_active;
++	} link_width_downgrade;
++	__be16 port_link_mode;                  /* 1 res, 5 bits, 5 bits, 5 bits */
++	__be16 port_ltp_crc_mode;               /* 4 res, 4 bits, 4 bits, 4 bits */
++
++	__be16 port_mode;                       /* 9 res, bit fields */
++	struct {
++		__be16 supported;
++		__be16 enabled;
++	} port_packet_format;
++	struct {
++		__be16 interleave;  /* 2 res, 2,2,5,5 */
++		struct {
++			__be16 min_initial;
++			__be16 min_tail;
++			u8     large_pkt_limit;
++			u8     small_pkt_limit;
++			u8     max_small_pkt_limit;
++			u8     preemption_limit;
++		} preemption;
++	} flit_control;
++
++	__be32 reserved4;
++	__be32 port_error_action; /* bit field */
++
++	struct {
++		u8 egress_port;
++		u8 res_drctl;                    /* 7 res, 1 */
++	} pass_through;
++	__be16 mkey_lease_period;
++	__be32 buffer_units;                     /* 9 res, 12, 5, 3, 3 */
++
++	__be32 reserved5;
++	__be32 sm_lid;
++
++	__be64 mkey;
++
++	__be64 subnet_prefix;
++
++	struct {
++		u8 pvlx_to_mtu[OPA_MAX_VLS/2]; /* 4 bits, 4 bits */
++	} neigh_mtu;
++
++	struct {
++		u8 vlstall_hoqlife;             /* 3 bits, 5 bits */
++	} xmit_q[OPA_MAX_VLS];
++
++	struct {
++		u8 addr[16];
++	} ipaddr_ipv6;
++
++	struct {
++		u8 addr[4];
++	} ipaddr_ipv4;
++
++	u32    reserved6;
++	u32    reserved7;
++	u32    reserved8;
++
++	__be64 neigh_node_guid;
++
++	__be32 ib_cap_mask;
++	__be16 reserved9;                    /* was ib_cap_mask2 */
++	__be16 opa_cap_mask;
++
++	__be32 reserved10;                   /* was link_roundtrip_latency */
++	__be16 overall_buffer_space;
++	__be16 reserved11;                   /* was max_credit_hint */
++
++	__be16 diag_code;
++	struct {
++		u8 buffer;
++		u8 wire;
++	} replay_depth;
++	u8     port_neigh_mode;
++	u8     mtucap;                          /* 4 res, 4 bits */
++
++	u8     resptimevalue;		        /* 3 res, 5 bits */
++	u8     local_port_num;
++	u8     reserved12;
++	u8     reserved13;                       /* was guid_cap */
++} __attribute__ ((packed));
++
++#endif /* OPA_PORT_INFO_H */
+--- /dev/null
++++ b/include/rdma/opa_smi.h
+@@ -0,0 +1,153 @@
++/*
++ * Copyright (c) 2014 Intel Corporation.  All rights reserved.
++ *
++ * This software is available to you under a choice of one of two
++ * licenses.  You may choose to be licensed under the terms of the GNU
++ * General Public License (GPL) Version 2, available from the file
++ * COPYING in the main directory of this source tree, or the
++ * OpenIB.org BSD license below:
++ *
++ *     Redistribution and use in source and binary forms, with or
++ *     without modification, are permitted provided that the following
++ *     conditions are met:
++ *
++ *      - Redistributions of source code must retain the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer.
++ *
++ *      - Redistributions in binary form must reproduce the above
++ *        copyright notice, this list of conditions and the following
++ *        disclaimer in the documentation and/or other materials
++ *        provided with the distribution.
++ *
++ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
++ * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
++ * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND
++ * NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS
++ * BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN
++ * ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, OUT OF OR IN
++ * CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
++ * SOFTWARE.
++ */
++
++#if !defined(OPA_SMI_H)
++#define OPA_SMI_H
++
++#include <rdma/ib_mad.h>
++#include <rdma/ib_smi.h>
++
++#define OPA_SMP_LID_DATA_SIZE			2016
++#define OPA_SMP_DR_DATA_SIZE			1872
++#define OPA_SMP_MAX_PATH_HOPS			64
++
++#define OPA_MAX_VLS				32
++#define OPA_MAX_SLS				32
++#define OPA_MAX_SCS				32
++
++#define OPA_SMI_CLASS_VERSION			0x80
++
++#define OPA_LID_PERMISSIVE			cpu_to_be32(0xFFFFFFFF)
++
++struct opa_smp {
++	u8	base_version;
++	u8	mgmt_class;
++	u8	class_version;
++	u8	method;
++	__be16	status;
++	u8	hop_ptr;
++	u8	hop_cnt;
++	__be64	tid;
++	__be16	attr_id;
++	__be16	resv;
++	__be32	attr_mod;
++	__be64	mkey;
++	union {
++		struct {
++			uint8_t data[OPA_SMP_LID_DATA_SIZE];
++		} lid;
++		struct {
++			__be32	dr_slid;
++			__be32	dr_dlid;
++			u8	initial_path[OPA_SMP_MAX_PATH_HOPS];
++			u8	return_path[OPA_SMP_MAX_PATH_HOPS];
++			u8	reserved[8];
++			u8	data[OPA_SMP_DR_DATA_SIZE];
++		} dr;
++	} route;
++} __packed;
++
++
++/* Subnet management attributes */
++/* ... */
++#define OPA_ATTRIB_ID_NODE_DESCRIPTION		cpu_to_be16(0x0010)
++#define OPA_ATTRIB_ID_NODE_INFO			cpu_to_be16(0x0011)
++#define OPA_ATTRIB_ID_PORT_INFO			cpu_to_be16(0x0015)
++#define OPA_ATTRIB_ID_PARTITION_TABLE		cpu_to_be16(0x0016)
++#define OPA_ATTRIB_ID_SL_TO_SC_MAP		cpu_to_be16(0x0017)
++#define OPA_ATTRIB_ID_VL_ARBITRATION		cpu_to_be16(0x0018)
++#define OPA_ATTRIB_ID_SM_INFO			cpu_to_be16(0x0020)
++#define OPA_ATTRIB_ID_CABLE_INFO		cpu_to_be16(0x0032)
++#define OPA_ATTRIB_ID_AGGREGATE			cpu_to_be16(0x0080)
++#define OPA_ATTRIB_ID_SC_TO_SL_MAP		cpu_to_be16(0x0082)
++#define OPA_ATTRIB_ID_SC_TO_VLR_MAP		cpu_to_be16(0x0083)
++#define OPA_ATTRIB_ID_SC_TO_VLT_MAP		cpu_to_be16(0x0084)
++#define OPA_ATTRIB_ID_SC_TO_VLNT_MAP		cpu_to_be16(0x0085)
++/* ... */
++#define OPA_ATTRIB_ID_PORT_STATE_INFO		cpu_to_be16(0x0087)
++/* ... */
++#define OPA_ATTRIB_ID_BUFFER_CONTROL_TABLE	cpu_to_be16(0x008A)
++/* ... */
++
++struct opa_node_description {
++	u8 data[64];
++} __attribute__ ((packed));
++
++struct opa_node_info {
++	u8      base_version;
++	u8      class_version;
++	u8      node_type;
++	u8      num_ports;
++	__be32  reserved;
++	__be64  system_image_guid;
++	__be64  node_guid;
++	__be64  port_guid;
++	__be16  partition_cap;
++	__be16  device_id;
++	__be32  revision;
++	u8      local_port_num;
++	u8      vendor_id[3];   /* network byte order */
++} __attribute__ ((packed));
++
++#define OPA_PARTITION_TABLE_BLK_SIZE 32
++
++static inline u8
++opa_get_smp_direction(struct opa_smp *smp)
++{
++	return ib_get_smp_direction((struct ib_smp *)smp);
++}
++
++static inline u8 *opa_get_smp_data(struct opa_smp *smp)
++{
++	if (smp->mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
++		return smp->route.dr.data;
++
++	return smp->route.lid.data;
++}
++
++static inline size_t opa_get_smp_data_size(struct opa_smp *smp)
++{
++	if (smp->mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
++		return sizeof(smp->route.dr.data);
++
++	return sizeof(smp->route.lid.data);
++}
++
++static inline size_t opa_get_smp_header_size(struct opa_smp *smp)
++{
++	if (smp->mgmt_class == IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE)
++		return sizeof(*smp) - sizeof(smp->route.dr.data);
++
++	return sizeof(*smp) - sizeof(smp->route.lid.data);
++}
++
++#endif /* OPA_SMI_H */
+--- a/ib_umad/user_mad.c
++++ b/ib_umad/user_mad.c
+@@ -51,7 +51,7 @@
+ #include <asm/uaccess.h>
+ 
+ #include <rdma/ib_mad.h>
+-#include <rdma/ib_user_mad.h>
++#include <update/ib_user_mad.h>
+ 
+ MODULE_AUTHOR("Roland Dreier");
+ MODULE_DESCRIPTION("InfiniBand userspace MAD packet access");
+@@ -261,20 +261,27 @@
+ {
+ 	struct ib_mad_recv_buf *recv_buf;
+ 	int left, seg_payload, offset, max_seg_payload;
++	int seg_size;
+ 
+-	/* We need enough room to copy the first (or only) MAD segment. */
+ 	recv_buf = &packet->recv_wc->recv_buf;
+-	if ((packet->length <= sizeof (*recv_buf->mad) &&
++
++	if (recv_buf->mad->mad_hdr.base_version == OPA_MGMT_BASE_VERSION)
++		seg_size = sizeof(struct opa_mad);
++	else
++		seg_size = sizeof(struct ib_mad);
++
++	/* We need enough room to copy the first (or only) MAD segment. */
++	if ((packet->length <= seg_size &&
+ 	     count < hdr_size(file) + packet->length) ||
+-	    (packet->length > sizeof (*recv_buf->mad) &&
+-	     count < hdr_size(file) + sizeof (*recv_buf->mad)))
++	    (packet->length > seg_size &&
++	     count < hdr_size(file) + seg_size))
+ 		return -EINVAL;
+ 
+ 	if (copy_to_user(buf, &packet->mad, hdr_size(file)))
+ 		return -EFAULT;
+ 
+ 	buf += hdr_size(file);
+-	seg_payload = min_t(int, packet->length, sizeof (*recv_buf->mad));
++	seg_payload = min_t(int, packet->length, seg_size);
+ 	if (copy_to_user(buf, recv_buf->mad, seg_payload))
+ 		return -EFAULT;
+ 
+@@ -291,7 +298,7 @@
+ 			return -ENOSPC;
+ 		}
+ 		offset = ib_get_mad_data_offset(recv_buf->mad->mad_hdr.mgmt_class);
+-		max_seg_payload = sizeof (struct ib_mad) - offset;
++		max_seg_payload = seg_size - offset;
+ 
+ 		for (left = packet->length - seg_payload, buf += seg_payload;
+ 		     left; left -= seg_payload, buf += seg_payload) {
+@@ -425,14 +432,29 @@
+ 		 * restrictive than required by the spec.
+ 		 */
+ 		if (!ib_response_mad((struct ib_mad *) hdr)) {
+-			if (!ib_response_mad((struct ib_mad *) sent_hdr))
++			if (!ib_response_mad((struct ib_mad *) sent_hdr)) {
++				printk(KERN_ERR "user_mad: duplicate packet: "
++					"both not response; "
++					"TID 0x%016llx; "
++					"base_ver 0x%x; mgmt_class 0x%x; "
++					"class_ver 0x%x; "
++					"method 0x%x; attr 0x%x\n",
++					be64_to_cpu(hdr->tid),
++					hdr->base_version,
++					hdr->mgmt_class,
++					hdr->class_version,
++					hdr->method,
++					be16_to_cpu(hdr->attr_id));
+ 				return 1;
++			}
+ 			continue;
+ 		} else if (!ib_response_mad((struct ib_mad *) sent_hdr))
+ 			continue;
+ 
+-		if (same_destination(&packet->mad.hdr, &sent_packet->mad.hdr))
++		if (same_destination(&packet->mad.hdr, &sent_packet->mad.hdr)) {
++			printk(KERN_ERR "user_mad: duplicate packet: same destination\n");
+ 			return 1;
++		}
+ 	}
+ 
+ 	return 0;
+@@ -449,6 +471,7 @@
+ 	struct ib_rmpp_mad *rmpp_mad;
+ 	__be64 *tid;
+ 	int ret, data_len, hdr_len, copy_offset, rmpp_active;
++	u8 base_version;
+ 
+ 	if (count < hdr_size(file) + IB_MGMT_RMPP_HDR)
+ 		return -EINVAL;
+@@ -503,19 +526,23 @@
+ 	}
+ 
+ 	rmpp_mad = (struct ib_rmpp_mad *) packet->mad.data;
+-	hdr_len = ib_get_mad_data_offset(rmpp_mad->mad_hdr.mgmt_class);
+-	if (!ib_is_mad_class_rmpp(rmpp_mad->mad_hdr.mgmt_class)) {
++	hdr_len = ib_get_mad_data_offset(rmpp_mad->base.mad_hdr.mgmt_class);
++
++	if (ib_is_mad_class_rmpp(rmpp_mad->base.mad_hdr.mgmt_class)
++	    && ib_mad_kernel_rmpp_agent(agent)) {
++		copy_offset = IB_MGMT_RMPP_HDR;
++		rmpp_active = ib_get_rmpp_flags(&rmpp_mad->base.rmpp_hdr) &
++						IB_MGMT_RMPP_FLAG_ACTIVE;
++	} else {
+ 		copy_offset = IB_MGMT_MAD_HDR;
+ 		rmpp_active = 0;
+-	} else {
+-		copy_offset = IB_MGMT_RMPP_HDR;
+-		rmpp_active = ib_get_rmpp_flags(&rmpp_mad->rmpp_hdr) &
+-			      IB_MGMT_RMPP_FLAG_ACTIVE;
+ 	}
+ 
++	base_version = ((struct ib_mad_hdr*)&packet->mad.data)->base_version;
+ 	data_len = count - hdr_size(file) - hdr_len;
+ 	packet->msg = ib_create_send_mad(agent,
+-					 be32_to_cpu(packet->mad.hdr.qpn),
++					 be32_to_cpu(packet->mad.hdr.qpn) |
++					 (base_version << 24),
+ 					 packet->mad.hdr.pkey_index, rmpp_active,
+ 					 hdr_len, data_len, GFP_KERNEL);
+ 	if (IS_ERR(packet->msg)) {
+@@ -553,17 +580,25 @@
+ 		tid = &((struct ib_mad_hdr *) packet->msg->mad)->tid;
+ 		*tid = cpu_to_be64(((u64) agent->hi_tid) << 32 |
+ 				   (be64_to_cpup(tid) & 0xffffffff));
+-		rmpp_mad->mad_hdr.tid = *tid;
++		rmpp_mad->base.mad_hdr.tid = *tid;
+ 	}
+ 
+-	spin_lock_irq(&file->send_lock);
+-	ret = is_duplicate(file, packet);
+-	if (!ret)
++	if (!ib_mad_kernel_rmpp_agent(agent)
++	   && ib_is_mad_class_rmpp(rmpp_mad->base.mad_hdr.mgmt_class)
++	   && (ib_get_rmpp_flags(&rmpp_mad->base.rmpp_hdr) & IB_MGMT_RMPP_FLAG_ACTIVE)) {
++		spin_lock_irq(&file->send_lock);
+ 		list_add_tail(&packet->list, &file->send_list);
+-	spin_unlock_irq(&file->send_lock);
+-	if (ret) {
+-		ret = -EINVAL;
+-		goto err_msg;
++		spin_unlock_irq(&file->send_lock);
++	} else {
++		spin_lock_irq(&file->send_lock);
++		ret = is_duplicate(file, packet);
++		if (!ret)
++			list_add_tail(&packet->list, &file->send_list);
++		spin_unlock_irq(&file->send_lock);
++		if (ret) {
++			ret = -EINVAL;
++			goto err_msg;
++		}
+ 	}
+ 
+ 	ret = ib_post_send_mad(packet->msg, NULL);
+@@ -614,6 +649,8 @@
+ 	mutex_lock(&file->mutex);
+ 
+ 	if (!file->port->ib_dev) {
++		printk(KERN_NOTICE
++			   "ib_umad_reg_agent: invalid device\n");
+ 		ret = -EPIPE;
+ 		goto out;
+ 	}
+@@ -624,6 +661,9 @@
+ 	}
+ 
+ 	if (ureq.qpn != 0 && ureq.qpn != 1) {
++		printk(KERN_NOTICE
++			   "ib_umad_reg_agent: invalid QPN %d specified\n",
++			   ureq.qpn);
+ 		ret = -EINVAL;
+ 		goto out;
+ 	}
+@@ -632,11 +672,15 @@
+ 		if (!__get_agent(file, agent_id))
+ 			goto found;
+ 
++	printk(KERN_NOTICE
++		   "ib_umad_reg_agent: Max Agents (%u) reached\n",
++		   IB_UMAD_MAX_AGENTS);
+ 	ret = -ENOMEM;
+ 	goto out;
+ 
+ found:
+ 	if (ureq.mgmt_class) {
++		memset(&req, 0, sizeof(req));
+ 		req.mgmt_class         = ureq.mgmt_class;
+ 		req.mgmt_class_version = ureq.mgmt_class_version;
+ 		memcpy(req.oui, ureq.oui, sizeof req.oui);
+@@ -694,6 +738,120 @@
+ 	return ret;
+ }
+ 
++static int ib_umad_reg_agent2(struct ib_umad_file *file, void __user *arg)
++{
++	struct ib_user_mad_reg_req2 ureq;
++	struct ib_mad_reg_req req;
++	struct ib_mad_agent *agent = NULL;
++	int agent_id;
++	u8 rmpp_flags;
++	int ret;
++
++	mutex_lock(&file->port->file_mutex);
++	mutex_lock(&file->mutex);
++
++	if (!file->port->ib_dev) {
++		dev_notice(file->port->dev,
++			   "ib_umad_reg_agent2: invalid device\n");
++		ret = -EPIPE;
++		goto out;
++	}
++
++	if (copy_from_user(&ureq, arg, sizeof(ureq))) {
++		ret = -EFAULT;
++		goto out;
++	}
++
++	if (ureq.qpn != 0 && ureq.qpn != 1) {
++		dev_notice(file->port->dev,
++			   "ib_umad_reg_agent2: invalid QPN %d specified\n",
++			   ureq.qpn);
++		ret = -EINVAL;
++		goto out;
++	}
++
++	if (ureq.flags & ~IB_USER_MAD_REG_FLAGS_CAP) {
++		dev_notice(file->port->dev,
++			   "ib_umad_reg_agent2 failed: invalid registration flags specified 0x%x; supported 0x%x\n",
++			   ureq.flags, IB_USER_MAD_REG_FLAGS_CAP);
++		ret = -EINVAL;
++
++		if (put_user((u32)IB_USER_MAD_REG_FLAGS_CAP,
++				(u32 __user *) (arg + offsetof(struct
++				ib_user_mad_reg_req2, flags))))
++			ret = -EFAULT;
++
++		goto out;
++	}
++
++	for (agent_id = 0; agent_id < IB_UMAD_MAX_AGENTS; ++agent_id)
++		if (!__get_agent(file, agent_id))
++			goto found;
++
++	dev_notice(file->port->dev,
++		   "ib_umad_reg_agent2: Max Agents (%u) reached\n",
++		   IB_UMAD_MAX_AGENTS);
++	ret = -ENOMEM;
++	goto out;
++
++found:
++	if (ureq.mgmt_class) {
++		memset(&req, 0, sizeof(req));
++		req.mgmt_class         = ureq.mgmt_class;
++		req.mgmt_class_version = ureq.mgmt_class_version;
++		if (ureq.oui & 0xff000000) {
++			dev_notice(file->port->dev,
++				   "ib_umad_reg_agent2 failed: oui invalid 0x%08x\n",
++				   ureq.oui);
++			ret = -EINVAL;
++			goto out;
++		}
++		req.oui[2] =  ureq.oui & 0x0000ff;
++		req.oui[1] = (ureq.oui & 0x00ff00) >> 8;
++		req.oui[0] = (ureq.oui & 0xff0000) >> 16;
++		memcpy(req.method_mask, ureq.method_mask,
++			sizeof(req.method_mask));
++	}
++
++	rmpp_flags = SET_FLAGS_RMPP(ureq.rmpp_version, (u8)ureq.flags);
++	agent = ib_register_mad_agent(file->port->ib_dev, file->port->port_num,
++				      ureq.qpn ? IB_QPT_GSI : IB_QPT_SMI,
++				      ureq.mgmt_class ? &req : NULL,
++				      rmpp_flags,
++				      send_handler, recv_handler, file);
++
++	if (IS_ERR(agent)) {
++		ret = PTR_ERR(agent);
++		agent = NULL;
++		goto out;
++	}
++
++	if (put_user(agent_id,
++		     (u32 __user *)(arg +
++				offsetof(struct ib_user_mad_reg_req2, id)))) {
++		ret = -EFAULT;
++		goto out;
++	}
++
++	if (!file->already_used) {
++		file->already_used = 1;
++		file->use_pkey_index = 1;
++	}
++
++	file->agent[agent_id] = agent;
++	ret = 0;
++
++out:
++	mutex_unlock(&file->mutex);
++
++	if (ret && agent)
++		ib_unregister_mad_agent(agent);
++
++	mutex_unlock(&file->port->file_mutex);
++
++	return ret;
++}
++
+ static int ib_umad_unreg_agent(struct ib_umad_file *file, u32 __user *arg)
+ {
+ 	struct ib_mad_agent *agent = NULL;
+@@ -749,6 +907,8 @@
+ 		return ib_umad_unreg_agent(filp->private_data, (__u32 __user *) arg);
+ 	case IB_USER_MAD_ENABLE_PKEY:
+ 		return ib_umad_enable_pkey(filp->private_data);
++	case IB_USER_MAD_REGISTER_AGENT2:
++		return ib_umad_reg_agent2(filp->private_data, (void __user *) arg);
+ 	default:
+ 		return -ENOIOCTLCMD;
+ 	}
+@@ -765,6 +925,8 @@
+ 		return ib_umad_unreg_agent(filp->private_data, compat_ptr(arg));
+ 	case IB_USER_MAD_ENABLE_PKEY:
+ 		return ib_umad_enable_pkey(filp->private_data);
++	case IB_USER_MAD_REGISTER_AGENT2:
++		return ib_umad_reg_agent2(filp->private_data, compat_ptr(arg));
+ 	default:
+ 		return -ENOIOCTLCMD;
+ 	}
+@@ -983,7 +1145,7 @@
+ 
+ static dev_t overflow_maj;
+ static DECLARE_BITMAP(overflow_map, IB_UMAD_MAX_PORTS);
+-static int find_overflow_devnum(void)
++static int find_overflow_devnum(struct ib_device *device)
+ {
+ 	int ret;
+ 
+@@ -1014,7 +1176,7 @@
+ 	devnum = find_first_zero_bit(dev_map, IB_UMAD_MAX_PORTS);
+ 	if (devnum >= IB_UMAD_MAX_PORTS) {
+ 		spin_unlock(&port_lock);
+-		devnum = find_overflow_devnum();
++		devnum = find_overflow_devnum(device);
+ 		if (devnum < 0)
+ 			return -1;
+ 

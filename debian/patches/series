@@ -1,0 +1,7 @@
+init-Makefile-port.patch
+fix-Makefile-install.patch
+port-rdmavt.patch
+port-hfi1.patch
+export-hfi1-ipoib-alloc-rn.patch
+port-aip.patch
+rdmavt-get_link_layer.patch

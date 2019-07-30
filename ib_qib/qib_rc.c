@@ -234,7 +234,7 @@ int qib_make_rc_req(struct rvt_qp *qp, unsigned long *flags)
 	int delta;
 
 	ohdr = &priv->s_hdr->u.oth;
-	if (qp->remote_ah_attr.ah_flags & IB_AH_GRH)
+	if (rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH)
 		ohdr = &priv->s_hdr->u.l.oth;
 
 	/* Sending responses has higher priority over sending requests. */
@@ -434,13 +434,13 @@ no_flow_control:
 				qp->s_state = OP(COMPARE_SWAP);
 				put_ib_ateth_swap(wqe->atomic_wr.swap,
 						  &ohdr->u.atomic_eth);
-				put_ib_ateth_swap(wqe->atomic_wr.compare_add,
-						  &ohdr->u.atomic_eth);
+				put_ib_ateth_compare(wqe->atomic_wr.compare_add,
+						     &ohdr->u.atomic_eth);
 			} else {
 				qp->s_state = OP(FETCH_ADD);
 				put_ib_ateth_swap(wqe->atomic_wr.compare_add,
 						  &ohdr->u.atomic_eth);
-				put_ib_ateth_swap(0, &ohdr->u.atomic_eth);
+				put_ib_ateth_compare(0, &ohdr->u.atomic_eth);
 			}
 			put_ib_ateth_vaddr(wqe->atomic_wr.remote_addr,
 					   &ohdr->u.atomic_eth);
@@ -637,9 +637,11 @@ void qib_send_rc_ack(struct rvt_qp *qp)
 	lrh0 = QIB_LRH_BTH;
 	/* header size in 32-bit words LRH+BTH+AETH = (8+12+4)/4. */
 	hwords = 6;
-	if (unlikely(qp->remote_ah_attr.ah_flags & IB_AH_GRH)) {
+	if (unlikely(rdma_ah_get_ah_flags(&qp->remote_ah_attr) &
+		     IB_AH_GRH)) {
 		hwords += qib_make_grh(ibp, &hdr.u.l.grh,
-				       &qp->remote_ah_attr.grh, hwords, 0);
+				       rdma_ah_read_grh(&qp->remote_ah_attr),
+				       hwords, 0);
 		ohdr = &hdr.u.l.oth;
 		lrh0 = QIB_LRH_GRH;
 	}
@@ -653,12 +655,13 @@ void qib_send_rc_ack(struct rvt_qp *qp)
 					     IB_AETH_CREDIT_SHIFT));
 	else
 		ohdr->u.aeth = rvt_compute_aeth(qp);
-	lrh0 |= ibp->sl_to_vl[qp->remote_ah_attr.sl] << 12 |
-		qp->remote_ah_attr.sl << 4;
+	lrh0 |= ibp->sl_to_vl[rdma_ah_get_sl(&qp->remote_ah_attr)] << 12 |
+		rdma_ah_get_sl(&qp->remote_ah_attr) << 4;
 	hdr.lrh[0] = cpu_to_be16(lrh0);
-	hdr.lrh[1] = cpu_to_be16(qp->remote_ah_attr.dlid);
+	hdr.lrh[1] = cpu_to_be16(rdma_ah_get_dlid(&qp->remote_ah_attr));
 	hdr.lrh[2] = cpu_to_be16(hwords + SIZE_OF_CRC);
-	hdr.lrh[3] = cpu_to_be16(ppd->lid | qp->remote_ah_attr.src_path_bits);
+	hdr.lrh[3] = cpu_to_be16(ppd->lid |
+				 rdma_ah_get_path_bits(&qp->remote_ah_attr));
 	ohdr->bth[0] = cpu_to_be32(bth0);
 	ohdr->bth[1] = cpu_to_be32(qp->remote_qpn);
 	ohdr->bth[2] = cpu_to_be32(qp->r_ack_psn & QIB_PSN_MASK);
@@ -1828,7 +1831,7 @@ void qib_rc_rcv(struct qib_ctxtdata *rcd, struct ib_header *hdr,
 	/* OK, process the packet. */
 	switch (opcode) {
 	case OP(SEND_FIRST):
-		ret = qib_get_rwqe(qp, 0);
+		ret = rvt_get_rwqe(qp, false);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret)
@@ -1849,7 +1852,7 @@ send_middle:
 
 	case OP(RDMA_WRITE_LAST_WITH_IMMEDIATE):
 		/* consume RWQE */
-		ret = qib_get_rwqe(qp, 1);
+		ret = rvt_get_rwqe(qp, true);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret)
@@ -1858,7 +1861,7 @@ send_middle:
 
 	case OP(SEND_ONLY):
 	case OP(SEND_ONLY_WITH_IMMEDIATE):
-		ret = qib_get_rwqe(qp, 0);
+		ret = rvt_get_rwqe(qp, false);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret)
@@ -1904,8 +1907,8 @@ send_last:
 			wc.opcode = IB_WC_RECV;
 		wc.qp = &qp->ibqp;
 		wc.src_qp = qp->remote_qpn;
-		wc.slid = qp->remote_ah_attr.dlid;
-		wc.sl = qp->remote_ah_attr.sl;
+		wc.slid = rdma_ah_get_dlid(&qp->remote_ah_attr);
+		wc.sl = rdma_ah_get_sl(&qp->remote_ah_attr);
 		/* zero fields that are N/A */
 		wc.vendor_err = 0;
 		wc.pkey_index = 0;
@@ -1913,8 +1916,7 @@ send_last:
 		wc.port_num = 0;
 		/* Signal completion event if the solicited bit is set. */
 		rvt_cq_enter(ibcq_to_rvtcq(qp->ibqp.recv_cq), &wc,
-			     (ohdr->bth[0] &
-			      cpu_to_be32(IB_BTH_SOLICITED)) != 0);
+			     ib_bth_is_solicited(ohdr));
 		break;
 
 	case OP(RDMA_WRITE_FIRST):
@@ -1950,7 +1952,7 @@ send_last:
 			goto send_middle;
 		else if (opcode == OP(RDMA_WRITE_ONLY))
 			goto no_immediate_data;
-		ret = qib_get_rwqe(qp, 1);
+		ret = rvt_get_rwqe(qp, true);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret) {

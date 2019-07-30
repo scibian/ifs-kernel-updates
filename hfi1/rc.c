@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016, 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -48,184 +48,12 @@
 #include <linux/io.h>
 #include <rdma/rdma_vt.h>
 #include <rdma/rdmavt_qp.h>
-#include <linux/circ_buf.h>
 
 #include "hfi.h"
 #include "qp.h"
 #include "rc.h"
 #include "verbs_txreq.h"
 #include "trace.h"
-#include "user_sdma.h"  /* for KDETH_* defines and macros */
-
-static u32 build_tid_rdma_write_req(struct rvt_qp *, struct rvt_swqe *,
-				    struct ib_other_headers *, u32 *, u32 *,
-				    u32 *);
-static u32 build_tid_rdma_write_resp(struct rvt_qp *, struct rvt_ack_entry *,
-				     struct ib_other_headers *, u32 *,
-				     u32, u32 *, struct rvt_sge_state **);
-static u32 build_tid_rdma_write_ack(struct rvt_qp *qp, struct rvt_ack_entry *e,
-				    struct ib_other_headers *ohdr, u16 iflow,
-				    u32 *bth1, u32 *bth2);
-static void tid_rdma_restart_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-				 u32 *bth2);
-static bool build_tid_rdma_packet(struct rvt_swqe *wqe,
-				  struct ib_other_headers *ohdr,
-				  u32 *bth1, u32 *bth2, u32 *len);
-static u32 build_tid_rdma_read_packet(struct rvt_swqe *wqe,
-				      struct ib_other_headers *ohdr,
-				      u32 *bth1, u32 *bth2, u32 *len);
-static u32 build_tid_rdma_read_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-				   struct ib_other_headers *ohdr,
-				   u32 *bth1, u32 *bth2, u32 *len);
-static u32 build_tid_rdma_read_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
-				    struct ib_other_headers *ohdr, u32 *bth0,
-				    u32 *bth1, u32 *bth2, u32 *len, bool *last
-				    );
-
-static u32 restart_sge(struct rvt_sge_state *ss, struct rvt_swqe *wqe,
-		       u32 psn, u32 pmtu)
-{
-	u32 len;
-
-	len = delta_psn(psn, wqe->psn) * pmtu;
-	ss->sge = wqe->sg_list[0];
-	ss->sg_list = wqe->sg_list + 1;
-	ss->num_sge = wqe->wr.num_sge;
-	ss->total_len = wqe->length;
-	rvt_skip_sge(ss, len, false);
-	return wqe->length - len;
-}
-
-static int make_tid_rdma_ack(struct rvt_qp *qp,
-			     struct ib_other_headers *ohdr,
-			     struct hfi1_pkt_state *ps)
-{
-	struct rvt_ack_entry *e;
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct hfi1_ibdev *dev = to_idev(qp->ibqp.device);
-	u32 hwords, next;
-	u32 len = 0;
-	u32 bth1 = 0, bth2 = 0;
-	int middle = 0;
-	u16 flow;
-	struct tid_rdma_request *req, *nreq;
-
-	/* Don't send an ACK if we aren't supposed to. */
-	if (!(ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK))
-		goto bail;
-
-	/* header size in 32-bit words LRH+BTH = (8+12)/4. */
-	hwords = 5;
-
-	e = &qp->s_ack_queue[qpriv->r_tid_ack];
-	req = ack_to_tid_req(e);
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] r_tid_tail %u, r_tid_head %u, r_tid_ack %u, s_tail_ack_queue %u, r_head_ack_queue %u, e->psn 0x%x ack_seg %u comp_seg %u total_seg %u",
-		  qp->ibqp.qp_num, qpriv->r_tid_tail, qpriv->r_tid_head,
-		  qpriv->r_tid_ack, qp->s_tail_ack_queue, qp->r_head_ack_queue,
-		  e->psn, req->ack_seg, req->comp_seg, req->total_segs);
-#endif
-	/*
-	 * If we've sent all the ACKs that we can, we are done
-	 * until we get more segments...
-	 */
-	if (!qpriv->s_nak_state && req->ack_seg == req->comp_seg)
-		goto bail;
-
-	do {
-		/*
-		 * To deal with coalesced ACKs, the acked_tail pointer
-		 * into the flow array is used. The distance between it
-		 * and the clear_tail is the number of flows that are
-		 * being ACK'ed.
-		 */
-		req->ack_seg +=
-			/* Get up-to-date value */
-			CIRC_CNT(smp_load_acquire(&req->clear_tail),
-				 req->acked_tail, req->n_max_flows);
-			/* Advance acked index */
-		smp_store_release(&req->acked_tail, req->clear_tail);
-
-		/*
-		 * req->clear_tail points to the segment currently being
-		 * received. So, when sending an ACK, the previous
-		 * segment is being ACK'ed.
-		 */
-		flow = CIRC_PREV(req->acked_tail, req->n_max_flows);
-		if (req->ack_seg != req->total_segs)
-			break;
-		req->state = TID_REQUEST_COMPLETE;
-
-		next = qpriv->r_tid_ack + 1;
-		if (next > rvt_size_atomic(&dev->rdi))
-			next = 0;
-		qpriv->r_tid_ack = next;
-		if (qp->s_ack_queue[next].opcode != TID_OP(WRITE_REQ))
-			break;
-		nreq = ack_to_tid_req(&qp->s_ack_queue[next]);
-		if (!nreq->comp_seg || nreq->ack_seg == nreq->comp_seg)
-			break;
-
-		/* Move to the next ack entry now */
-		e = &qp->s_ack_queue[qpriv->r_tid_ack];
-		req = ack_to_tid_req(e);
-	} while (1);
-
-	/*
-	 * At this point qpriv->r_tid_ack == qpriv->r_tid_tail but e and
-	 * req could be pointing at the previous ack queue entry
-	 */
-	if (qpriv->s_nak_state) {
-		/*
-		 * A NAK will implicitly acknowledge all previous TID RDMA
-		 * requests. Therefore, we NAK with the req->acked_tail
-		 * segment for the request at qpriv->r_tid_ack (same at
-		 * this point as the req->clear_tail segment for the
-		 * qpriv->r_tid_tail request)
-		 */
-		e = &qp->s_ack_queue[qpriv->r_tid_ack];
-		req = ack_to_tid_req(e);
-		flow = req->acked_tail;
-	} else if (req->ack_seg == req->total_segs &&
-		   qpriv->s_flags & HFI1_R_TID_WAIT_INTERLCK)
-		qpriv->s_flags &= ~HFI1_R_TID_WAIT_INTERLCK;
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] r_tid_ack %u cur_seg %u, ack_seg %u total %u, acked_tail %u clear_tail %u setup_head %u",
-		  qp->ibqp.qp_num, qpriv->r_tid_ack, req->cur_seg,
-		  req->ack_seg, req->total_segs, req->acked_tail,
-		  req->clear_tail, req->setup_head);
-#endif
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] s_nak_state 0x%x acked_tail %u clear_tail %u setup_head %u flow %u",
-		  qp->ibqp.qp_num, qpriv->s_nak_state, req->acked_tail,
-		  req->clear_tail, req->setup_head, flow);
-#endif
-	hwords += build_tid_rdma_write_ack(qp, e, ohdr, flow, &bth1,
-					   &bth2);
-	len = 0;
-	qpriv->s_flags &= ~(RVT_S_RESP_PENDING | RVT_S_ACK_PENDING);
-	ps->s_txreq->hdr_dwords = hwords;
-	ps->s_txreq->sde = qpriv->s_sde;
-	ps->s_txreq->s_cur_size = len;
-	ps->s_txreq->ss = NULL;
-	hfi1_make_ruc_header(qp, ohdr, (TID_OP(ACK) << 24), bth1, bth2, middle,
-			     ps);
-	return 1;
-bail:
-	/*
-	 * Ensure s_rdma_ack_cnt changes are committed prior to resetting
-	 * RVT_S_RESP_PENDING
-	 */
-	smp_wmb();
-	qpriv->s_flags &= ~(RVT_S_RESP_PENDING | RVT_S_ACK_PENDING);
-	return 0;
-}
 
 /**
  * make_rc_ack - construct a response packet (ACK, NAK, or RDMA read)
@@ -255,28 +83,24 @@ static int make_rc_ack(struct hfi1_ibdev *dev, struct rvt_qp *qp,
 	bool last_pkt;
 	u32 delta;
 
+	trace_hfi1_rsp_make_rc_ack(qp, 0);
 	lockdep_assert_held(&qp->s_lock);
 	/* Don't send an ACK if we aren't supposed to. */
 	if (!(ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK))
 		goto bail;
 
-	/* header size in 32-bit words LRH+BTH = (8+12)/4. */
-	hwords = 5;
+	if (qpriv->hdr_type == HFI1_PKT_TYPE_9B)
+		/* header size in 32-bit words LRH+BTH = (8+12)/4. */
+		hwords = 5;
+	else
+		/* header size in 32-bit words 16B LRH+BTH = (16+12)/4. */
+		hwords = 7;
 
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] s_ack_state 0x%x, s_tail_ack_queue %u, r_head_ack_queue %u",
-		  qp->ibqp.qp_num, qp->s_ack_state, qp->s_tail_ack_queue,
-		  qp->r_head_ack_queue);
-#endif
 	switch (qp->s_ack_state) {
 	case OP(RDMA_READ_RESPONSE_LAST):
 	case OP(RDMA_READ_RESPONSE_ONLY):
 		e = &qp->s_ack_queue[qp->s_tail_ack_queue];
-		if (e->rdma_sge.mr) {
-			rvt_put_mr(e->rdma_sge.mr);
-			e->rdma_sge.mr = NULL;
-		}
+		release_rdma_sge_mr(e);
 		/* FALLTHROUGH */
 	case OP(ATOMIC_ACKNOWLEDGE):
 		/*
@@ -295,12 +119,7 @@ static int make_rc_ack(struct hfi1_ibdev *dev, struct rvt_qp *qp,
 		    qp->s_acked_ack_queue == qp->s_tail_ack_queue)
 			qp->s_acked_ack_queue = next;
 		qp->s_tail_ack_queue = next;
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] s_ack_state 0x%x, s_tail_ack_queue %u, r_head_ack_queue %u",
-			  qp->ibqp.qp_num, qp->s_ack_state, qp->s_tail_ack_queue,
-			  qp->r_head_ack_queue);
-#endif
+		trace_hfi1_rsp_make_rc_ack(qp, e->psn);
 		/* FALLTHROUGH */
 	case OP(SEND_ONLY):
 	case OP(ACKNOWLEDGE):
@@ -327,7 +146,11 @@ static int make_rc_ack(struct hfi1_ibdev *dev, struct rvt_qp *qp,
 			 */
 			len = e->rdma_sge.sge_length;
 			if (len && !e->rdma_sge.mr) {
-				qp->s_acked_ack_queue = qp->r_head_ack_queue;
+				if (qp->s_acked_ack_queue ==
+				    qp->s_tail_ack_queue)
+					qp->s_acked_ack_queue =
+						qp->r_head_ack_queue;
+				qp->s_tail_ack_queue = qp->r_head_ack_queue;
 				goto bail;
 			}
 			/* Copy SGE state in case we need to resend */
@@ -357,7 +180,8 @@ static int make_rc_ack(struct hfi1_ibdev *dev, struct rvt_qp *qp,
 			 * state will be changed to TID_REQUEST_RESEND_ACTIVE.
 			 */
 			req = ack_to_tid_req(e);
-			if (req->state == TID_REQUEST_RESEND)
+			if (req->state == TID_REQUEST_RESEND ||
+			    req->state == TID_REQUEST_INIT_RESEND)
 				goto bail;
 			qp->s_ack_state = TID_OP(WRITE_RESP);
 			qp->s_ack_rdma_psn = mask_psn(e->psn + req->cur_seg);
@@ -371,6 +195,10 @@ static int make_rc_ack(struct hfi1_ibdev *dev, struct rvt_qp *qp,
 			 */
 			len = e->rdma_sge.sge_length;
 			if (len && !e->rdma_sge.mr) {
+				if (qp->s_acked_ack_queue ==
+				    qp->s_tail_ack_queue)
+					qp->s_acked_ack_queue =
+						qp->r_head_ack_queue;
 				qp->s_tail_ack_queue = qp->r_head_ack_queue;
 				goto bail;
 			}
@@ -393,12 +221,7 @@ static int make_rc_ack(struct hfi1_ibdev *dev, struct rvt_qp *qp,
 			bth2 = mask_psn(e->psn);
 			e->sent = 1;
 		}
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] e->opcode = 0x%x, r_tid_tail %u, r_tid_head %u",
-			  qp->ibqp.qp_num, e->opcode, qpriv->r_tid_tail,
-			  qpriv->r_tid_head);
-#endif
+		trace_hfi1_tid_write_rsp_make_rc_ack(qp);
 		if (!bth0)
 			bth0 = qp->s_ack_state << 24;
 		break;
@@ -463,34 +286,32 @@ write_resp:
 		}
 
 		bth2 = mask_psn(qp->s_ack_rdma_psn);
-		hdrlen = build_tid_rdma_write_resp(qp, e, ohdr, &bth1,
-						   bth2, &len,
-						   &ps->s_txreq->ss);
+		hdrlen = hfi1_build_tid_rdma_write_resp(qp, e, ohdr, &bth1,
+							bth2, &len,
+							&ps->s_txreq->ss);
 		if (!hdrlen)
 			return 0;
 
 		hwords += hdrlen;
 		bth0 = qp->s_ack_state << 24;
 		qp->s_ack_rdma_psn++;
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA, "[QP%u] cur_seg %u comp_seg %u ack_seg %u total_segs %u",
-			  qp->ibqp.qp_num, req->cur_seg, req->comp_seg, req->ack_seg,
-			  req->total_segs);
-#endif
+		trace_hfi1_tid_req_make_rc_ack_write(qp, 0, e->opcode, e->psn,
+						     e->lpsn, req);
 		if (req->cur_seg != req->total_segs)
 			break;
 
 		e->sent = 1;
-		qp->s_ack_state = OP(RDMA_READ_RESPONSE_LAST);
+		/* Do not free e->rdma_sge until all data are received */
+		qp->s_ack_state = OP(ATOMIC_ACKNOWLEDGE);
 		break;
 
 	case TID_OP(READ_RESP):
 read_resp:
 		e = &qp->s_ack_queue[qp->s_tail_ack_queue];
 		ps->s_txreq->ss = &qp->s_ack_rdma_sge;
-		delta = build_tid_rdma_read_resp(
-					qp, e, ohdr, &bth0, &bth1, &bth2,
-					&len, &last_pkt);
+		delta = hfi1_build_tid_rdma_read_resp(qp, e, ohdr, &bth0,
+						      &bth1, &bth2, &len,
+						      &last_pkt);
 		if (delta == 0)
 			goto error_qp;
 		hwords += delta;
@@ -530,12 +351,13 @@ normal_no_state:
 		bth2 = mask_psn(qp->s_ack_psn);
 		len = 0;
 		qp->s_flags &= ~RVT_S_ACK_PENDING;
+		ps->s_txreq->txreq.flags |= SDMA_TXREQ_F_VIP;
 		ps->s_txreq->ss = NULL;
 	}
 	qp->s_rdma_ack_cnt++;
-	ps->s_txreq->hdr_dwords = hwords;
 	ps->s_txreq->sde = qpriv->s_sde;
 	ps->s_txreq->s_cur_size = len;
+	ps->s_txreq->hdr_dwords = hwords;
 	hfi1_make_ruc_header(qp, ohdr, bth0, bth1, bth2, middle, ps);
 	return 1;
 error_qp:
@@ -556,241 +378,6 @@ bail:
 	qp->s_flags &= ~(RVT_S_RESP_PENDING
 				| RVT_S_ACK_PENDING
 				| HFI1_S_AHG_VALID);
-	return 0;
-}
-
-/*
- * Call this function when the last TID RDMA WRITE DATA packet for a request
- * is built.
- */
-static void update_tid_tail(struct rvt_qp *qp)
-	__must_hold(&qp->s_lock)
-{
-	struct hfi1_qp_priv *priv = qp->priv;
-	u32 i;
-	struct rvt_swqe *wqe;
-
-	lockdep_assert_held(&qp->s_lock);
-	/* Can't move beyond s_tid_cur */
-	if (priv->s_tid_tail == priv->s_tid_cur)
-		return;
-	for (i = priv->s_tid_tail + 1; ; i++) {
-		if (i == qp->s_size)
-			i = 0;
-
-		if (i == priv->s_tid_cur)
-			break;
-		wqe = rvt_get_swqe_ptr(qp, i);
-		if (wqe->wr.opcode == IB_WR_TID_RDMA_WRITE)
-			break;
-	}
-	priv->s_tid_tail = i;
-	priv->s_state = TID_OP(WRITE_RESP);
-}
-
-int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
-	__must_hold(&qp->s_lock)
-{
-	struct hfi1_qp_priv *priv = qp->priv;
-	struct rvt_swqe *wqe;
-	u32 bth1 = 0, bth2 = 0, hwords = 5, len, middle = 0;
-	struct ib_other_headers *ohdr;
-	struct rvt_sge_state *ss = &qp->s_sge;
-	struct rvt_ack_entry *e = &qp->s_ack_queue[qp->s_tail_ack_queue];
-	struct tid_rdma_request *req = ack_to_tid_req(e);
-	bool last = false;
-	u8 opcode = TID_OP(WRITE_DATA);
-
-	lockdep_assert_held(&qp->s_lock);
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "priv->n_tid_requests %u priv->n_requests %u priv->s_flags 0x%x",
-		  atomic_read(&priv->n_tid_requests),
-		  atomic_read(&priv->n_requests),
-		  priv->s_flags);
-#endif
-	/*
-	 * Prioritize the sending of the requests and responses over the
-	 * sending of the TID RDMA data packets.
-	 */
-	if (((atomic_read(&priv->n_tid_requests) < HFI1_TID_RDMA_WRITE_CNT) &&
-	    atomic_read(&priv->n_requests) &&
-	    !(qp->s_flags & (RVT_S_BUSY | RVT_S_WAIT_ACK |
-			     HFI1_S_ANY_WAIT_IO))) ||
-	    (e->opcode == TID_OP(WRITE_REQ) && req->cur_seg < req->alloc_seg &&
-	     !(qp->s_flags & (RVT_S_BUSY | HFI1_S_ANY_WAIT_IO)))) {
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] scheduling reqs: qp->s_flags 0x%x qpriv->s_flags 0x%x priv->n_tid_requests %u priv->n_requests %u l1queued %u",
-			  qp->ibqp.qp_num, qp->s_flags, priv->s_flags,
-			  atomic_read(&priv->n_tid_requests),
-			  atomic_read(&priv->n_requests),
-			  verbs_txreq_queued(
-				iowait_get_ib_work(&priv->s_iowait)));
-#endif
-		ps->s_txreq = get_waiting_verbs_txreq(
-				iowait_get_ib_work(&priv->s_iowait));
-		if (ps->s_txreq || hfi1_make_rc_req(qp, ps)) {
-			priv->s_flags |= HFI1_S_TID_BUSY_SET;
-			return 1;
-		}
-	}
-
-	ps->s_txreq = get_txreq(ps->dev, qp);
-	if (IS_ERR(ps->s_txreq))
-		goto bail_no_tx;
-
-	ohdr = &ps->s_txreq->phdr.hdr.u.oth;
-
-	if ((priv->s_flags & RVT_S_RESP_PENDING) &&
-	    make_tid_rdma_ack(qp, ohdr, ps))
-		return 1;
-
-	if (!(ib_rvt_state_ops[qp->state] & RVT_PROCESS_SEND_OK)) {
-		if (!(ib_rvt_state_ops[qp->state] & RVT_FLUSH_SEND))
-			goto bail;
-		/* We are in the error state, flush the work request. */
-		smp_read_barrier_depends(); /* see post_one_send() */
-		if (qp->s_last == READ_ONCE(qp->s_head))
-			goto bail;
-		/* If DMAs are in progress, we can't flush immediately. */
-		if (iowait_sdma_pending(&priv->s_iowait)) {
-			qp->s_flags |= RVT_S_WAIT_DMA;
-			goto bail;
-		}
-		clear_ahg(qp);
-		wqe = rvt_get_swqe_ptr(qp, qp->s_last);
-		hfi1_send_complete(qp, wqe, qp->s_last != qp->s_acked ?
-				   IB_WC_SUCCESS : IB_WC_WR_FLUSH_ERR);
-		/* will get called again */
-		goto done_free_tx;
-	}
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA, "[QP%u] s_state 0x%x s_tid_tail %u s_tid_cur %u",
-		  qp->ibqp.qp_num, priv->s_state,
-		  priv->s_tid_tail, priv->s_tid_cur);
-#endif
-	/* Check whether there is anything to do. */
-	if (priv->s_tid_tail == HFI1_QP_WQE_INVALID)
-		goto bail;
-	wqe = rvt_get_swqe_ptr(qp, priv->s_tid_tail);
-	req = wqe_to_tid_req(wqe);
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA, "[QP%u] cur_seg %u comp_seg %u", qp->ibqp.qp_num,
-		  req->cur_seg, req->comp_seg);
-#endif
-	switch (priv->s_state) {
-	case TID_OP(WRITE_REQ):
-	case TID_OP(WRITE_RESP):
-		priv->tid_ss.sge = wqe->sg_list[0];
-		priv->tid_ss.sg_list = wqe->sg_list + 1;
-		priv->tid_ss.num_sge = wqe->wr.num_sge;
-		priv->tid_ss.total_len = wqe->length;
-
-		if (priv->s_state == TID_OP(WRITE_REQ))
-			tid_rdma_restart_req(qp, wqe, &bth2);
-		priv->s_state = TID_OP(WRITE_DATA);
-		/* fall through */
-
-	case TID_OP(WRITE_DATA):
-		/*
-		 * 1. Check whether TID RDMA WRITE RESP available.
-		 * 2. If no:
-		 *    2.1 If have more segments and no TID RDMA WRITE RESP,
-		 *        set RVT_S_WAIT_TID_RESP
-		 *    2.2 Return indicating no progress made.
-		 * 3. If yes:
-		 *    3.1 Build TID RDMA WRITE DATA packet.
-		 *    3.2 If last packet in segment:
-		 *        3.2.1 Change KDETH header bits
-		 *        3.2.2 Advance RESP pointers.
-		 *    3.3 Return indicating progress made.
-		 */
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA, "[QP%u] qp->s_cur %u qp->s_tail %u qp->s_acked %u qp->s_head %u priv->s_tid_cur %u priv->s_tid_tail %u priv->s_tid_head %u",
-		  qp->ibqp.qp_num, qp->s_cur, qp->s_tail, qp->s_acked, qp->s_head,
-		  priv->s_tid_cur, priv->s_tid_tail, priv->s_tid_head);
-#endif
-		wqe = rvt_get_swqe_ptr(qp, priv->s_tid_tail);
-		req = wqe_to_tid_req(wqe);
-		len = wqe->length;
-
-		if (!req->comp_seg || req->cur_seg == req->comp_seg)
-			goto bail;
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] state 0x%x cur_seg %u comp_seg %u total_segs %u ack_seg %u",
-			  qp->ibqp.qp_num, req->state, req->cur_seg, req->comp_seg,
-			  req->total_segs, req->ack_seg);
-
-		if (req->state == TID_REQUEST_INACTIVE ||
-		    req->state == TID_REQUEST_COMPLETE) {
-			hfi1_cdbg(TIDRDMA, "[QP%u] !!!!!!!!!!!!! Request inactive",
-				  qp->ibqp.qp_num);
-			goto bail;
-		}
-#endif
-		last = build_tid_rdma_packet(wqe, ohdr, &bth1, &bth2, &len);
-
-		if (last) {
-			/* move pointer to next flow */
-			smp_store_release(&req->clear_tail,
-					  CIRC_NEXT(req->clear_tail,
-						    req->n_max_flows));
-			if (++req->cur_seg < req->total_segs) {
-				if (!CIRC_CNT(req->setup_head, req->clear_tail,
-					      req->n_max_flows))
-					qp->s_flags |= RVT_S_WAIT_TID_RESP;
-			} else {
-				priv->s_state = TID_OP(WRITE_DATA_LAST);
-				opcode = TID_OP(WRITE_DATA_LAST);
-
-				/* Advance the s_tid_tail now */
-				update_tid_tail(qp);
-			}
-#ifdef TIDRDMA_DEBUG
-			hfi1_cdbg(TIDRDMA,
-				  "[QP%u] tid timeout_jiffies %lu  qp timeout_jiffies %lu s_flags 0x%x",
-				  qp->ibqp.qp_num,
-				  priv->tid_retry_timeout_jiffies,
-				  qp->timeout_jiffies,
-				  priv->s_flags);
-#endif
-		}
-		hwords += sizeof(ohdr->u.tid_rdma.w_data) / sizeof(u32);
-		ss = &priv->tid_ss;
-		break;
-
-	default:
-		goto bail;
-	}
-	qp->s_len -= len;
-	ps->s_txreq->hdr_dwords = hwords;
-	ps->s_txreq->sde = priv->s_sde;
-	ps->s_txreq->ss = ss;
-	ps->s_txreq->s_cur_size = len;
-	hfi1_make_ruc_header(qp, ohdr, (opcode << 24), bth1, bth2,
-			     middle, ps);
-	return 1;
-done_free_tx:
-	hfi1_put_txreq(ps->s_txreq);
-	ps->s_txreq = NULL;
-	return 1;
-
-bail:
-	hfi1_put_txreq(ps->s_txreq);
-bail_no_tx:
-	ps->s_txreq = NULL;
-	priv->s_flags &= ~RVT_S_BUSY;
-	/*
-	 * If we didn't get a txreq, the QP will be woken up later to try
-	 * again, set the flags to the the wake up which work item to wake
-	 * up.
-	 * (A better algorithm should be found to do this and generalize the
-	 * sleep/wakeup flags.)
-	 */
-	iowait_set_flag(&priv->s_iowait, IOWAIT_PENDING_TID);
 	return 0;
 }
 
@@ -823,14 +410,28 @@ int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 	int delta;
 	struct tid_rdma_flow *flow = NULL;
 
+	trace_hfi1_sender_make_rc_req(qp);
 	lockdep_assert_held(&qp->s_lock);
 	ps->s_txreq = get_txreq(ps->dev, qp);
-	if (IS_ERR(ps->s_txreq))
+	if (!ps->s_txreq)
 		goto bail_no_tx;
 
-	ohdr = &ps->s_txreq->phdr.hdr.u.oth;
-	if (qp->remote_ah_attr.ah_flags & IB_AH_GRH)
-		ohdr = &ps->s_txreq->phdr.hdr.u.l.oth;
+	if (priv->hdr_type == HFI1_PKT_TYPE_9B) {
+		/* header size in 32-bit words LRH+BTH = (8+12)/4. */
+		hwords = 5;
+		if (rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH)
+			ohdr = &ps->s_txreq->phdr.hdr.ibh.u.l.oth;
+		else
+			ohdr = &ps->s_txreq->phdr.hdr.ibh.u.oth;
+	} else {
+		/* header size in 32-bit words 16B LRH+BTH = (16+12)/4. */
+		hwords = 7;
+		if ((rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH) &&
+		    (hfi1_check_mcast(rdma_ah_get_dlid(&qp->remote_ah_attr))))
+			ohdr = &ps->s_txreq->phdr.hdr.opah.u.l.oth;
+		else
+			ohdr = &ps->s_txreq->phdr.hdr.opah.u.oth;
+	}
 
 	/* Sending responses has higher priority over sending requests. */
 	if ((qp->s_flags & RVT_S_RESP_PENDING) &&
@@ -851,13 +452,13 @@ int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		}
 		clear_ahg(qp);
 		wqe = rvt_get_swqe_ptr(qp, qp->s_last);
-		hfi1_send_complete(qp, wqe, qp->s_last != qp->s_acked ?
-			IB_WC_SUCCESS : IB_WC_WR_FLUSH_ERR);
+		hfi1_trdma_send_complete(qp, wqe, qp->s_last != qp->s_acked ?
+					 IB_WC_SUCCESS : IB_WC_WR_FLUSH_ERR);
 		/* will get called again */
 		goto done_free_tx;
 	}
 
-	if (qp->s_flags & (RVT_S_WAIT_RNR | RVT_S_WAIT_ACK))
+	if (qp->s_flags & (RVT_S_WAIT_RNR | RVT_S_WAIT_ACK | HFI1_S_WAIT_HALT))
 		goto bail;
 
 	if (cmp_psn(qp->s_psn, qp->s_sending_hpsn) <= 0) {
@@ -869,12 +470,6 @@ int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		qp->s_sending_hpsn = qp->s_psn - 1;
 	}
 
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] s_cur %u, s_tail %u s_head %u flags 0x%x s_state 0x%x",
-			  qp->ibqp.qp_num, qp->s_cur, qp->s_tail, qp->s_head,
-			  qp->s_flags, qp->s_state);
-#endif
 	/* Send a request. */
 	wqe = rvt_get_swqe_ptr(qp, qp->s_cur);
 check_s_state:
@@ -1037,12 +632,6 @@ no_flow_control:
 			break;
 
 		case IB_WR_TID_RDMA_WRITE:
-#ifdef TIDRDMA_DEBUG
-			hfi1_cdbg(TIDRDMA,
-				  "[QP%u] spsn 0x%x, newreq %u, n_tid_requests %u",
-				  qp->ibqp.qp_num, wqe->psn, newreq,
-				  atomic_read(&priv->n_tid_requests));
-#endif
 			if (newreq) {
 				/*
 				 * Limit the number of TID RDMA WRITE requests.
@@ -1053,11 +642,11 @@ no_flow_control:
 
 				if (!(qp->s_flags & RVT_S_UNLIMITED_CREDIT))
 					qp->s_lsn++;
-
 			}
 
-			hwords += build_tid_rdma_write_req(qp, wqe, ohdr, &bth1,
-							   &bth2, &len);
+			hwords += hfi1_build_tid_rdma_write_req(qp, wqe, ohdr,
+								&bth1, &bth2,
+								&len);
 			ss = NULL;
 			if (priv->s_tid_cur == HFI1_QP_WQE_INVALID) {
 				priv->s_tid_cur = qp->s_cur;
@@ -1130,17 +719,21 @@ no_flow_control:
 				atomic_dec(&priv->n_requests);
 			} else {
 				req->state = TID_REQUEST_RESEND;
-				req->comp_seg = 0;
+				req->comp_seg = delta_psn(bth2, wqe->psn);
+				/*
+				 * Pull back any segments since we are going
+				 * to re-receive them.
+				 */
+				req->setup_head = req->clear_tail;
 				priv->pending_tid_w_resp +=
 					delta_psn(wqe->lpsn, bth2) + 1;
 			}
 
-#ifdef TIDRDMA_DEBUG
-			hfi1_cdbg(TIDRDMA,
-				  "[QP%u] s_cur %u s_tid_head %u s_tid_cur %u s_tid_tail %u",
-				  qp->ibqp.qp_num, qp->s_cur, priv->s_tid_head,
-				  priv->s_tid_cur, priv->s_tid_tail);
-#endif
+			trace_hfi1_tid_write_sender_make_req(qp, newreq);
+			trace_hfi1_tid_req_make_req_write(qp, newreq,
+							  wqe->wr.opcode,
+							  wqe->psn, wqe->lpsn,
+							  req);
 			if (++qp->s_cur == qp->s_size)
 				qp->s_cur = 0;
 			break;
@@ -1174,13 +767,13 @@ no_flow_control:
 			break;
 
 		case IB_WR_TID_RDMA_READ:
-#ifdef TIDRDMA_DEBUG
-			hfi1_cdbg(TIDRDMA, "op 0x%x QP%u spsn 0x%x, newreq %u",
-				  wqe->wr.opcode, qp->ibqp.qp_num, wqe->psn,
-				  newreq);
-#endif
+			trace_hfi1_tid_read_sender_make_req(qp, newreq);
 			wpriv = wqe->priv;
 			req = wqe_to_tid_req(wqe);
+			trace_hfi1_tid_req_make_req_read(qp, newreq,
+							 wqe->wr.opcode,
+							 wqe->psn, wqe->lpsn,
+							 req);
 			delta = cmp_psn(qp->s_psn, wqe->psn);
 
 			/*
@@ -1198,20 +791,27 @@ no_flow_control:
 				goto bail;
 			}
 			if (newreq) {
+				struct tid_rdma_flow *flow =
+					&req->flows[req->setup_head];
+
 				/*
 				 * Set up s_sge as it is needed for TID
-				 * allocation.
+				 * allocation. However, if the pages have been
+				 * walked and mapped, skip it. An earlier try
+				 * has failed to allocate the TID entries.
 				 */
-				qp->s_sge.sge = wqe->sg_list[0];
-				qp->s_sge.sg_list = wqe->sg_list + 1;
-				qp->s_sge.num_sge = wqe->wr.num_sge;
-				qp->s_sge.total_len = wqe->length;
-				qp->s_len = wqe->length;
-				req->isge = 0;
-				req->clear_tail = req->setup_head;
-				req->flow_idx = req->setup_head;
-				req->state = TID_REQUEST_ACTIVE;
-			} else if (delta == 0){
+				if (!flow->npagesets) {
+					qp->s_sge.sge = wqe->sg_list[0];
+					qp->s_sge.sg_list = wqe->sg_list + 1;
+					qp->s_sge.num_sge = wqe->wr.num_sge;
+					qp->s_sge.total_len = wqe->length;
+					qp->s_len = wqe->length;
+					req->isge = 0;
+					req->clear_tail = req->setup_head;
+					req->flow_idx = req->setup_head;
+					req->state = TID_REQUEST_ACTIVE;
+				}
+			} else if (delta == 0) {
 				/* Re-send a request */
 				req->cur_seg = 0;
 				req->comp_seg = 0;
@@ -1223,8 +823,9 @@ no_flow_control:
 			/* Read one segment at a time */
 			len = min_t(u32, req->seg_len,
 				    wqe->length - req->seg_len * req->cur_seg);
-			delta = build_tid_rdma_read_req(qp, wqe, ohdr, &bth1,
-							&bth2, &len);
+			delta = hfi1_build_tid_rdma_read_req(qp, wqe, ohdr,
+							     &bth1, &bth2,
+							     &len);
 			if (delta <= 0) {
 				/* Wait for TID space */
 				goto bail;
@@ -1299,7 +900,7 @@ no_flow_control:
 		if (wqe->wr.opcode == IB_WR_RDMA_READ ||
 		    wqe->wr.opcode == IB_WR_TID_RDMA_WRITE)
 			qp->s_psn = wqe->lpsn + 1;
-		else if ( wqe->wr.opcode == IB_WR_TID_RDMA_READ)
+		else if (wqe->wr.opcode == IB_WR_TID_RDMA_READ)
 			qp->s_psn = req->s_next_psn;
 		else
 			qp->s_psn++;
@@ -1425,11 +1026,6 @@ no_flow_control:
 		 * for more).
 		 */
 		req = wqe_to_tid_req(wqe);
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] Resending TID RDMA WRITE request s_psn 0x%x wqe->psn 0x%x",
-			  qp->ibqp.qp_num, qp->s_psn, wqe->psn);
-#endif
 		req->state = TID_REQUEST_RESEND;
 		rcu_read_lock();
 		remote = rcu_dereference(priv->tid_rdma.remote);
@@ -1438,8 +1034,8 @@ no_flow_control:
 		rcu_read_unlock();
 
 		bth2 = mask_psn(qp->s_psn);
-		hwords += build_tid_rdma_write_req(qp, wqe, ohdr, &bth1,
-						   &bth2, &len);
+		hwords += hfi1_build_tid_rdma_write_req(qp, wqe, ohdr, &bth1,
+							&bth2, &len);
 		qp->s_psn = wqe->lpsn + 1;
 		ss = NULL;
 		qp->s_state = TID_OP(WRITE_REQ);
@@ -1447,6 +1043,8 @@ no_flow_control:
 		priv->s_tid_cur = qp->s_cur;
 		if (++qp->s_cur == qp->s_size)
 			qp->s_cur = 0;
+		trace_hfi1_tid_req_make_req_write(qp, 0, wqe->wr.opcode,
+						  wqe->psn, wqe->lpsn, req);
 		break;
 
 	case TID_OP(READ_RESP):
@@ -1455,11 +1053,6 @@ no_flow_control:
 		/* This is used to restart a TID read request */
 		req = wqe_to_tid_req(wqe);
 		wpriv = wqe->priv;
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] Resending request qp->s_psn 0x%x, wqe->psn 0x%x",
-			  qp->ibqp.qp_num, qp->s_psn, wqe->psn);
-#endif
 		/*
 		 * Back down. The field qp->s_psn has been set to the psn with
 		 * which the request should be restart. It's OK to use division
@@ -1474,7 +1067,7 @@ no_flow_control:
 		 * call succeeds or not.
 		 */
 		req->state = TID_REQUEST_RESEND;
-		tid_rdma_restart_req(qp, wqe, &bth2);
+		hfi1_tid_rdma_restart_req(qp, wqe, &bth2);
 		if (req->state != TID_REQUEST_ACTIVE) {
 			/*
 			 * Failed to find the flow. Release all allocated tid
@@ -1482,18 +1075,17 @@ no_flow_control:
 			 */
 			hfi1_kern_exp_rcv_clear_all(req);
 			hfi1_kern_clear_hw_flow(priv->rcd, qp);
-
-			hfi1_send_complete(qp, wqe, IB_WC_LOC_QP_OP_ERR);
+			hfi1_trdma_send_complete(qp, wqe, IB_WC_LOC_QP_OP_ERR);
 			goto bail;
 		}
 		req->state = TID_REQUEST_RESEND;
 		len = min_t(u32, req->seg_len,
 			    wqe->length - req->seg_len * req->cur_seg);
-		flow = &req->flows[READ_ONCE(req->flow_idx)];
+		flow = &req->flows[req->flow_idx];
 		len -= flow->sent;
 		req->s_next_psn = flow->flow_state.ib_lpsn + 1;
-		delta = build_tid_rdma_read_packet(wqe, ohdr, &bth1,
-						   &bth2, &len);
+		delta = hfi1_build_tid_rdma_read_packet(wqe, ohdr, &bth1,
+							&bth2, &len);
 		if (delta <= 0) {
 			/* Wait for TID space */
 			goto bail;
@@ -1505,6 +1097,8 @@ no_flow_control:
 		    ++qp->s_cur == qp->s_size)
 			qp->s_cur = 0;
 		qp->s_psn = req->s_next_psn;
+		trace_hfi1_tid_req_make_req_read(qp, 0, wqe->wr.opcode,
+						 wqe->psn, wqe->lpsn, req);
 		break;
 	case TID_OP(READ_REQ):
 		req = wqe_to_tid_req(wqe);
@@ -1533,8 +1127,8 @@ no_flow_control:
 		/* Read one segment at a time */
 		len = min_t(u32, req->seg_len,
 			    wqe->length - req->seg_len * req->cur_seg);
-		delta = build_tid_rdma_read_req(qp, wqe, ohdr, &bth1,
-						&bth2, &len);
+		delta = hfi1_build_tid_rdma_read_req(qp, wqe, ohdr, &bth1,
+						     &bth2, &len);
 		if (delta <= 0) {
 			/* Wait for TID space */
 			goto bail;
@@ -1546,6 +1140,8 @@ no_flow_control:
 		    ++qp->s_cur == qp->s_size)
 			qp->s_cur = 0;
 		qp->s_psn = req->s_next_psn;
+		trace_hfi1_tid_req_make_req_read(qp, 0, wqe->wr.opcode,
+						 wqe->psn, wqe->lpsn, req);
 		break;
 	}
 	qp->s_sending_hpsn = bth2;
@@ -1595,6 +1191,163 @@ bail_no_tx:
 	return 0;
 }
 
+static inline void hfi1_make_bth_aeth(struct rvt_qp *qp,
+				      struct ib_other_headers *ohdr,
+				      u32 bth0, u32 bth1)
+{
+	if (qp->r_nak_state)
+		ohdr->u.aeth = cpu_to_be32((qp->r_msn & IB_MSN_MASK) |
+					    (qp->r_nak_state <<
+					     IB_AETH_CREDIT_SHIFT));
+	else
+		ohdr->u.aeth = rvt_compute_aeth(qp);
+
+	ohdr->bth[0] = cpu_to_be32(bth0);
+	ohdr->bth[1] = cpu_to_be32(bth1 | qp->remote_qpn);
+	ohdr->bth[2] = cpu_to_be32(mask_psn(qp->r_ack_psn));
+}
+
+static inline void hfi1_queue_rc_ack(struct hfi1_packet *packet, bool is_fecn)
+{
+	struct rvt_qp *qp = packet->qp;
+	struct hfi1_ibport *ibp;
+	unsigned long flags;
+
+	spin_lock_irqsave(&qp->s_lock, flags);
+	if (!(ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK))
+		goto unlock;
+	ibp = rcd_to_iport(packet->rcd);
+	this_cpu_inc(*ibp->rvp.rc_qacks);
+	qp->s_flags |= RVT_S_ACK_PENDING | RVT_S_RESP_PENDING;
+	qp->s_nak_state = qp->r_nak_state;
+	qp->s_ack_psn = qp->r_ack_psn;
+	if (is_fecn)
+		qp->s_flags |= RVT_S_ECN;
+
+	/* Schedule the send tasklet. */
+	hfi1_schedule_send(qp);
+unlock:
+	spin_unlock_irqrestore(&qp->s_lock, flags);
+}
+
+static inline void hfi1_make_rc_ack_9B(struct hfi1_packet *packet,
+				       struct hfi1_opa_header *opa_hdr,
+				       u8 sc5, bool is_fecn,
+				       u64 *pbc_flags, u32 *hwords,
+				       u32 *nwords)
+{
+	struct rvt_qp *qp = packet->qp;
+	struct hfi1_ibport *ibp = rcd_to_iport(packet->rcd);
+	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
+	struct ib_header *hdr = &opa_hdr->ibh;
+	struct ib_other_headers *ohdr;
+	u16 lrh0 = HFI1_LRH_BTH;
+	u16 pkey;
+	u32 bth0, bth1;
+
+	opa_hdr->hdr_type = HFI1_PKT_TYPE_9B;
+	ohdr = &hdr->u.oth;
+	/* header size in 32-bit words LRH+BTH+AETH = (8+12+4)/4 */
+	*hwords = 6;
+
+	if (unlikely(rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH)) {
+		*hwords += hfi1_make_grh(ibp, &hdr->u.l.grh,
+					 rdma_ah_read_grh(&qp->remote_ah_attr),
+					 *hwords - 2, SIZE_OF_CRC);
+		ohdr = &hdr->u.l.oth;
+		lrh0 = HFI1_LRH_GRH;
+	}
+	/* set PBC_DC_INFO bit (aka SC[4]) in pbc_flags */
+	*pbc_flags |= ((!!(sc5 & 0x10)) << PBC_DC_INFO_SHIFT);
+
+	/* read pkey_index w/o lock (its atomic) */
+	pkey = hfi1_get_pkey(ibp, qp->s_pkey_index);
+
+	lrh0 |= (sc5 & IB_SC_MASK) << IB_SC_SHIFT |
+		(rdma_ah_get_sl(&qp->remote_ah_attr) & IB_SL_MASK) <<
+			IB_SL_SHIFT;
+
+	hfi1_make_ib_hdr(hdr, lrh0, *hwords + SIZE_OF_CRC,
+			 opa_get_lid(rdma_ah_get_dlid(&qp->remote_ah_attr), 9B),
+			 ppd->lid | rdma_ah_get_path_bits(&qp->remote_ah_attr));
+
+	bth0 = pkey | (OP(ACKNOWLEDGE) << 24);
+	if (qp->s_mig_state == IB_MIG_MIGRATED)
+		bth0 |= IB_BTH_MIG_REQ;
+	bth1 = (!!is_fecn) << IB_BECN_SHIFT;
+	/*
+	 * Inline ACKs go out without the use of the Verbs send engine, so
+	 * we need to set the STL Verbs Extended bit here
+	 */
+	bth1 |= HFI1_CAP_IS_KSET(OPFN) << IB_BTHE_E_SHIFT;
+	hfi1_make_bth_aeth(qp, ohdr, bth0, bth1);
+}
+
+static inline void hfi1_make_rc_ack_16B(struct hfi1_packet *packet,
+					struct hfi1_opa_header *opa_hdr,
+					u8 sc5, bool is_fecn,
+					u64 *pbc_flags, u32 *hwords,
+					u32 *nwords)
+{
+	struct rvt_qp *qp = packet->qp;
+	struct hfi1_ibport *ibp = rcd_to_iport(packet->rcd);
+	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
+	struct hfi1_16b_header *hdr = &opa_hdr->opah;
+	struct ib_other_headers *ohdr;
+	u32 bth0, bth1 = 0;
+	u16 len, pkey;
+	bool becn = is_fecn;
+	u8 l4 = OPA_16B_L4_IB_LOCAL;
+	u8 extra_bytes;
+
+	opa_hdr->hdr_type = HFI1_PKT_TYPE_16B;
+	ohdr = &hdr->u.oth;
+	/* header size in 32-bit words 16B LRH+BTH+AETH = (16+12+4)/4 */
+	*hwords = 8;
+	extra_bytes = hfi1_get_16b_padding(*hwords << 2, 0);
+	*nwords = SIZE_OF_CRC + ((extra_bytes + SIZE_OF_LT) >> 2);
+
+	if (unlikely(rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH) &&
+	    hfi1_check_mcast(rdma_ah_get_dlid(&qp->remote_ah_attr))) {
+		*hwords += hfi1_make_grh(ibp, &hdr->u.l.grh,
+					 rdma_ah_read_grh(&qp->remote_ah_attr),
+					 *hwords - 4, *nwords);
+		ohdr = &hdr->u.l.oth;
+		l4 = OPA_16B_L4_IB_GLOBAL;
+	}
+	*pbc_flags |= PBC_PACKET_BYPASS | PBC_INSERT_BYPASS_ICRC;
+
+	/* read pkey_index w/o lock (its atomic) */
+	pkey = hfi1_get_pkey(ibp, qp->s_pkey_index);
+
+	/* Convert dwords to flits */
+	len = (*hwords + *nwords) >> 1;
+
+	hfi1_make_16b_hdr(hdr, ppd->lid |
+			  (rdma_ah_get_path_bits(&qp->remote_ah_attr) &
+			  ((1 << ppd->lmc) - 1)),
+			  opa_get_lid(rdma_ah_get_dlid(&qp->remote_ah_attr),
+				      16B), len, pkey, becn, 0, l4, sc5);
+
+	bth0 = pkey | (OP(ACKNOWLEDGE) << 24);
+	bth0 |= extra_bytes << 20;
+	if (qp->s_mig_state == IB_MIG_MIGRATED)
+		bth1 = OPA_BTH_MIG_REQ;
+	hfi1_make_bth_aeth(qp, ohdr, bth0, bth1);
+}
+
+typedef void (*hfi1_make_rc_ack)(struct hfi1_packet *packet,
+				 struct hfi1_opa_header *opa_hdr,
+				 u8 sc5, bool is_fecn,
+				 u64 *pbc_flags, u32 *hwords,
+				 u32 *nwords);
+
+/* We support only two types - 9B and 16B for now */
+static const hfi1_make_rc_ack hfi1_make_rc_ack_tbl[2] = {
+	[HFI1_PKT_TYPE_9B] = &hfi1_make_rc_ack_9B,
+	[HFI1_PKT_TYPE_16B] = &hfi1_make_rc_ack_16B
+};
+
 /**
  * hfi1_send_rc_ack - Construct an ACK packet and send it
  * @qp: a pointer to the QP
@@ -1603,85 +1356,49 @@ bail_no_tx:
  * Note that RDMA reads and atomics are handled in the
  * send side QP state and send engine.
  */
-void hfi1_send_rc_ack(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp,
-		      int is_fecn)
+void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn)
 {
+	struct hfi1_ctxtdata *rcd = packet->rcd;
+	struct rvt_qp *qp = packet->qp;
 	struct hfi1_ibport *ibp = rcd_to_iport(rcd);
+	struct hfi1_qp_priv *priv = qp->priv;
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
+	u8 sc5 = ibp->sl_to_sc[rdma_ah_get_sl(&qp->remote_ah_attr)];
 	u64 pbc, pbc_flags = 0;
-	u16 lrh0;
-	u16 sc5;
-	u32 bth0;
-	u32 hwords;
-	u32 vl, plen;
-	struct send_context *sc;
+	u32 hwords = 0;
+	u32 nwords = 0;
+	u32 plen;
 	struct pio_buf *pbuf;
-	struct ib_header hdr;
-	struct ib_other_headers *ohdr;
-	unsigned long flags;
+	struct hfi1_opa_header opa_hdr;
 
 	/* clear the defer count */
 	qp->r_adefered = 0;
 
 	/* Don't send ACK or NAK if a RDMA read or atomic is pending. */
-	if (qp->s_flags & RVT_S_RESP_PENDING)
-		goto queue_ack;
+	if (qp->s_flags & RVT_S_RESP_PENDING) {
+		hfi1_queue_rc_ack(packet, is_fecn);
+		return;
+	}
 
 	/* Ensure s_rdma_ack_cnt changes are committed */
 	smp_read_barrier_depends();
-	if (qp->s_rdma_ack_cnt)
-		goto queue_ack;
-
-	/* Construct the header */
-	/* header size in 32-bit words LRH+BTH+AETH = (8+12+4)/4 */
-	hwords = 6;
-	if (unlikely(qp->remote_ah_attr.ah_flags & IB_AH_GRH)) {
-		hwords += hfi1_make_grh(ibp, &hdr.u.l.grh,
-				       &qp->remote_ah_attr.grh, hwords, 0);
-		ohdr = &hdr.u.l.oth;
-		lrh0 = HFI1_LRH_GRH;
-	} else {
-		ohdr = &hdr.u.oth;
-		lrh0 = HFI1_LRH_BTH;
+	if (qp->s_rdma_ack_cnt) {
+		hfi1_queue_rc_ack(packet, is_fecn);
+		return;
 	}
-	/* read pkey_index w/o lock (its atomic) */
-	bth0 = hfi1_get_pkey(ibp, qp->s_pkey_index) | (OP(ACKNOWLEDGE) << 24);
-	if (qp->s_mig_state == IB_MIG_MIGRATED)
-		bth0 |= IB_BTH_MIG_REQ;
-	if (qp->r_nak_state)
-		ohdr->u.aeth = cpu_to_be32((qp->r_msn & IB_MSN_MASK) |
-					    (qp->r_nak_state <<
-					     IB_AETH_CREDIT_SHIFT));
-	else
-		ohdr->u.aeth = rvt_compute_aeth(qp);
-	sc5 = ibp->sl_to_sc[qp->remote_ah_attr.sl];
-	/* set PBC_DC_INFO bit (aka SC[4]) in pbc_flags */
-	pbc_flags |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
-	lrh0 |= (sc5 & 0xf) << 12 | (qp->remote_ah_attr.sl & 0xf) << 4;
-	hdr.lrh[0] = cpu_to_be16(lrh0);
-	hdr.lrh[1] = cpu_to_be16(qp->remote_ah_attr.dlid);
-	hdr.lrh[2] = cpu_to_be16(hwords + SIZE_OF_CRC);
-	hdr.lrh[3] = cpu_to_be16(ppd->lid | qp->remote_ah_attr.src_path_bits);
-	ohdr->bth[0] = cpu_to_be32(bth0);
-	ohdr->bth[1] = cpu_to_be32(qp->remote_qpn);
-	ohdr->bth[1] |= cpu_to_be32((!!is_fecn) << IB_BECN_SHIFT);
-	/*
-	 * Inline ACKs go out without the use of the Verbs send engine, so
-	 * we need to set the STL Verbs Extended bit here
-	 */
-	ohdr->bth[1] |= cpu_to_be32(HFI1_CAP_IS_KSET(OPFN) << IB_BTHE_E_SHIFT);
-	ohdr->bth[2] = cpu_to_be32(mask_psn(qp->r_ack_psn));
 
 	/* Don't try to send ACKs if the link isn't ACTIVE */
 	if (driver_lstate(ppd) != IB_PORT_ACTIVE)
 		return;
 
-	sc = rcd->sc;
-	plen = 2 /* PBC */ + hwords;
-	vl = sc_to_vlt(ppd->dd, sc5);
-	pbc = create_pbc(ppd, pbc_flags, qp->srate_mbps, vl, plen);
+	/* Make the appropriate header */
+	hfi1_make_rc_ack_tbl[priv->hdr_type](packet, &opa_hdr, sc5, is_fecn,
+					     &pbc_flags, &hwords, &nwords);
 
-	pbuf = sc_buffer_alloc(sc, plen, NULL, NULL);
+	plen = 2 /* PBC */ + hwords + nwords;
+	pbc = create_pbc(ppd, pbc_flags, qp->srate_mbps,
+			 sc_to_vlt(ppd->dd, sc5), plen);
+	pbuf = sc_buffer_alloc(rcd->sc, plen, NULL, NULL);
 	if (!pbuf) {
 		/*
 		 * We have no room to send at the moment.  Pass
@@ -1689,32 +1406,55 @@ void hfi1_send_rc_ack(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp,
 		 * so that when enough buffer space becomes available,
 		 * the ACK is sent ahead of other outgoing packets.
 		 */
-		goto queue_ack;
+		hfi1_queue_rc_ack(packet, is_fecn);
+		return;
 	}
-
 	trace_ack_output_ibhdr(dd_from_ibdev(qp->ibqp.device),
-			       &hdr, ib_is_sc5(sc5));
+			       &opa_hdr, ib_is_sc5(sc5));
 
 	/* write the pbc and data */
-	ppd->dd->pio_inline_send(ppd->dd, pbuf, pbc, &hdr, hwords);
-
+	ppd->dd->pio_inline_send(ppd->dd, pbuf, pbc,
+				 (priv->hdr_type == HFI1_PKT_TYPE_9B ?
+				 (void *)&opa_hdr.ibh :
+				 (void *)&opa_hdr.opah), hwords);
 	return;
+}
 
-queue_ack:
-	spin_lock_irqsave(&qp->s_lock, flags);
-	if (!(ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK))
-		goto unlock;
-	this_cpu_inc(*ibp->rvp.rc_qacks);
-	qp->s_flags |= RVT_S_ACK_PENDING | RVT_S_RESP_PENDING;
-	qp->s_nak_state = qp->r_nak_state;
-	qp->s_ack_psn = qp->r_ack_psn;
-	if (is_fecn)
-		qp->s_flags |= RVT_S_ECN;
+/**
+ * update_num_rd_atomic - update the qp->s_num_rd_atomic
+ * @qp: the QP
+ * @psn: the packet sequence number to restart at
+ * @wqe: the wqe
+ *
+ * This is called from reset_psn() to update qp->s_num_rd_atomic
+ * for the current wqe.
+ * Called at interrupt level with the QP s_lock held.
+ */
+static void update_num_rd_atomic(struct rvt_qp *qp, u32 psn,
+				 struct rvt_swqe *wqe)
+{
+	u32 opcode = wqe->wr.opcode;
 
-	/* Schedule the send engine. */
-	hfi1_schedule_send(qp);
-unlock:
-	spin_unlock_irqrestore(&qp->s_lock, flags);
+	if (opcode == IB_WR_RDMA_READ ||
+	    opcode == IB_WR_ATOMIC_CMP_AND_SWP ||
+	    opcode == IB_WR_ATOMIC_FETCH_AND_ADD) {
+		qp->s_num_rd_atomic++;
+	} else if (opcode == IB_WR_TID_RDMA_READ) {
+		struct tid_rdma_request *req = wqe_to_tid_req(wqe);
+		struct hfi1_qp_priv *priv = qp->priv;
+
+		if (cmp_psn(psn, wqe->lpsn) <= 0) {
+			u32 cur_seg;
+
+			cur_seg = (psn - wqe->psn) / priv->pkts_ps;
+			req->ack_pending = cur_seg - req->comp_seg;
+			priv->pending_tid_r_segs += req->ack_pending;
+			qp->s_num_rd_atomic += req->ack_pending;
+		} else {
+			priv->pending_tid_r_segs += req->total_segs;
+			qp->s_num_rd_atomic += req->total_segs;
+		}
+	}
 }
 
 /**
@@ -1730,7 +1470,6 @@ static void reset_psn(struct rvt_qp *qp, u32 psn)
 {
 	u32 n = qp->s_acked;
 	struct rvt_swqe *wqe = rvt_get_swqe_ptr(qp, n);
-	struct tid_rdma_request *req;
 	u32 opcode;
 	struct hfi1_qp_priv *priv = qp->priv;
 
@@ -1749,9 +1488,9 @@ static void reset_psn(struct rvt_qp *qp, u32 psn)
 		qp->s_state = OP(SEND_LAST);
 		goto done;
 	}
+	update_num_rd_atomic(qp, psn, wqe);
 
 	/* Find the work request opcode corresponding to the given PSN. */
-	opcode = wqe->wr.opcode;
 	for (;;) {
 		int diff;
 
@@ -1761,8 +1500,11 @@ static void reset_psn(struct rvt_qp *qp, u32 psn)
 			break;
 		wqe = rvt_get_swqe_ptr(qp, n);
 		diff = cmp_psn(psn, wqe->psn);
-		if (diff < 0)
+		if (diff < 0) {
+			/* Point wqe back to the previous one*/
+			wqe = rvt_get_swqe_ptr(qp, qp->s_cur);
 			break;
+		}
 		qp->s_cur = n;
 		/*
 		 * If we are starting the request from the beginning,
@@ -1772,26 +1514,10 @@ static void reset_psn(struct rvt_qp *qp, u32 psn)
 			qp->s_state = OP(SEND_LAST);
 			goto done;
 		}
-		opcode = wqe->wr.opcode;
-		if (opcode == IB_WR_RDMA_READ ||
-		    opcode == IB_WR_ATOMIC_CMP_AND_SWP ||
-		    opcode == IB_WR_ATOMIC_FETCH_AND_ADD) {
-			qp->s_num_rd_atomic++;
-		} else if (opcode == IB_WR_TID_RDMA_READ) {
-			req = wqe_to_tid_req(wqe);
-			if (cmp_psn(psn, wqe->lpsn) <= 0) {
-				u32 cur_seg;
 
-				cur_seg = (psn - wqe->psn) / priv->pkts_ps;
-				req->ack_pending = cur_seg - req->comp_seg;
-				priv->pending_tid_r_segs += req->ack_pending;
-				qp->s_num_rd_atomic += req->ack_pending;
-			} else {
-				priv->pending_tid_r_segs += req->total_segs;
-				qp->s_num_rd_atomic += req->total_segs;
-			}
-		}
+		update_num_rd_atomic(qp, psn, wqe);
 	}
+	opcode = wqe->wr.opcode;
 
 	/*
 	 * Set the state to restart in the middle of a request.
@@ -1883,8 +1609,8 @@ void hfi1_restart_rc(struct rvt_qp *qp, u32 psn, int wait)
 					hfi1_kern_clear_hw_flow(priv->rcd, qp);
 				}
 
-				hfi1_send_complete(qp, wqe,
-						   IB_WC_RETRY_EXC_ERR);
+				hfi1_trdma_send_complete(qp, wqe,
+							 IB_WC_RETRY_EXC_ERR);
 				rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
 			}
 			return;
@@ -1904,29 +1630,11 @@ void hfi1_restart_rc(struct rvt_qp *qp, u32 psn, int wait)
 
 	qp->s_flags &= ~(RVT_S_WAIT_FENCE | RVT_S_WAIT_RDMAR |
 			 RVT_S_WAIT_SSN_CREDIT | RVT_S_WAIT_PSN |
-			 RVT_S_WAIT_ACK | RVT_S_WAIT_TID_RESP);
+			 RVT_S_WAIT_ACK | HFI1_S_WAIT_TID_RESP);
 	if (wait)
 		qp->s_flags |= RVT_S_SEND_ONE;
 	reset_psn(qp, psn);
 }
-
-#if defined(TIDRDMA_DEBUG) && defined(TIDRDMA_EXTRA_DEBUG)
-static void dump_flows(struct tid_rdma_request *req)
-{
-	u16 idx;
-	struct flow_state *state;
-
-	hfi1_cdbg(TIDRDMA, "Unacked flows:");
-	for (idx = req->clear_tail;
-	     CIRC_CNT(req->setup_head, idx, req->n_max_flows);
-	     idx = CIRC_NEXT(idx, req->n_max_flows)) {
-		state = &req->flows[idx].flow_state;
-		hfi1_cdbg(TIDRDMA, "%u spsn 0x%x lpsn 0x%x",
-			  idx, __full_flow_psn(state, state->spsn),
-			  __full_flow_psn(state, state->lpsn));
-	}
-}
-#endif
 
 /*
  * Set qp->s_sending_psn to the next PSN after the given one.
@@ -1961,13 +1669,15 @@ static void reset_sending_psn(struct rvt_qp *qp, u32 psn, u32 opcode)
 /*
  * This should be called with the QP s_lock held and interrupts disabled.
  */
-void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr)
+void hfi1_rc_send_complete(struct rvt_qp *qp, struct hfi1_opa_header *opah)
 {
 	struct ib_other_headers *ohdr;
+	struct hfi1_qp_priv *priv = qp->priv;
 	struct rvt_swqe *wqe;
+	struct ib_header *hdr = NULL;
+	struct hfi1_16b_header *hdr_16b = NULL;
 	u32 opcode, head, tail;
 	u32 psn;
-	struct hfi1_qp_priv *priv = qp->priv;
 	struct tid_rdma_request *req;
 
 	lockdep_assert_held(&qp->s_lock);
@@ -1975,10 +1685,22 @@ void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr)
 		return;
 
 	/* Find out where the BTH is */
-	if (ib_get_lnh(hdr) == HFI1_LRH_BTH)
-		ohdr = &hdr->u.oth;
-	else
-		ohdr = &hdr->u.l.oth;
+	if (priv->hdr_type == HFI1_PKT_TYPE_9B) {
+		hdr = &opah->ibh;
+		if (ib_get_lnh(hdr) == HFI1_LRH_BTH)
+			ohdr = &hdr->u.oth;
+		else
+			ohdr = &hdr->u.l.oth;
+	} else {
+		u8 l4;
+
+		hdr_16b = &opah->opah;
+		l4  = hfi1_16B_get_l4(hdr_16b);
+		if (l4 == OPA_16B_L4_IB_LOCAL)
+			ohdr = &hdr_16b->u.oth;
+		else
+			ohdr = &hdr_16b->u.l.oth;
+	}
 
 	opcode = ib_bth_get_opcode(ohdr);
 	if ((opcode >= OP(RDMA_READ_RESPONSE_FIRST) &&
@@ -1997,7 +1719,7 @@ void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr)
 	 */
 	if (opcode != TID_OP(WRITE_DATA) &&
 	    opcode != TID_OP(WRITE_DATA_LAST) &&
-	    opcode != TID_OP(ACK))
+	    opcode != TID_OP(ACK) && opcode != TID_OP(RESYNC))
 		reset_sending_psn(qp, psn, opcode);
 
 	/* Handle TID RDMA WRITE packets differently */
@@ -2027,6 +1749,8 @@ void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr)
 	 * there are still requests that haven't been acked.
 	 */
 	if ((psn & IB_BTH_REQ_ACK) && tail != head &&
+	    opcode != TID_OP(WRITE_DATA) && opcode != TID_OP(WRITE_DATA_LAST) &&
+	    opcode != TID_OP(RESYNC) &&
 	    !(qp->s_flags &
 	      (RVT_S_TIMER | RVT_S_WAIT_RNR | RVT_S_WAIT_PSN)) &&
 	    (ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK)) {
@@ -2039,7 +1763,8 @@ void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr)
 
 	/* Start TID RDMA ACK timer */
 	if ((opcode == TID_OP(WRITE_DATA) ||
-	     opcode == TID_OP(WRITE_DATA_LAST)) &&
+	     opcode == TID_OP(WRITE_DATA_LAST) ||
+	     opcode == TID_OP(RESYNC)) &&
 	    (psn & IB_BTH_REQ_ACK) &&
 	    !(priv->s_flags & HFI1_S_TID_RETRY_TIMER) &&
 	    (ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK)) {
@@ -2062,6 +1787,7 @@ void hfi1_rc_send_complete(struct rvt_qp *qp, struct ib_header *hdr)
 		if (cmp_psn(wqe->lpsn, qp->s_sending_psn) >= 0 &&
 		    cmp_psn(qp->s_sending_psn, qp->s_sending_hpsn) <= 0)
 			break;
+		trdma_clean_swqe(qp, wqe);
 		rvt_qp_wqe_unreserve(qp, wqe);
 		s_last = qp->s_last;
 		trace_hfi1_qp_send_completion(qp, wqe, s_last);
@@ -2100,7 +1826,8 @@ static inline void update_last_psn(struct rvt_qp *qp, u32 psn)
  * This is similar to hfi1_send_complete but has to check to be sure
  * that the SGEs are not being referenced if the SWQE is being resent.
  */
-struct rvt_swqe *do_rc_completion(struct rvt_qp *qp, struct rvt_swqe *wqe,
+struct rvt_swqe *do_rc_completion(struct rvt_qp *qp,
+				  struct rvt_swqe *wqe,
 				  struct hfi1_ibport *ibp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
@@ -2111,17 +1838,12 @@ struct rvt_swqe *do_rc_completion(struct rvt_qp *qp, struct rvt_swqe *wqe,
 	 * completion if the SWQE is being resent until the send
 	 * is finished.
 	 */
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] lpsn 0x%x, s_sending_psn 0x%x, s_sending_hpsn 0x%x %d %d",
-		  qp->ibqp.qp_num, wqe->lpsn, qp->s_sending_psn,
-		  qp->s_sending_hpsn, cmp_psn(wqe->lpsn, qp->s_sending_psn),
-		  cmp_psn(qp->s_sending_psn, qp->s_sending_hpsn));
-#endif
+	trace_hfi1_rc_completion(qp, wqe->lpsn);
 	if (cmp_psn(wqe->lpsn, qp->s_sending_psn) < 0 ||
 	    cmp_psn(qp->s_sending_psn, qp->s_sending_hpsn) > 0) {
 		u32 s_last;
 
+		trdma_clean_swqe(qp, wqe);
 		rvt_put_swqe(wqe);
 		rvt_qp_wqe_unreserve(qp, wqe);
 		s_last = qp->s_last;
@@ -2145,10 +1867,11 @@ struct rvt_swqe *do_rc_completion(struct rvt_qp *qp, struct rvt_swqe *wqe,
 		 */
 		if (ppd->dd->flags & HFI1_HAS_SEND_DMA) {
 			struct sdma_engine *engine;
+			u8 sl = rdma_ah_get_sl(&qp->remote_ah_attr);
 			u8 sc5;
 
 			/* For now use sc to find engine */
-			sc5 = ibp->sl_to_sc[qp->remote_ah_attr.sl];
+			sc5 = ibp->sl_to_sc[sl];
 			engine = qp_to_sdma_engine(qp, sc5);
 			sdma_engine_progress_schedule(engine);
 		}
@@ -2209,6 +1932,40 @@ static void set_restart_qp(struct rvt_qp *qp, struct hfi1_ctxtdata *rcd)
 }
 
 /**
+ * update_qp_retry_state - Update qp retry state.
+ * @qp: the QP
+ * @psn: the packet sequence number of the TID RDMA WRITE RESP.
+ * @spsn:  The start psn for the given TID RDMA WRITE swqe.
+ * @lpsn:  The last psn for the given TID RDMA WRITE swqe.
+ *
+ * This function is called to update the qp retry state upon
+ * receiving a TID WRITE RESP after the qp is scheduled to retry
+ * a request.
+ */
+static void update_qp_retry_state(struct rvt_qp *qp, u32 psn, u32 spsn,
+				  u32 lpsn)
+{
+	struct hfi1_qp_priv *qpriv = qp->priv;
+
+	qp->s_psn = psn + 1;
+	/*
+	 * If this is the first TID RDMA WRITE RESP packet for the current
+	 * request, change the s_state so that the retry will be processed
+	 * correctly. Similarly, if this is the last TID RDMA WRITE RESP
+	 * packet, change the s_state and advance the s_cur.
+	 */
+	if (cmp_psn(psn, lpsn) >= 0) {
+		qp->s_cur = qpriv->s_tid_cur + 1;
+		if (qp->s_cur >= qp->s_size)
+			qp->s_cur = 0;
+		qp->s_state = TID_OP(WRITE_REQ);
+	} else  if (!cmp_psn(psn, spsn)) {
+		qp->s_cur = qpriv->s_tid_cur;
+		qp->s_state = TID_OP(WRITE_RESP);
+	}
+}
+
+/**
  * do_rc_ack - process an incoming RC ACK
  * @qp: the QP the ACK came in on
  * @psn: the packet sequence number of the ACK
@@ -2229,6 +1986,7 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 	int ret = 0;
 	u32 ack_psn;
 	int diff;
+	struct rvt_dev_info *rdi;
 
 	lockdep_assert_held(&qp->s_lock);
 	/*
@@ -2290,12 +2048,9 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 			u64 *vaddr = wqe->sg_list[0].vaddr;
 			*vaddr = val;
 		}
-		if (wqe->wr.opcode == IB_WR_OPFN) {
-			hfi1_cdbg(OPFN,
-				  "Completion Opcode 0x%x, PSN 0x%x, LPSN 0x%x",
-				  wqe->wr.opcode, wqe->psn, wqe->lpsn);
+		if (wqe->wr.opcode == IB_WR_OPFN)
 			opfn_conn_reply(qp, val);
-		}
+
 		if (qp->s_num_rd_atomic &&
 		    (wqe->wr.opcode == IB_WR_RDMA_READ ||
 		     wqe->wr.opcode == IB_WR_ATOMIC_CMP_AND_SWP ||
@@ -2326,13 +2081,9 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 			break;
 	}
 
+	trace_hfi1_rc_ack_do(qp, aeth, psn, wqe);
+	trace_hfi1_sender_do_rc_ack(qp);
 	switch (aeth >> IB_AETH_NAK_SHIFT) {
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] AETH: 0x%x, %u, PSN 0x%x, s_acked %u, s_tail %u, opcode 0x%x, wqe->psn 0x%x wqe->lpsn 0x%x qp->s_psn",
-		  qp->ibqp.qp_num, aeth, (aeth >> 29), psn, qp->s_acked,
-		  qp->s_tail, wqe->wr.opcode, wqe->psn, wqe->lpsn, qp->s_psn);
-#endif
 	case 0:         /* ACK */
 		this_cpu_inc(*ibp->rvp.rc_acks);
 		qp->s_timeout_shift = 0;
@@ -2350,27 +2101,37 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 				__w = rvt_get_swqe_ptr(qp, qpriv->s_tid_cur);
 
 			/*
-			 * Stop timers if we've received all of the TID RDMA WRITE
-			 * responses.
+			 * Stop timers if we've received all of the TID RDMA
+			 * WRITE * responses.
 			 */
 			if (__w && __w->wr.opcode == IB_WR_TID_RDMA_WRITE &&
 			    opcode == TID_OP(WRITE_RESP)) {
 				/*
 				 * Normally, the loop above would correctly
 				 * process all WQEs from s_acked onward and
-				 * either complete them or check for correct PSN
-				 * sequencing.
-				 * However, for TID RDMA, due to pipelining, the
-				 * response may not be for the request at
+				 * either complete them or check for correct
+				 * PSN sequencing.
+				 * However, for TID RDMA, due to pipelining,
+				 * the response may not be for the request at
 				 * s_acked so the above look would just be
-				 * skipped. This does not allow for checking the
-				 * PSN sequencing. It has to be done separately.
+				 * skipped. This does not allow for checking
+				 * the PSN sequencing. It has to be done
+				 * separately.
 				 */
 				if (cmp_psn(psn, qp->s_last_psn + 1)) {
 					set_restart_qp(qp, rcd);
 					goto bail_stop;
 				}
-				if (--qpriv->pending_tid_w_resp)
+				/*
+				 * If the psn is being resent, stop the
+				 * resending.
+				 */
+				if (qp->s_cur != qp->s_tail &&
+				    cmp_psn(qp->s_psn, psn) <= 0)
+					update_qp_retry_state(qp, psn,
+							      __w->psn,
+							      __w->lpsn);
+				else if (--qpriv->pending_tid_w_resp)
 					rvt_mod_retry_timer(qp);
 				else
 					rvt_stop_rc_timers(qp);
@@ -2381,30 +2142,41 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 				 */
 				rvt_mod_retry_timer(qp);
 				/*
-				 * We can stop re-sending the earlier packets and
-				 * continue with the next packet the receiver wants.
+				 * We can stop re-sending the earlier packets
+				 * and continue with the next packet the
+				 * receiver wants.
 				 */
 				if (cmp_psn(qp->s_psn, psn) <= 0)
 					reset_psn(qp, psn + 1);
 			}
-                } else {
-                        /* No more acks - kill all timers */
-                        rvt_stop_rc_timers(qp);
-                        if (cmp_psn(qp->s_psn, psn) <= 0) {
-                                qp->s_state = OP(SEND_LAST);
-                                qp->s_psn = psn + 1;
-                        }
-                }
-                if (qp->s_flags & RVT_S_WAIT_ACK) {
-                        qp->s_flags &= ~RVT_S_WAIT_ACK;
-                        hfi1_schedule_send(qp);
-                }
+		} else {
+			/* No more acks - kill all timers */
+			rvt_stop_rc_timers(qp);
+			if (cmp_psn(qp->s_psn, psn) <= 0) {
+				qp->s_state = OP(SEND_LAST);
+				qp->s_psn = psn + 1;
+			}
+		}
+		if (qp->s_flags & RVT_S_WAIT_ACK) {
+			qp->s_flags &= ~RVT_S_WAIT_ACK;
+			hfi1_schedule_send(qp);
+		}
 
 		rvt_get_credit(qp, aeth);
-                qp->s_rnr_retry = qp->s_rnr_retry_cnt;
-                qp->s_retry = qp->s_retry_cnt;
-                update_last_psn(qp, psn);
-                return 1;
+		qp->s_rnr_retry = qp->s_rnr_retry_cnt;
+		qp->s_retry = qp->s_retry_cnt;
+		/*
+		 * If the current request is a TID RDMA WRITE request and the
+		 * response is not a TID RDMA WRITE RESP packet, s_last_psn
+		 * can't be advanced.
+		 */
+		if (wqe->wr.opcode == IB_WR_TID_RDMA_WRITE &&
+		    opcode != TID_OP(WRITE_RESP) &&
+		    cmp_psn(psn, wqe->psn) >= 0)
+			return 1;
+
+		update_last_psn(qp, psn);
+		return 1;
 
 	case 1:         /* RNR NAK */
 		ibp->rvp.n_rnr_naks++;
@@ -2412,20 +2184,31 @@ int do_rc_ack(struct rvt_qp *qp, u32 aeth, u32 psn, int opcode, u64 val,
 			goto bail_stop;
 		if (qp->s_flags & RVT_S_WAIT_RNR)
 			goto bail_stop;
-		if (qp->s_rnr_retry == 0) {
+		rdi = ib_to_rvt(qp->ibqp.device);
+		if (qp->s_rnr_retry == 0 &&
+		    !((rdi->post_parms[wqe->wr.opcode].flags &
+		      RVT_OPERATION_IGN_RNR_CNT) &&
+		      qp->s_rnr_retry_cnt == 0)) {
 			status = IB_WC_RNR_RETRY_EXC_ERR;
 			goto class_b;
 		}
-		if (qp->s_rnr_retry_cnt < 7)
+		if (qp->s_rnr_retry_cnt < 7 && qp->s_rnr_retry_cnt > 0)
 			qp->s_rnr_retry--;
 
-		/* The last valid PSN is the previous PSN. */
-		update_last_psn(qp, psn - 1);
+		/*
+		 * The last valid PSN is the previous PSN. For TID RDMA WRITE
+		 * request, s_last_psn should be incremented only when a TID
+		 * RDMA WRITE RESP is received to avoid skipping lost TID RDMA
+		 * WRITE RESP packets.
+		 */
+		if (wqe->wr.opcode == IB_WR_TID_RDMA_WRITE) {
+			reset_psn(qp, qp->s_last_psn + 1);
+		} else {
+			update_last_psn(qp, psn - 1);
+			reset_psn(qp, psn);
+		}
 
 		ibp->rvp.n_rc_resends += delta_psn(qp->s_psn, psn);
-
-		reset_psn(qp, psn);
-
 		qp->s_flags &= ~(RVT_S_WAIT_SSN_CREDIT | RVT_S_WAIT_ACK);
 		qp->s_timeout_shift = 0;
 		rvt_stop_rc_timers(qp);
@@ -2469,7 +2252,7 @@ class_b:
 				if (wqe->wr.opcode == IB_WR_TID_RDMA_READ)
 					hfi1_kern_read_tid_flow_free(qp);
 
-				hfi1_send_complete(qp, wqe, status);
+				hfi1_trdma_send_complete(qp, wqe, status);
 				rvt_error_qp(qp, IB_WC_WR_FLUSH_ERR);
 			}
 			break;
@@ -2498,7 +2281,7 @@ bail_stop:
  * We have seen an out of sequence RDMA read middle or last packet.
  * This ACKs SENDs and RDMA writes up to the first RDMA read or atomic SWQE.
  */
-void rdma_seq_err(struct rvt_qp *qp, struct hfi1_ibport *ibp, u32 psn,
+static void rdma_seq_err(struct rvt_qp *qp, struct hfi1_ibport *ibp, u32 psn,
 			 struct hfi1_ctxtdata *rcd)
 {
 	struct rvt_swqe *wqe;
@@ -2531,36 +2314,34 @@ void rdma_seq_err(struct rvt_qp *qp, struct hfi1_ibport *ibp, u32 psn,
 
 /**
  * rc_rcv_resp - process an incoming RC response packet
- * @ibp: the port this packet came in on
- * @ohdr: the other headers for this packet
- * @data: the packet data
- * @tlen: the packet length
- * @qp: the QP for this packet
- * @opcode: the opcode for this packet
- * @psn: the packet sequence number for this packet
- * @hdrsize: the header length
- * @pmtu: the path MTU
+ * @packet: data packet information
  *
  * This is called from hfi1_rc_rcv() to process an incoming RC response
  * packet for the given QP.
  * Called at interrupt level.
  */
-static void rc_rcv_resp(struct hfi1_ibport *ibp,
-			struct ib_other_headers *ohdr,
-			void *data, u32 tlen, struct rvt_qp *qp,
-			u32 opcode, u32 psn, u32 hdrsize, u32 pmtu,
-			struct hfi1_ctxtdata *rcd)
+static void rc_rcv_resp(struct hfi1_packet *packet)
 {
+	struct hfi1_ctxtdata *rcd = packet->rcd;
+	void *data = packet->payload;
+	u32 tlen = packet->tlen;
+	struct rvt_qp *qp = packet->qp;
+	struct hfi1_ibport *ibp;
+	struct ib_other_headers *ohdr = packet->ohdr;
 	struct rvt_swqe *wqe;
 	enum ib_wc_status status;
 	unsigned long flags;
 	int diff;
-	u32 pad;
-	u32 aeth;
 	u64 val;
+	u32 aeth;
+	u32 psn = ib_bth_get_psn(packet->ohdr);
+	u32 pmtu = qp->pmtu;
+	u16 hdrsize = packet->hlen;
+	u8 opcode = packet->opcode;
+	u8 pad = packet->pad;
+	u8 extra_bytes = pad + packet->extra_byte + (SIZE_OF_CRC << 2);
 
 	spin_lock_irqsave(&qp->s_lock, flags);
-
 	trace_hfi1_ack(qp, psn);
 
 	/* Ignore invalid responses. */
@@ -2599,12 +2380,6 @@ static void rc_rcv_resp(struct hfi1_ibport *ibp,
 	case OP(ACKNOWLEDGE):
 	case OP(ATOMIC_ACKNOWLEDGE):
 	case OP(RDMA_READ_RESPONSE_FIRST):
-#if 0
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA, "[QP%u] Receive ACK packet",
-			  qp->ibqp.qp_num);
-#endif
-#endif
 		aeth = be32_to_cpu(ohdr->u.aeth);
 		if (opcode == OP(ATOMIC_ACKNOWLEDGE))
 			val = ib_u64_get(&ohdr->u.at.atomic_ack_eth);
@@ -2632,7 +2407,7 @@ static void rc_rcv_resp(struct hfi1_ibport *ibp,
 		if (unlikely(wqe->wr.opcode != IB_WR_RDMA_READ))
 			goto ack_op_err;
 read_middle:
-		if (unlikely(tlen != (hdrsize + pmtu + 4)))
+		if (unlikely(tlen != (hdrsize + pmtu + extra_bytes)))
 			goto ack_len_err;
 		if (unlikely(pmtu >= qp->s_rdma_read_len))
 			goto ack_len_err;
@@ -2664,13 +2439,11 @@ read_middle:
 		aeth = be32_to_cpu(ohdr->u.aeth);
 		if (!do_rc_ack(qp, aeth, psn, opcode, 0, rcd))
 			goto ack_done;
-		/* Get the number of bytes the message was padded by. */
-		pad = ib_bth_get_pad(ohdr);
 		/*
 		 * Check that the data size is >= 0 && <= pmtu.
 		 * Remember to account for ICRC (4).
 		 */
-		if (unlikely(tlen < (hdrsize + pad + 4)))
+		if (unlikely(tlen < (hdrsize + extra_bytes)))
 			goto ack_len_err;
 		/*
 		 * If this is a response to a resent RDMA read, we
@@ -2688,16 +2461,14 @@ read_middle:
 			goto ack_seq_err;
 		if (unlikely(wqe->wr.opcode != IB_WR_RDMA_READ))
 			goto ack_op_err;
-		/* Get the number of bytes the message was padded by. */
-		pad = ib_bth_get_pad(ohdr);
 		/*
 		 * Check that the data size is >= 1 && <= pmtu.
 		 * Remember to account for ICRC (4).
 		 */
-		if (unlikely(tlen <= (hdrsize + pad + 4)))
+		if (unlikely(tlen <= (hdrsize + extra_bytes)))
 			goto ack_len_err;
 read_last:
-		tlen -= hdrsize + pad + 4;
+		tlen -= hdrsize + extra_bytes;
 		if (unlikely(tlen != qp->s_rdma_read_len))
 			goto ack_len_err;
 		aeth = be32_to_cpu(ohdr->u.aeth);
@@ -2706,14 +2477,6 @@ read_last:
 		(void)do_rc_ack(qp, aeth, psn,
 				 OP(RDMA_READ_RESPONSE_LAST), 0, rcd);
 		goto ack_done;
-
-	/* XXX (Mitko): I think that some of these opcodes should not be here.
-	 * XXX (Mitko): For example, I don't think that we would ever get here
-	 * XXX (Mitko): by receiving a TID RDMA Write Request. */
-	case TID_OP(WRITE_REQ):
-	case TID_OP(WRITE_RESP):
-	case TID_OP(WRITE_DATA):
-		break;
 	}
 
 ack_op_err:
@@ -2721,6 +2484,7 @@ ack_op_err:
 	goto ack_err;
 
 ack_seq_err:
+	ibp = rcd_to_iport(rcd);
 	rdma_seq_err(qp, ibp, psn, rcd);
 	goto ack_done;
 
@@ -2844,10 +2608,7 @@ static noinline int rc_rcv_error(struct ib_other_headers *ohdr, void *data,
 		len = be32_to_cpu(reth->length);
 		if (unlikely(offset + len != e->rdma_sge.sge_length))
 			goto unlock_done;
-		if (e->rdma_sge.mr) {
-			rvt_put_mr(e->rdma_sge.mr);
-			e->rdma_sge.mr = NULL;
-		}
+		release_rdma_sge_mr(e);
 		if (len != 0) {
 			u32 rkey = be32_to_cpu(reth->rkey);
 			u64 vaddr = get_ib_reth_vaddr(reth);
@@ -2950,12 +2711,12 @@ static void log_cca_event(struct hfi1_pportdata *ppd, u8 sl, u32 rlid,
 	cc_event->svc_type = svc_type;
 	cc_event->rlid = rlid;
 	/* keep timestamp in units of 1.024 usec */
-	cc_event->timestamp = ktime_to_ns(ktime_get()) / 1024;
+	cc_event->timestamp = ktime_get_ns() / 1024;
 
 	spin_unlock_irqrestore(&ppd->cc_log_lock, flags);
 }
 
-void process_becn(struct hfi1_pportdata *ppd, u8 sl, u16 rlid, u32 lqpn,
+void process_becn(struct hfi1_pportdata *ppd, u8 sl, u32 rlid, u32 lqpn,
 		  u32 rqpn, u8 svc_type)
 {
 	struct cca_timer *cca_timer;
@@ -3001,7 +2762,7 @@ void process_becn(struct hfi1_pportdata *ppd, u8 sl, u16 rlid, u32 lqpn,
 		unsigned long nsec = 1024 * ccti_timer;
 
 		hrtimer_start(&cca_timer->hrtimer, ns_to_ktime(nsec),
-			      HRTIMER_MODE_REL);
+			      HRTIMER_MODE_REL_PINNED);
 	}
 
 	spin_unlock_irqrestore(&ppd->cca_timer_lock, flags);
@@ -3010,26 +2771,9 @@ void process_becn(struct hfi1_pportdata *ppd, u8 sl, u16 rlid, u32 lqpn,
 		log_cca_event(ppd, sl, rlid, lqpn, rqpn, svc_type);
 }
 
-static void opfn_trigger_conn_request(struct rvt_qp *qp, u32 bth1)
-{
-	struct hfi1_qp_priv *priv = qp->priv;
-
-	if (!priv->opfn.extended && hfi1_opfn_extended(bth1) &&
-	    HFI1_CAP_IS_KSET(OPFN)) {
-		priv->opfn.extended = true;
-		if (qp->state == IB_QPS_RTS)
-			opfn_conn_request(qp);
-	}
-}
-
 /**
  * hfi1_rc_rcv - process an incoming RC packet
- * @rcd: the context pointer
- * @hdr: the header of this packet
- * @rcv_flags: flags relevant to rcv processing
- * @data: the packet data
- * @tlen: the packet length
- * @qp: the QP for this packet
+ * @packet: data packet information
  *
  * This is called from qp_rcv() to process an incoming RC packet
  * for the given QP.
@@ -3038,16 +2782,16 @@ static void opfn_trigger_conn_request(struct rvt_qp *qp, u32 bth1)
 void hfi1_rc_rcv(struct hfi1_packet *packet)
 {
 	struct hfi1_ctxtdata *rcd = packet->rcd;
-	void *data = packet->ebuf;
+	void *data = packet->payload;
 	u32 tlen = packet->tlen;
 	struct rvt_qp *qp = packet->qp;
 	struct hfi1_ibport *ibp = rcd_to_iport(rcd);
 	struct hfi1_qp_priv *qpriv = qp->priv;
 	struct ib_other_headers *ohdr = packet->ohdr;
-	u32 bth0, bth1 = be32_to_cpu(ohdr->bth[1]);
 	u32 opcode = packet->opcode;
+	u32 bth1 = be32_to_cpu(ohdr->bth[1]);
 	u32 hdrsize = packet->hlen;
-	u32 psn;
+	u32 psn = ib_bth_get_psn(packet->ohdr);
 	u32 pad = packet->pad;
 	struct ib_wc wc;
 	u32 pmtu = qp->pmtu;
@@ -3055,21 +2799,17 @@ void hfi1_rc_rcv(struct hfi1_packet *packet)
 	struct ib_reth *reth;
 	unsigned long flags;
 	int ret;
-	bool is_fecn = false;
-	bool copy_last = false;
+	bool copy_last = false, fecn;
 	u32 rkey;
+	u8 extra_bytes = pad + packet->extra_byte + (SIZE_OF_CRC << 2);
 
 	lockdep_assert_held(&qp->r_lock);
 
-	bth0 = be32_to_cpu(ohdr->bth[0]);
 	if (hfi1_ruc_check_hdr(ibp, packet))
 		return;
 
-	is_fecn = process_ecn(qp, packet, false);
+	fecn = process_ecn(qp, packet);
 	opfn_trigger_conn_request(qp, bth1);
-
-	psn = ib_bth_get_psn(ohdr);
-	opcode = (bth0 >> 24) & 0xff;
 
 	/*
 	 * Process responses (ACKs) before anything else.  Note that the
@@ -3079,10 +2819,7 @@ void hfi1_rc_rcv(struct hfi1_packet *packet)
 	 */
 	if (opcode >= OP(RDMA_READ_RESPONSE_FIRST) &&
 	    opcode <= OP(ATOMIC_ACKNOWLEDGE)) {
-		rc_rcv_resp(ibp, ohdr, data, tlen, qp, opcode, psn,
-			    hdrsize, pmtu, rcd);
-		if (is_fecn)
-			goto send_ack;
+		rc_rcv_resp(packet);
 		return;
 	}
 
@@ -3136,7 +2873,7 @@ void hfi1_rc_rcv(struct hfi1_packet *packet)
 	/* OK, process the packet. */
 	switch (opcode) {
 	case OP(SEND_FIRST):
-		ret = hfi1_rvt_get_rwqe(qp, 0);
+		ret = rvt_get_rwqe(qp, false);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret)
@@ -3147,7 +2884,12 @@ void hfi1_rc_rcv(struct hfi1_packet *packet)
 	case OP(RDMA_WRITE_MIDDLE):
 send_middle:
 		/* Check for invalid length PMTU or posted rwqe len. */
-		if (unlikely(tlen != (hdrsize + pmtu + 4)))
+		/*
+		 * There will be no padding for 9B packet but 16B packets
+		 * will come in with some padding since we always add
+		 * CRC and LT bytes which will need to be flit aligned
+		 */
+		if (unlikely(tlen != (hdrsize + pmtu + extra_bytes)))
 			goto nack_inv;
 		qp->r_rcv_len += pmtu;
 		if (unlikely(qp->r_rcv_len > qp->r_len))
@@ -3157,7 +2899,7 @@ send_middle:
 
 	case OP(RDMA_WRITE_LAST_WITH_IMMEDIATE):
 		/* consume RWQE */
-		ret = hfi1_rvt_get_rwqe(qp, 1);
+		ret = rvt_get_rwqe(qp, true);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret)
@@ -3167,7 +2909,7 @@ send_middle:
 	case OP(SEND_ONLY):
 	case OP(SEND_ONLY_WITH_IMMEDIATE):
 	case OP(SEND_ONLY_WITH_INVALIDATE):
-		ret = hfi1_rvt_get_rwqe(qp, 0);
+		ret = rvt_get_rwqe(qp, false);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret)
@@ -3201,10 +2943,10 @@ no_immediate_data:
 send_last:
 		/* Check for invalid length. */
 		/* LAST len should be >= 1 */
-		if (unlikely(tlen < (hdrsize + pad + 4)))
+		if (unlikely(tlen < (hdrsize + extra_bytes)))
 			goto nack_inv;
-		/* Don't count the CRC. */
-		tlen -= (hdrsize + pad + 4);
+		/* Don't count the CRC(and padding and LT byte for 16B). */
+		tlen -= (hdrsize + extra_bytes);
 		wc.byte_len = tlen + qp->r_rcv_len;
 		if (unlikely(wc.byte_len > qp->r_len))
 			goto nack_inv;
@@ -3222,7 +2964,7 @@ send_last:
 			wc.opcode = IB_WC_RECV;
 		wc.qp = &qp->ibqp;
 		wc.src_qp = qp->remote_qpn;
-		wc.slid = qp->remote_ah_attr.dlid;
+		wc.slid = rdma_ah_get_dlid(&qp->remote_ah_attr) & U16_MAX;
 		/*
 		 * It seems that IB mandates the presence of an SL in a
 		 * work completion only for the UD transport (see section
@@ -3234,7 +2976,7 @@ send_last:
 		 *
 		 * See also OPA Vol. 1, section 9.7.6, and table 9-17.
 		 */
-		wc.sl = qp->remote_ah_attr.sl;
+		wc.sl = rdma_ah_get_sl(&qp->remote_ah_attr);
 		/* zero fields that are N/A */
 		wc.vendor_err = 0;
 		wc.pkey_index = 0;
@@ -3242,7 +2984,7 @@ send_last:
 		wc.port_num = 0;
 		/* Signal completion event if the solicited bit is set. */
 		rvt_cq_enter(ibcq_to_rvtcq(qp->ibqp.recv_cq), &wc,
-			     (bth0 & IB_BTH_SOLICITED) != 0);
+			     ib_bth_is_solicited(ohdr));
 		break;
 
 	case OP(RDMA_WRITE_ONLY):
@@ -3279,7 +3021,7 @@ send_last:
 			goto send_middle;
 		else if (opcode == OP(RDMA_WRITE_ONLY))
 			goto no_immediate_data;
-		ret = hfi1_rvt_get_rwqe(qp, 1);
+		ret = rvt_get_rwqe(qp, true);
 		if (ret < 0)
 			goto nack_op_err;
 		if (!ret) {
@@ -3309,10 +3051,7 @@ send_last:
 			update_ack_queue(qp, next);
 		}
 		e = &qp->s_ack_queue[qp->r_head_ack_queue];
-		if (e->rdma_sge.mr) {
-			rvt_put_mr(e->rdma_sge.mr);
-			e->rdma_sge.mr = NULL;
-		}
+		release_rdma_sge_mr(e);
 		reth = &ohdr->u.rc.reth;
 		len = be32_to_cpu(reth->length);
 		if (len) {
@@ -3354,11 +3093,11 @@ send_last:
 
 		/* Schedule the send engine. */
 		qp->s_flags |= RVT_S_RESP_PENDING;
+		if (fecn)
+			qp->s_flags |= RVT_S_ECN;
 		hfi1_schedule_send(qp);
 
 		spin_unlock_irqrestore(&qp->s_lock, flags);
-		if (is_fecn)
-			goto send_ack;
 		return;
 	}
 
@@ -3378,7 +3117,7 @@ send_last:
 			     !opfn))
 			goto nack_inv;
 		next = qp->r_head_ack_queue + 1;
-		if (next > rvt_size_atomic((ib_to_rvt(qp->ibqp.device))))
+		if (next > rvt_size_atomic(ib_to_rvt(qp->ibqp.device)))
 			next = 0;
 		spin_lock_irqsave(&qp->s_lock, flags);
 		if (unlikely(next == qp->s_acked_ack_queue)) {
@@ -3387,10 +3126,7 @@ send_last:
 			update_ack_queue(qp, next);
 		}
 		e = &qp->s_ack_queue[qp->r_head_ack_queue];
-		if (e->rdma_sge.mr) {
-			rvt_put_mr(e->rdma_sge.mr);
-			e->rdma_sge.mr = NULL;
-		}
+		release_rdma_sge_mr(e);
 		/* Process OPFN special virtual address */
 		if (opfn) {
 			opfn_conn_response(qp, e, ateth);
@@ -3428,11 +3164,11 @@ ack:
 
 		/* Schedule the send engine. */
 		qp->s_flags |= RVT_S_RESP_PENDING;
+		if (fecn)
+			qp->s_flags |= RVT_S_ECN;
 		hfi1_schedule_send(qp);
 
 		spin_unlock_irqrestore(&qp->s_lock, flags);
-		if (is_fecn)
-			goto send_ack;
 		return;
 	}
 
@@ -3445,16 +3181,9 @@ ack:
 	qp->r_ack_psn = psn;
 	qp->r_nak_state = 0;
 	/* Send an ACK if requested or required. */
-	if (psn & IB_BTH_REQ_ACK) {
-		if (packet->numpkt == 0) {
-			rc_cancel_ack(qp);
-			goto send_ack;
-		}
-		if (qp->r_adefered >= HFI1_PSN_CREDIT) {
-			rc_cancel_ack(qp);
-			goto send_ack;
-		}
-		if (unlikely(is_fecn)) {
+	if (psn & IB_BTH_REQ_ACK || fecn) {
+		if (packet->numpkt == 0 || fecn ||
+		    qp->r_adefered >= HFI1_PSN_CREDIT) {
 			rc_cancel_ack(qp);
 			goto send_ack;
 		}
@@ -3495,7 +3224,7 @@ nack_acc:
 	qp->r_nak_state = IB_NAK_REMOTE_ACCESS_ERROR;
 	qp->r_ack_psn = qp->r_psn;
 send_ack:
-	hfi1_send_rc_ack(rcd, qp, is_fecn);
+	hfi1_send_rc_ack(packet, fecn);
 }
 
 void hfi1_rc_hdrerr(
@@ -3533,693 +3262,4 @@ void hfi1_rc_hdrerr(
 			rc_defered_ack(rcd, qp);
 		} /* Out of sequence NAK */
 	} /* QP Request NAKs */
-}
-
-static u32 build_tid_rdma_write_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-				    struct ib_other_headers *ohdr,
-				    u32 *bth1, u32 *bth2, u32 *len)
-{
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct tid_rdma_request *req = wqe_to_tid_req(wqe);
-	struct tid_rdma_params *remote;
-
-	rcu_read_lock();
-	remote = rcu_dereference(qpriv->tid_rdma.remote);
-	/*
-	 * Set the number of flow to be used based on negotiated
-	 * parameters.
-	 */
-	req->n_flows = remote->max_write;
-	req->state = TID_REQUEST_ACTIVE;
-
-	KDETH_RESET(ohdr->u.tid_rdma.w_req.kdeth0, KVER, 0x1);
-	KDETH_RESET(ohdr->u.tid_rdma.w_req.kdeth1, JKEY, remote->jkey);
-	ohdr->u.tid_rdma.w_req.reth.vaddr =
-		cpu_to_be64(wqe->rdma_wr.remote_addr + (wqe->length - *len));
-	ohdr->u.tid_rdma.w_req.reth.rkey =
-		cpu_to_be32(wqe->rdma_wr.rkey);
-	ohdr->u.tid_rdma.w_req.reth.length = cpu_to_be32(*len);
-	ohdr->u.tid_rdma.w_req.verbs_qp = cpu_to_be32(qp->remote_qpn);
-	*bth1 &= ~RVT_QPN_MASK;
-	*bth1 |= remote->qp;
-	qp->s_state = TID_OP(WRITE_REQ);
-	qp->s_flags |= RVT_S_WAIT_TID_RESP;
-	*bth2 |= IB_BTH_REQ_ACK;
-	*len = 0;
-
-	rcu_read_unlock();
-	return sizeof(ohdr->u.tid_rdma.w_req) / sizeof(u32);
-}
-
-static u32 build_tid_rdma_write_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
-				     struct ib_other_headers *ohdr, u32 *bth1,
-				     u32 bth2, u32 *len,
-				     struct rvt_sge_state **ss)
-{
-	struct hfi1_ack_priv *epriv = e->priv;
-	struct tid_rdma_request *req = &epriv->tid_req;
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct tid_rdma_flow *flow = NULL;
-	u32 resp_len = 0, hdwords = 0;
-	void *resp_addr = NULL;
-	struct tid_rdma_params *remote;
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] Processing TID_RDMA_WRITE_REQ: vaddr 0x%llx, len %u, PSN: 0x%x, 0x%x",
-		  qp->ibqp.qp_num, req->vaddr, req->total_len, e->psn,
-		  req->state);
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] Flows: tail %u, head %u, num %u, idx %u, cur %u, alloc %u, ack %u, comp %u, total %u",
-		  qp->ibqp.qp_num, req->clear_tail, req->setup_head,
-		  req->n_flows, req->flow_idx, req->cur_seg, req->alloc_seg,
-		  req->ack_seg, req->comp_seg, req->total_segs);
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] r_ack_head %u s_ack_tail %u s_head %u s_tail %u r_head %u r_tail %u r_ack %u r_alloc %u",
-		  qp->ibqp.qp_num,
-		  qp->r_head_ack_queue, qp->s_tail_ack_queue,
-		  qpriv->s_tid_head, qpriv->s_tid_tail,
-		  qpriv->r_tid_head, qpriv->r_tid_tail,
-		  qpriv->r_tid_ack, qpriv->r_tid_alloc);
-#endif
-
-	flow = &req->flows[req->flow_idx];
-	switch (req->state) {
-	default:
-		/*
-		 * Try to allocate resources here in case QP was queued and was
-		 * later scheduled when resources became available
-		 */
-		hfi1_tid_write_alloc_resources(qp, false);
-
-		/* We've already sent everything which is ready */
-		if (req->cur_seg >= req->alloc_seg)
-			goto done;
-
-		/*
-		 * Resources can be assigned but responses cannot be sent in
-		 * rnr_nak state, till the resent request is received
-		 */
-		if (qpriv->rnr_nak_state == TID_RNR_NAK_SENT)
-			goto done;
-
-		req->state = TID_REQUEST_ACTIVE;
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] Segment PSNs: spsn: 0x%x, lpsn: 0x%x",
-			  qp->ibqp.qp_num,
-			  full_flow_psn(flow, flow->flow_state.spsn),
-			  full_flow_psn(flow, flow->flow_state.lpsn));
-#endif
-		req->flow_idx = CIRC_NEXT(req->flow_idx, req->n_max_flows);
-		hfi1_add_tid_reap_timer(qp);
-		break;
-
-	case TID_REQUEST_RESEND_ACTIVE:
-	case TID_REQUEST_RESEND:
-#ifdef TIDRDMA_DEBUG
-		hfi1_cdbg(TIDRDMA,
-			  "[QP%u] Resending RESP: spsn: 0x%x, lpsn: 0x%x",
-			  qp->ibqp.qp_num,
-			  full_flow_psn(flow, flow->flow_state.spsn),
-			  full_flow_psn(flow, flow->flow_state.lpsn));
-#endif
-		req->flow_idx = CIRC_NEXT(req->flow_idx, req->n_max_flows);
-		if (!CIRC_CNT(req->setup_head, req->flow_idx,
-			      req->n_max_flows))
-			req->state = TID_REQUEST_ACTIVE;
-
-		hfi1_mod_tid_reap_timer(qp);
-		break;
-	}
-	flow->flow_state.resp_ib_psn = bth2;
-	resp_addr = (void *)flow->tid_entry;
-	resp_len = sizeof(*flow->tid_entry) * flow->tidcnt;
-	req->cur_seg++;
-
-#if defined(TIDRDMA_DEBUG) && defined(TIDRDMA_EXTRA_DEBUG)
-	dump_tid_array(resp_addr, resp_len / sizeof(u32));
-#endif
-
-	memset(&ohdr->u.tid_rdma.w_rsp, 0, sizeof(ohdr->u.tid_rdma.w_rsp));
-	epriv->ss.sge.vaddr = resp_addr;
-	epriv->ss.sge.sge_length = resp_len;
-	epriv->ss.sge.length = epriv->ss.sge.sge_length;
-	/*
-	 * We can safely zero these out. Since the first SGE covers the
-	 * entire packet, nothing else should even look at the MR.
-	 */
-	epriv->ss.sge.mr = NULL;
-	epriv->ss.sge.m = 0;
-	epriv->ss.sge.n = 0;
-
-	epriv->ss.sg_list = NULL;
-	epriv->ss.total_len = epriv->ss.sge.sge_length;
-	epriv->ss.num_sge = 1;
-
-	*ss = &epriv->ss;
-	*len = epriv->ss.total_len;
-
-	/* Construct the TID RDMA WRITE RESP packet header */
-	rcu_read_lock();
-	remote = rcu_dereference(qpriv->tid_rdma.remote);
-
-	KDETH_RESET(ohdr->u.tid_rdma.w_rsp.kdeth0, KVER, 0x1);
-	KDETH_RESET(ohdr->u.tid_rdma.w_rsp.kdeth1, JKEY, remote->jkey);
-	ohdr->u.tid_rdma.w_rsp.aeth = rvt_compute_aeth(qp);
-	ohdr->u.tid_rdma.w_rsp.tid_flow_psn =
-		cpu_to_be32((flow->flow_state.generation <<
-			     HFI1_KDETH_BTH_SEQ_SHIFT) |
-			    (flow->flow_state.spsn &
-			     HFI1_KDETH_BTH_SEQ_MASK));
-	ohdr->u.tid_rdma.w_rsp.tid_flow_qp =
-		cpu_to_be32(qpriv->tid_rdma.local.qp |
-			    ((flow->idx & TID_RDMA_DESTQP_FLOW_MASK) <<
-			     TID_RDMA_DESTQP_FLOW_SHIFT) |
-			    qpriv->rcd->ctxt);
-	ohdr->u.tid_rdma.w_rsp.verbs_qp = cpu_to_be32(qp->remote_qpn);
-	*bth1 = remote->qp;
-	rcu_read_unlock();
-	hdwords = sizeof(ohdr->u.tid_rdma.w_rsp) / sizeof(u32);
-	qpriv->pending_tid_w_segs++;
-done:
-	return hdwords;
-}
-
-static bool build_tid_rdma_packet(struct rvt_swqe *wqe,
-				  struct ib_other_headers *ohdr,
-				  u32 *bth1, u32 *bth2, u32 *len)
-{
-	struct tid_rdma_request *req = wqe_to_tid_req(wqe);
-	struct tid_rdma_flow *flow = &req->flows[READ_ONCE(req->clear_tail)];
-	struct tid_rdma_params *remote;
-	struct rvt_qp *qp = req->qp;
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	u32 tidentry = flow->tid_entry[flow->tid_idx];
-	u32 tidlen = EXP_TID_GET(tidentry, LEN) << PAGE_SHIFT;
-	struct tid_rdma_write_data *wd = &ohdr->u.tid_rdma.w_data;
-	u32 next_offset, om = KDETH_OM_LARGE;
-	bool last_pkt;
-
-	if (!tidlen) {
-		hfi1_send_complete(qp, wqe, IB_WC_REM_INV_RD_REQ_ERR);
-		rvt_error_qp(qp, IB_WC_REM_INV_RD_REQ_ERR);
-	}
-
-	*len = min_t(u32, qp->pmtu, tidlen - flow->tid_offset);
-	flow->sent += *len;
-	next_offset = flow->tid_offset + *len;
-	last_pkt = (flow->tid_idx == (flow->tidcnt - 1) &&
-		    next_offset >= tidlen) || (flow->sent >= flow->length);
-#if defined(TIDRDMA_DEBUG) && defined(TIDRDMA_EXTRA_DEBUG)
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] TID: idx: %u, ctrl: 0x%x, tidlen: %u, offset: %u, next: %u, sent: %u, len: %u, tidx: %u, cnt: %u, len: %u, last: %u",
-		  qp->ibqp.qp_num, EXP_TID_GET(tidentry, IDX),
-		  EXP_TID_GET(tidentry, CTRL), tidlen, flow->tid_offset,
-		  next_offset, flow->sent, flow->length, flow->tid_idx,
-		  flow->tidcnt, *len, last_pkt);
-#endif
-
-	rcu_read_lock();
-	remote = rcu_dereference(qpriv->tid_rdma.remote);
-	KDETH_RESET(wd->kdeth0, KVER, 0x1);
-	KDETH_SET(wd->kdeth0, SH, !last_pkt);
-	KDETH_SET(wd->kdeth0, TIDCTRL, EXP_TID_GET(tidentry, CTRL));
-	KDETH_SET(wd->kdeth0, TID, EXP_TID_GET(tidentry, IDX));
-	KDETH_SET(wd->kdeth0, OM, om == KDETH_OM_LARGE);
-	KDETH_SET(wd->kdeth0, OFFSET, flow->tid_offset / om);
-	KDETH_RESET(wd->kdeth1, JKEY, remote->jkey);
-	wd->verbs_qp = cpu_to_be32(qp->remote_qpn);
-	rcu_read_unlock();
-
-	*bth1 = flow->tid_qpn;
-	*bth2 = mask_psn(((flow->flow_state.spsn + flow->pkt++) &
-			 HFI1_KDETH_BTH_SEQ_MASK) |
-			 (flow->flow_state.generation <<
-			  HFI1_KDETH_BTH_SEQ_SHIFT));
-	if (last_pkt) {
-		/* PSNs are zero-based, so +1 to count number of packets */
-		if (flow->flow_state.lpsn + 1 +
-		    rvt_div_round_up_mtu(qp, req->seg_len) >
-		    MAX_TID_FLOW_PSN)
-			req->state = TID_REQUEST_SYNC;
-		*bth2 |= IB_BTH_REQ_ACK;
-	}
-
-	if (next_offset >= tidlen) {
-		flow->tid_offset = 0;
-		flow->tid_idx++;
-	} else {
-		flow->tid_offset = next_offset;
-	}
-	return last_pkt;
-}
-
-static u32 build_tid_rdma_write_ack(struct rvt_qp *qp, struct rvt_ack_entry *e,
-				    struct ib_other_headers *ohdr, u16 iflow,
-				    u32 *bth1, u32 *bth2)
-{
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct tid_rdma_request *req = ack_to_tid_req(e);
-	struct tid_rdma_flow *flow = &req->flows[iflow];
-	struct tid_rdma_params *remote;
-
-	rcu_read_lock();
-	remote = rcu_dereference(qpriv->tid_rdma.remote);
-	KDETH_RESET(ohdr->u.tid_rdma.ack.kdeth1, JKEY, remote->jkey);
-	ohdr->u.tid_rdma.ack.verbs_qp = cpu_to_be32(qp->remote_qpn);
-	*bth1 = remote->qp;
-	rcu_read_unlock();
-
-	if (qpriv->s_nak_state) {
-		*bth2 = mask_psn(qpriv->s_nak_psn);
-		ohdr->u.tid_rdma.ack.aeth =
-			cpu_to_be32((qp->r_msn & IB_MSN_MASK) |
-				    (qpriv->s_nak_state <<
-				     IB_AETH_CREDIT_SHIFT));
-	} else {
-		*bth2 = mask_psn((flow->flow_state.generation <<
-				  HFI1_KDETH_BTH_SEQ_SHIFT) |
-				 (flow->flow_state.lpsn &
-				  HFI1_KDETH_BTH_SEQ_MASK));
-		ohdr->u.tid_rdma.ack.aeth = rvt_compute_aeth(qp);
-	}
-	KDETH_RESET(ohdr->u.tid_rdma.ack.kdeth0, KVER, 0x1);
-	ohdr->u.tid_rdma.ack.tid_flow_qp =
-		cpu_to_be32(qpriv->tid_rdma.local.qp |
-			    ((flow->idx & TID_RDMA_DESTQP_FLOW_MASK) <<
-			     TID_RDMA_DESTQP_FLOW_SHIFT) |
-			    qpriv->rcd->ctxt);
-	ohdr->u.tid_rdma.ack.verbs_psn =
-		cpu_to_be32(flow->flow_state.resp_ib_psn);
-
-	return sizeof(ohdr->u.tid_rdma.ack) / sizeof(u32);
-}
-
-/*
- * "Rewind" the TID request information.
- * This means that we reset the state back to ACTIVE,
- * find the proper flow, set the flow index to that flow,
- * and reset the flow information.
- */
-static void tid_rdma_restart_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-				 u32 *bth2)
-{
-	struct tid_rdma_request *req = wqe_to_tid_req(wqe);
-	struct tid_rdma_flow *flow;
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	int diff;
-	u32 tididx = 0, i;
-	u16 fidx;
-
-	if (wqe->wr.opcode == IB_WR_TID_RDMA_READ) {
-		*bth2 = mask_psn(qp->s_psn);
-		flow = find_flow_ib(req, *bth2, &fidx);
-		if (!flow) {
-#if defined(TIDRDMA_DEBUG) && defined(TIDRDMA_EXTRA_DEBUG)
-			hfi1_cdbg(TIDRDMA,
-				  "!!!!!!!!!! Could not find flow to restart");
-			dump_flows(req);
-#endif
-			return;
-		}
-	} else {
-		fidx = req->acked_tail;
-		flow = &req->flows[fidx];
-		*bth2 = req->r_ack_psn;
-	}
-
-	if (wqe->wr.opcode == IB_WR_TID_RDMA_READ)
-		diff = delta_psn(*bth2, flow->flow_state.ib_spsn);
-	else
-		diff = delta_psn(*bth2, full_flow_psn(flow,
-						      flow->flow_state.spsn));
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA, "[QP%u] PSN 0x%x, fidx %u 0x%x-0x%x, diff %u",
-		  qp->ibqp.qp_num, *bth2, fidx,
-		  full_flow_psn(flow, flow->flow_state.spsn),
-		  full_flow_psn(flow, flow->flow_state.lpsn), diff);
-#endif
-	flow->sent = 0;
-	flow->pkt = 0;
-	flow->tid_idx = 0;
-	flow->tid_offset = 0;
-	if (diff) {
-		for (tididx = 0; tididx < flow->tidcnt; tididx++) {
-			u32 tidentry = flow->tid_entry[tididx], tidlen,
-				tidnpkts, npkts;
-
-			flow->tid_offset = 0;
-			tidlen = EXP_TID_GET(tidentry, LEN) * PAGE_SIZE;
-			tidnpkts = rvt_div_round_up_mtu(qp, tidlen);
-			npkts = min_t(u32, diff, tidnpkts);
-			flow->pkt += npkts;
-			flow->sent += (npkts == tidnpkts ? tidlen :
-				       npkts * qp->pmtu);
-			flow->tid_offset += npkts * qp->pmtu;
-			diff -= npkts;
-			if (!diff)
-				break;
-		}
-	}
-	if (wqe->wr.opcode == IB_WR_TID_RDMA_WRITE)
-		rvt_skip_sge(&qpriv->tid_ss, (req->cur_seg * req->seg_len) +
-			     flow->sent, 0);
-
-	if (flow->tid_offset == EXP_TID_GET(flow->tid_entry[tididx], LEN) *
-	    PAGE_SIZE) {
-		tididx++;
-		flow->tid_offset = 0;
-	}
-	flow->tid_idx = tididx;
-	if (wqe->wr.opcode == IB_WR_TID_RDMA_READ)
-		/* Move flow_idx to correct index */
-		smp_store_release(&req->flow_idx, fidx);
-	else
-		/* Move clear_tail to correct index */
-		smp_store_release(&req->clear_tail, fidx);
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] flow: sent %u pkt %u tid_idx %u tid_offset %u, acked_tail %u, clear_tail %u setup_head %u",
-		  qp->ibqp.qp_num, flow->sent, flow->pkt, flow->tid_idx,
-		  flow->tid_offset, req->acked_tail, req->clear_tail,
-		  req->setup_head);
-#endif
-	req->state = TID_REQUEST_ACTIVE;
-	if (wqe->wr.opcode == IB_WR_TID_RDMA_WRITE) {
-		/* Reset all the flows that we are going to resend */
-		fidx = CIRC_NEXT(fidx, req->n_max_flows);
-		i = qpriv->s_tid_tail;
-		do {
-			for (;
-			      CIRC_CNT(req->setup_head, fidx, req->n_max_flows);
-			      fidx = CIRC_NEXT(fidx, req->n_max_flows)) {
-				req->flows[fidx].sent = 0;
-				req->flows[fidx].pkt = 0;
-				req->flows[fidx].tid_idx = 0;
-				req->flows[fidx].tid_offset = 0;
-			}
-			if (i == qpriv->s_tid_cur)
-				break;
-			do {
-				i = (++i == qp->s_size ? 0 : i);
-				wqe = rvt_get_swqe_ptr(qp, i);
-			} while (wqe->wr.opcode != IB_WR_TID_RDMA_WRITE);
-			req = wqe_to_tid_req(wqe);
-			req->cur_seg = req->ack_seg;
-			fidx = req->acked_tail;
-			/* Pull req->clear_tail back */
-			smp_store_release(&req->clear_tail, fidx);
-		} while (1);
-	}
-
-}
-
-static u32 build_tid_rdma_read_packet(struct rvt_swqe *wqe,
-				      struct ib_other_headers *ohdr,
-				      u32 *bth1, u32 *bth2, u32 *len)
-{
-	struct tid_rdma_request *req = wqe_to_tid_req(wqe);
-	struct tid_rdma_flow *flow = &req->flows[READ_ONCE(req->flow_idx)];
-	struct rvt_qp *qp = req->qp;
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct hfi1_swqe_priv *wpriv = wqe->priv;
-	struct tid_rdma_read_req *rreq = &ohdr->u.tid_rdma.r_req;
-	struct tid_rdma_params *remote;
-	u32 req_len = 0;
-	void *req_addr = NULL;
-
-	/* This is the IB psn used to send the request */
-	*bth2 = mask_psn(flow->flow_state.ib_spsn + flow->pkt);
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] TID: sent: %u, flen: %u, tidx: %u, cnt: %u, len: %u",
-		  qp->ibqp.qp_num, flow->sent, flow->length, flow->tid_idx,
-		  flow->tidcnt, *len);
-#endif
-
-	/* TID Entries for TID RDMA READ payload */
-	req_addr = &flow->tid_entry[flow->tid_idx];
-	req_len = sizeof(*flow->tid_entry) * (flow->tidcnt - flow->tid_idx);
-
-	memset(&ohdr->u.tid_rdma.r_req, 0, sizeof(ohdr->u.tid_rdma.r_req));
-	wpriv->ss.sge.vaddr = req_addr;
-	wpriv->ss.sge.sge_length = req_len;
-	wpriv->ss.sge.length = wpriv->ss.sge.sge_length;
-	/*
-	 * We can safely zero these out. Since the first SGE covers the
-	 * entire packet, nothing else should even look at the MR.
-	 */
-	wpriv->ss.sge.mr = NULL;
-	wpriv->ss.sge.m = 0;
-	wpriv->ss.sge.n = 0;
-
-	wpriv->ss.sg_list = NULL;
-	wpriv->ss.total_len = wpriv->ss.sge.sge_length;
-	wpriv->ss.num_sge = 1;
-
-	/* Construct the TID RDMA READ REQ packet header */
-	rcu_read_lock();
-	remote = rcu_dereference(qpriv->tid_rdma.remote);
-
-	KDETH_RESET(rreq->kdeth0, KVER, 0x1);
-	KDETH_RESET(rreq->kdeth1, JKEY, remote->jkey);
-	rreq->reth.vaddr = cpu_to_be64(wqe->rdma_wr.remote_addr +
-			    req->cur_seg * req->seg_len + flow->sent);
-	rreq->reth.rkey = cpu_to_be32(wqe->rdma_wr.rkey);
-	rreq->reth.length = cpu_to_be32(*len);
-	rreq->tid_flow_psn =
-		cpu_to_be32((flow->flow_state.generation <<
-			     HFI1_KDETH_BTH_SEQ_SHIFT) |
-			    ((flow->flow_state.spsn + flow->pkt)&
-			     HFI1_KDETH_BTH_SEQ_MASK));
-	rreq->tid_flow_qp =
-		cpu_to_be32(qpriv->tid_rdma.local.qp |
-			    ((flow->idx & TID_RDMA_DESTQP_FLOW_MASK) <<
-			     TID_RDMA_DESTQP_FLOW_SHIFT) |
-			    qpriv->rcd->ctxt);
-	rreq->verbs_qp = cpu_to_be32(qp->remote_qpn);
-	*bth1 &= ~RVT_QPN_MASK;
-	*bth1 |= remote->qp;
-	*bth2 |= IB_BTH_REQ_ACK;
-	rcu_read_unlock();
-
-	/* We are done with this segment */
-	flow->sent += *len;
-	req->cur_seg++;
-	qp->s_state = TID_OP(READ_REQ);
-	req->ack_pending++;
-	req->flow_idx = (req->flow_idx + 1) & (req->n_max_flows - 1);
-	qpriv->pending_tid_r_segs++;
-	qp->s_num_rd_atomic++;
-
-	/* Set the TID RDMA READ request payload size */
-	*len = req_len;
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA, "BTH1 0x%x BTH2 0x%x KDETH0 0x%x KDETH1 0x%x",
-		  *bth1, *bth2, ohdr->u.tid_rdma.r_req.kdeth0,
-		  ohdr->u.tid_rdma.r_req.kdeth1);
-#endif
-	return sizeof(ohdr->u.tid_rdma.r_req) / sizeof(u32);
-}
-
-/*
- * @len: contains the data length to read upon entry and the read request
- *       payload length upon exit.
- */ 
-static u32 build_tid_rdma_read_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-				   struct ib_other_headers *ohdr,
-				   u32 *bth1, u32 *bth2, u32 *len)
-	__must_hold(&qp->s_lock)
-{
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct tid_rdma_request *req = wqe_to_tid_req(wqe);
-	struct tid_rdma_flow *flow = NULL;
-	u32 hdwords = 0;
-	bool last;
-	bool retry = true;
-	u32 npkts = rvt_div_round_up_mtu(qp, *len);
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "Tot_seg 0x%u, cur_seg %u, comp_seg %u PSN: 0x%x, state 0x%x",
-		  req->total_segs, req->cur_seg, req->comp_seg, wqe->psn,
-		  req->state);
-#endif
-
-	/* Attempt to allocate resources */
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "Flows: tail: %u, head: %u, num: %u, idx: %u",
-		  req->clear_tail, req->setup_head, req->n_flows,
-		  req->flow_idx);
-#endif
-
-	/*
-	* Check sync conditions. Make sure that there are no pending
-	* segments before freeing the flow.
-	*/
-sync_check:
-	if (req->state == TID_REQUEST_SYNC) {
-		if (qpriv->pending_tid_r_segs)
-			goto done;
-
-		hfi1_kern_clear_hw_flow(req->rcd, qp);
-		req->state = TID_REQUEST_ACTIVE;
-	}
-
-	/*
-	 * If the request for this segment is resent, the tid resources should
-	 * have been allocated before. In this case, req->flow_idx should
-	 * fall behind req->setup_head.
-	 */
-	if (READ_ONCE(req->flow_idx) == req->setup_head) {
-		retry = false;
-		if (req->state == TID_REQUEST_RESEND) {
-			/*
-			 * This is the first new segment for a request whose
-			 * earlier segments have been re-sent. We need to
-			 * set up the sge pointer correctly.
-			 */
-			restart_sge(&qp->s_sge, wqe, req->s_next_psn,
-				    qp->pmtu);
-			req->isge = 0;
-			req->state = TID_REQUEST_ACTIVE;
-		}
-
-		/* Check sync */
-		if ((qpriv->flow_state.psn + npkts) > MAX_TID_FLOW_PSN) {
-			req->state = TID_REQUEST_SYNC;
-			goto sync_check;
-		}
-
-		/* Allocate the flow if not yet */
-		if (hfi1_kern_setup_hw_flow(qpriv->rcd, qp))
-			goto done;
-
-		/*
-		 * The following call will advance req->setup_head after
-		 * allocating the tid entries.
-		 */
-		if (hfi1_kern_exp_rcv_setup(req, &qp->s_sge, &last)) {
-			req->state = TID_REQUEST_QUEUED;
-
-			/*
-			 * We don't have resources for this segment. The QP has
-			 * already been queued.
-			 */
-			goto done;
-		}
-	}
-
-	/* req->flow_idx should only be one slot behind req->setup_head */
-	flow = &req->flows[req->flow_idx];
-	flow->pkt = 0;
-	flow->tid_idx = 0;
-	flow->sent = 0;
-	if (!retry) {
-		/* Set the first and last IB PSN for the flow in use.*/
-		flow->flow_state.ib_spsn = req->s_next_psn;
-		flow->flow_state.ib_lpsn =
-			flow->flow_state.ib_spsn + flow->npkts - 1;
-	}
-
-	/* Calculate the next segment start psn.*/
-	req->s_next_psn += flow->npkts;
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "Segment PSNs: sib: 0x%x, lib: 0x%x, sflow: 0x%x, lflow: 0x%x",
-		  flow->flow_state.ib_spsn, flow->flow_state.ib_lpsn,
-		  full_flow_psn(flow, flow->flow_state.spsn),
-		  full_flow_psn(flow, flow->flow_state.lpsn));
-#endif
-
-	/* Build the packet header */
-	hdwords = build_tid_rdma_read_packet(wqe, ohdr, bth1, bth2, len);
-done:
-	return hdwords;
-}
-
-static u32 build_tid_rdma_read_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
-				    struct ib_other_headers *ohdr, u32 *bth0,
-				    u32 *bth1, u32 *bth2, u32 *len, bool *last)
-{
-	struct hfi1_ack_priv *epriv = e->priv;
-	struct tid_rdma_request *req = &epriv->tid_req;
-	struct hfi1_qp_priv *qpriv = qp->priv;
-	struct tid_rdma_flow *flow = &req->flows[READ_ONCE(req->clear_tail)];
-	u32 tidentry = flow->tid_entry[flow->tid_idx];
-	u32 tidlen = EXP_TID_GET(tidentry, LEN) << PAGE_SHIFT;
-	struct tid_rdma_read_resp *resp = &ohdr->u.tid_rdma.r_rsp;
-	u32 next_offset, om = KDETH_OM_LARGE;
-	bool last_pkt;
-	u32 hdwords = 0;
-	struct tid_rdma_params *remote;
-
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] READ_RESP: vaddr 0x%llx, len %u, PSN: 0x%x, st 0x%x",
-		  qp->ibqp.qp_num, req->vaddr, req->total_len, e->psn,
-		  req->state);
-#endif
-
-	*len = min_t(u32, qp->pmtu, tidlen - flow->tid_offset);
-	flow->sent += *len;
-	next_offset = flow->tid_offset + *len;
-	last_pkt = (flow->sent >= flow->length);
-#ifdef TIDRDMA_DEBUG
-	hfi1_cdbg(TIDRDMA,
-		  "[QP%u] TID: idx: %u, ctrl: 0x%x, tidlen: %u, offset: %u, next: %u, sent: %u, flen: %u, tidx: %u, cnt: %u, len: %u, last: %u",
-		  qp->ibqp.qp_num, EXP_TID_GET(tidentry, IDX),
-		  EXP_TID_GET(tidentry, CTRL), tidlen, flow->tid_offset,
-		  next_offset, flow->sent, flow->length, flow->tid_idx,
-		  flow->tidcnt, *len, last_pkt);
-#endif
-
-	rcu_read_lock();
-	remote = rcu_dereference(qpriv->tid_rdma.remote);
-	if (!remote) {
-		rcu_read_unlock();
-		goto done;
-	}
-	KDETH_RESET(resp->kdeth0, KVER, 0x1);
-	KDETH_SET(resp->kdeth0, SH, !last_pkt);
-	KDETH_SET(resp->kdeth0, TIDCTRL, EXP_TID_GET(tidentry, CTRL));
-	KDETH_SET(resp->kdeth0, TID, EXP_TID_GET(tidentry, IDX));
-	KDETH_SET(resp->kdeth0, OM, om == KDETH_OM_LARGE);
-	KDETH_SET(resp->kdeth0, OFFSET, flow->tid_offset / om);
-	KDETH_RESET(resp->kdeth1, JKEY, remote->jkey);
-	resp->verbs_qp = cpu_to_be32(qp->remote_qpn);
-	rcu_read_unlock();
-
-	resp->aeth = rvt_compute_aeth(qp);
-	resp->verbs_psn = cpu_to_be32(mask_psn(flow->flow_state.ib_spsn +
-					       flow->pkt));
-
-	*bth0 = TID_OP(READ_RESP) << 24;
-	*bth1 = flow->tid_qpn;
-	*bth2 = mask_psn(((flow->flow_state.spsn + flow->pkt++) &
-			 HFI1_KDETH_BTH_SEQ_MASK) |
-			 (flow->flow_state.generation <<
-			  HFI1_KDETH_BTH_SEQ_SHIFT));
-	*last = last_pkt;
-	if (last_pkt)
-		smp_store_release(&req->clear_tail,
-			  (req->clear_tail + 1) & (req->n_max_flows - 1));
-
-	if (next_offset >= tidlen) {
-		flow->tid_offset = 0;
-		flow->tid_idx++;
-	} else {
-		flow->tid_offset = next_offset;
-	}
-
-	hdwords = sizeof(ohdr->u.tid_rdma.r_rsp) / sizeof(u32);
-
-done:
-	return hdwords;
 }

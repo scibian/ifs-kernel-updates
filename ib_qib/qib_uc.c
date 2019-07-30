@@ -74,7 +74,7 @@ int qib_make_uc_req(struct rvt_qp *qp, unsigned long *flags)
 	}
 
 	ohdr = &priv->s_hdr->u.oth;
-	if (qp->remote_ah_attr.ah_flags & IB_AH_GRH)
+	if (rdma_ah_get_ah_flags(&qp->remote_ah_attr) & IB_AH_GRH)
 		ohdr = &priv->s_hdr->u.l.oth;
 
 	/* header size in 32-bit words LRH+BTH = (8+12)/4. */
@@ -337,7 +337,7 @@ send_first:
 		if (test_and_clear_bit(RVT_R_REWIND_SGE, &qp->r_aflags))
 			qp->r_sge = qp->s_rdma_read_sge;
 		else {
-			ret = qib_get_rwqe(qp, 0);
+			ret = rvt_get_rwqe(qp, false);
 			if (ret < 0)
 				goto op_err;
 			if (!ret)
@@ -394,8 +394,8 @@ last_imm:
 		wc.status = IB_WC_SUCCESS;
 		wc.qp = &qp->ibqp;
 		wc.src_qp = qp->remote_qpn;
-		wc.slid = qp->remote_ah_attr.dlid;
-		wc.sl = qp->remote_ah_attr.sl;
+		wc.slid = rdma_ah_get_dlid(&qp->remote_ah_attr);
+		wc.sl = rdma_ah_get_sl(&qp->remote_ah_attr);
 		/* zero fields that are N/A */
 		wc.vendor_err = 0;
 		wc.pkey_index = 0;
@@ -403,8 +403,7 @@ last_imm:
 		wc.port_num = 0;
 		/* Signal completion event if the solicited bit is set. */
 		rvt_cq_enter(ibcq_to_rvtcq(qp->ibqp.recv_cq), &wc,
-			     (ohdr->bth[0] &
-				cpu_to_be32(IB_BTH_SOLICITED)) != 0);
+			     ib_bth_is_solicited(ohdr));
 		break;
 
 	case OP(RDMA_WRITE_FIRST):
@@ -474,7 +473,7 @@ rdma_last_imm:
 		if (test_and_clear_bit(RVT_R_REWIND_SGE, &qp->r_aflags))
 			rvt_put_ss(&qp->s_rdma_read_sge);
 		else {
-			ret = qib_get_rwqe(qp, 1);
+			ret = rvt_get_rwqe(qp, true);
 			if (ret < 0)
 				goto op_err;
 			if (!ret)

@@ -1,3 +1,9 @@
+ifs-kernel-updates (1:3.10.0-957-1777-1ifs+deb9sci9+opa10.9u1) scibian9+opa10.9; urgency=medium
+
+  * New Release for opa10.9 version 3.10.0-957-1777.
+
+ -- MHamed Bouaziz <mhamed-externe.bouaziz@edf.fr>  Tue, 30 Jul 2019 11:35:35 +0200
+
 ifs-kernel-updates (1:3.10.0-957-1777-1ifs+deb9) stretch; urgency=medium
 
     * Import ifs-kernel-updates 3.10.0_957 1777 from

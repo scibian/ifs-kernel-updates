@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -60,6 +60,7 @@
 #include "sdma.h"
 #include "iowait.h"
 #include "trace.h"
+#include "compat.h"
 
 /* must be a power of 2 >= 64 <= 32768 */
 #define SDMA_DESCQ_CNT 2048
@@ -924,9 +925,10 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 	cpumask_var_t mask, new_mask;
 	unsigned long cpu;
 	int ret, vl, sz;
+	struct sdma_rht_node *rht_node;
 
 	vl = sdma_engine_get_vl(sde);
-	if (unlikely(vl < 0))
+	if (unlikely(vl < 0 || vl >= ARRAY_SIZE(rht_node->map)))
 		return -EINVAL;
 
 	ret = zalloc_cpumask_var(&mask, GFP_KERNEL);
@@ -954,17 +956,10 @@ ssize_t sdma_set_cpu_to_sde_map(struct sdma_engine *sde, const char *buf,
 	mutex_lock(&process_to_sde_mutex);
 
 	for_each_cpu(cpu, mask) {
-		struct sdma_rht_node *rht_node;
-
 		/* Check if we have this already mapped */
 		if (cpumask_test_cpu(cpu, &sde->cpu_mask)) {
 			cpumask_set_cpu(cpu, new_mask);
 			continue;
-		}
-
-		if (vl >= ARRAY_SIZE(rht_node->map)) {
-			ret = -EINVAL;
-			goto out;
 		}
 
 		rht_node = rhashtable_lookup_fast(dd->sdma_rht, &cpu,
@@ -1363,7 +1358,7 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 	struct hfi1_pportdata *ppd = dd->pport + port;
 	u32 per_sdma_credits;
 	uint idle_cnt = sdma_idle_cnt;
-	size_t num_engines = dd->chip_sdma_engines;
+	size_t num_engines = chip_sdma_engines(dd);
 	int ret = -ENOMEM;
 
 	if (!HFI1_CAP_IS_KSET(SDMA)) {
@@ -1372,18 +1367,18 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 	}
 	if (mod_num_sdma &&
 	    /* can't exceed chip support */
-	    mod_num_sdma <= dd->chip_sdma_engines &&
+	    mod_num_sdma <= chip_sdma_engines(dd) &&
 	    /* count must be >= vls */
 	    mod_num_sdma >= num_vls)
 		num_engines = mod_num_sdma;
 
 	dd_dev_info(dd, "SDMA mod_num_sdma: %u\n", mod_num_sdma);
-	dd_dev_info(dd, "SDMA chip_sdma_engines: %u\n", dd->chip_sdma_engines);
+	dd_dev_info(dd, "SDMA chip_sdma_engines: %u\n", chip_sdma_engines(dd));
 	dd_dev_info(dd, "SDMA chip_sdma_mem_size: %u\n",
-		    dd->chip_sdma_mem_size);
+		    chip_sdma_mem_size(dd));
 
 	per_sdma_credits =
-		dd->chip_sdma_mem_size / (num_engines * SDMA_BLOCK_SIZE);
+		chip_sdma_mem_size(dd) / (num_engines * SDMA_BLOCK_SIZE);
 
 	/* set up freeze waitqueue */
 	init_waitqueue_head(&dd->sdma_unfreeze_wq);
@@ -1394,7 +1389,8 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		    num_engines, descq_cnt);
 
 	/* alloc memory for array of send engines */
-	dd->per_sdma = kcalloc(num_engines, sizeof(*dd->per_sdma), GFP_KERNEL);
+	dd->per_sdma = kcalloc_node(num_engines, sizeof(*dd->per_sdma),
+				    GFP_KERNEL, dd->node);
 	if (!dd->per_sdma)
 		return ret;
 
@@ -1471,14 +1467,20 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		);
 		if (!sde->descq)
 			goto bail;
+#if defined(KVZALLOC_NODE)
+		sde->tx_ring =
+			kvzalloc_node(sizeof(struct sdma_txreq *) * descq_cnt,
+				      GFP_KERNEL, dd->node);
+#else
 		sde->tx_ring =
 			kcalloc(descq_cnt, sizeof(struct sdma_txreq *),
 				GFP_KERNEL);
 		if (!sde->tx_ring)
 			sde->tx_ring =
 				vzalloc(
-					sizeof(struct sdma_txreq *) *
+					 sizeof(struct sdma_txreq *) *
 					descq_cnt);
+#endif
 		if (!sde->tx_ring)
 			goto bail;
 	}
@@ -1770,11 +1772,10 @@ retry:
  */
 static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 {
-	struct iowait *wait, *nw;
+	struct iowait *wait, *nw, *twait;
 	struct iowait *waits[SDMA_WAIT_BATCH_SIZE];
-	uint i, n = 0, seq, max_idx = 0;
+	uint i, n = 0, seq, tidx = 0;
 	struct hfi1_ibdev *dev = &sde->dd->verbs_dev;
-	u8 max_starved_cnt = 0;
 
 #ifdef CONFIG_SDMA_VERBOSITY
 	dd_dev_err(sde->dd, "CONFIG SDMA(%u) %s:%d %s()\n", sde->this_idx,
@@ -1799,13 +1800,20 @@ static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 					continue;
 				if (n == ARRAY_SIZE(waits))
 					break;
+				iowait_init_priority(wait);
 				num_desc = iowait_get_all_desc(wait);
 				if (num_desc > avail)
 					break;
 				avail -= num_desc;
-				/* Find the most starved wait memeber */
-				iowait_starve_find_max(wait, &max_starved_cnt,
-						       n, &max_idx);
+				/* Find the top-priority wait memeber */
+				if (n) {
+					twait = waits[tidx];
+					tidx =
+					    iowait_priority_update_top(wait,
+								       twait,
+								       n,
+								       tidx);
+				}
 				list_del_init(&wait->list);
 				waits[n++] = wait;
 			}
@@ -1814,12 +1822,12 @@ static void sdma_desc_avail(struct sdma_engine *sde, uint avail)
 		}
 	} while (read_seqretry(&dev->iowait_lock, seq));
 
-	/* Schedule the most starved one first */
+	/* Schedule the top-priority entry first */
 	if (n)
-		waits[max_idx]->wakeup(waits[max_idx], SDMA_AVAIL_REASON);
+		waits[tidx]->wakeup(waits[tidx], SDMA_AVAIL_REASON);
 
 	for (i = 0; i < n; i++)
-		if (i != max_idx)
+		if (i != tidx)
 			waits[i]->wakeup(waits[i], SDMA_AVAIL_REASON);
 }
 
@@ -2451,7 +2459,7 @@ nodesc:
  * @sde: sdma engine to use
  * @wait: SE wait structure to use when full (may be NULL)
  * @tx_list: list of sdma_txreqs to submit
- * @count: pointer to a u32 which, after return will contain the total number of
+ * @count: pointer to a u16 which, after return will contain the total number of
  *         sdma_txreqs removed from the tx_list. This will include sdma_txreqs
  *         whose SDMA descriptors are submitted to the ring and the sdma_txreqs
  *         which are added to SDMA engine flush list if the SDMA engine state is
@@ -2475,7 +2483,7 @@ nodesc:
  * -EIOCBQUEUED - tx queued to iowait, -ECOMM bad sdma state
  */
 int sdma_send_txlist(struct sdma_engine *sde, struct iowait_work *wait,
-		     struct list_head *tx_list, u32 *count_out)
+		     struct list_head *tx_list, u16 *count_out)
 {
 	struct sdma_txreq *tx, *tx_next;
 	int ret = 0;

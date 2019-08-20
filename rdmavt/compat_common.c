@@ -56,7 +56,7 @@
 #include <linux/uaccess.h>
 #include <linux/pci.h>
 #include "../hfi1/hfi.h"
-#if !defined (IFS_SLES15)
+#if !defined (IFS_SLES15) && !defined (IFS_SLES12SP4)
 #include "compat.h"
 #endif
 
@@ -93,7 +93,7 @@ void hfi1_vnic_cleanup(struct hfi1_devdata *dd)
 {
 }
 EXPORT_SYMBOL(hfi1_vnic_cleanup);
-#if !defined(IFS_SLES15)
+#if !defined(IFS_SLES15) && !defined(IFS_SLES12SP4) && !defined(IFS_RH76)
 /*
  * pci_request_irq - allocate an interrupt line for a PCI device
  * @dev:       PCI device to operate on
@@ -152,7 +152,7 @@ void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id)
 }
 EXPORT_SYMBOL(pci_free_irq);
 #endif
-#if !defined(IFS_RH75) && !defined(IFS_SLES15)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES15) && !defined(IFS_SLES12SP4)
 /**
  * cdev_set_parent() - set the parent kobject for a char device
  * @p: the cdev structure

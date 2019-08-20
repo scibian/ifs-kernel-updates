@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015, 2016 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -71,13 +71,6 @@
  * _HFI1_TRACING define as 0 if you want to remove all tracing in a
  * compilation unit
  */
-
-/*
- * If a packet's QP[23:16] bits match this value, then it is
- * a PSM packet and the hardware will expect a KDETH header
- * following the BTH.
- */
-#define DEFAULT_KDETH_QP 0x80
 
 /* driver/hw feature set bitmask */
 #define HFI1_CAP_USER_SHIFT      24
@@ -206,7 +199,7 @@
  * to the driver itself, not the software interfaces it supports.
  */
 #ifndef HFI1_DRIVER_VERSION_BASE
-#define HFI1_DRIVER_VERSION_BASE "10.8-0"
+#define HFI1_DRIVER_VERSION_BASE "10.9-0"
 #endif
 
 /* create the final driver version string */
@@ -330,6 +323,9 @@ struct diag_pkt {
 /* RHF receive type error - bypass packet errors */
 #define RHF_RTE_BYPASS_NO_ERR		0x0
 
+/* MAX RcvSEQ */
+#define RHF_MAX_SEQ 13
+
 /* IB - LRH header constants */
 #define HFI1_LRH_GRH 0x0003      /* 1. word of IB LRH - next header: GRH */
 #define HFI1_LRH_BTH 0x0002      /* 1. word of IB LRH - next header: BTH */
@@ -408,7 +404,8 @@ static inline u32 rhf_egr_buf_offset(u64 rhf)
 	return (rhf >> RHF_EGR_OFFSET_SHIFT) & RHF_EGR_OFFSET_MASK;
 }
 
-#if !defined(IFS_RH75) && !defined(IFS_SLES15)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES15)
+#if !defined(IFS_SLES12SP4)
 static inline int security_ib_pkey_access(void *sec, u64 subnet_prefix, u16 pkey)
 {
         return 0;
@@ -422,7 +419,7 @@ static inline int security_ib_alloc_security(void **sec)
 static inline void security_ib_free_security(void *sec)
 {
 }
-
+#endif /* !IFS_SLES124 */
 static inline int ib_get_cached_subnet_prefix(struct ib_device *device,
 				u8                port_num,
 				u64              *sn_pfx)

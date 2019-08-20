@@ -94,24 +94,13 @@ TRACE_EVENT(hfi1_receive_interrupt,
 	    TP_ARGS(dd, rcd),
 	    TP_STRUCT__entry(DD_DEV_ENTRY(dd)
 			     __field(u32, ctxt)
-			     __field(u8, slow_path)
-			     __field(u8, dma_rtail)
+			     __field(bool, slow_path)
+			     __field(bool, dma_rtail)
 			     ),
 	    TP_fast_assign(DD_DEV_ASSIGN(dd);
 			__entry->ctxt = rcd->ctxt;
-			if (rcd->do_interrupt ==
-			    &handle_receive_interrupt) {
-				__entry->slow_path = 1;
-				__entry->dma_rtail = 0xFF;
-			} else if (rcd->do_interrupt ==
-					&handle_receive_interrupt_dma_rtail){
-				__entry->dma_rtail = 1;
-				__entry->slow_path = 0;
-			} else if (rcd->do_interrupt ==
-					&handle_receive_interrupt_nodma_rtail) {
-				__entry->dma_rtail = 0;
-				__entry->slow_path = 0;
-			}
+			__entry->slow_path = hfi1_is_slowpath(rcd);
+			__entry->dma_rtail = get_dma_rtail_setting(rcd);
 			),
 	    TP_printk("[%s] ctxt %d SlowPath: %d DmaRtail: %d",
 		      __get_str(dev),

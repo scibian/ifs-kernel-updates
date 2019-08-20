@@ -1,7 +1,7 @@
 #ifndef _HFI1_USER_SDMA_H
 #define _HFI1_USER_SDMA_H
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -223,12 +223,12 @@ struct user_sdma_request {
 	s8 ahg_idx;
 
 	/* Writeable fields shared with interrupt */
-	u64 seqcomp ____cacheline_aligned_in_smp;
-	u64 seqsubmitted;
+	u16 seqcomp ____cacheline_aligned_in_smp;
+	u16 seqsubmitted;
 
 	/* Send side fields */
 	struct list_head txps ____cacheline_aligned_in_smp;
-	u64 seqnum;
+	u16 seqnum;
 	/*
 	 * KDETH.OFFSET (TID) field
 	 * The offset can cover multiple packets, depending on the
@@ -265,7 +265,7 @@ struct user_sdma_txreq {
 	struct user_sdma_request *req;
 	u16 flags;
 	unsigned int busycount;
-	u64 seqnum;
+	u16 seqnum;
 };
 
 int hfi1_user_sdma_alloc_queues(struct hfi1_ctxtdata *uctxt,

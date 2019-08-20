@@ -69,6 +69,7 @@
 #define HFI1_VNIC_SC_SHIFT      4
 
 #define HFI1_VNIC_MAX_QUEUE 16
+#define HFI1_NUM_VNIC_CTXT 8
 
 /**
  * struct hfi1_vnic_sdma - VNIC per Tx ring SDMA information
@@ -104,7 +105,6 @@ struct hfi1_vnic_rx_queue {
 	struct hfi1_vnic_vport_info *vinfo;
 	struct net_device           *netdev;
 	struct napi_struct           napi;
-	struct sk_buff_head          skbq;
 };
 
 /**
@@ -146,7 +146,6 @@ struct hfi1_vnic_vport_info {
 
 /* vnic hfi1 internal functions */
 void hfi1_vnic_setup(struct hfi1_devdata *dd);
-void hfi1_vnic_cleanup(struct hfi1_devdata *dd);
 int hfi1_vnic_txreq_init(struct hfi1_devdata *dd);
 void hfi1_vnic_txreq_deinit(struct hfi1_devdata *dd);
 

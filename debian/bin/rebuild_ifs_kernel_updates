@@ -27,13 +27,13 @@ if [ ! -z "$MISSING" ] ; then
 	exit 1
 fi
 
-make -f debian/rules prep
+./debian/rules prep
 if [ $? -ne 0 ]; then
 	echo "FATAL: make prep failed"
 	exit 1
 fi
 
-debuild -us -uc
+debuild -us -uc -i -I
 if [ $? -ne 0 ]; then
 	echo "FATAL: build ifs-kernel-updates failed"
 	exit 1

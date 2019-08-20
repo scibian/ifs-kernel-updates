@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2015 - 2017 Intel Corporation.
+ * Copyright(c) 2015 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -188,15 +188,6 @@ static void flush_iowait(struct rvt_qp *qp)
 	write_sequnlock_irqrestore(lock, flags);
 }
 
-static inline int opa_mtu_enum_to_int(int mtu)
-{
-	switch (mtu) {
-	case OPA_MTU_8192:  return 8192;
-	case OPA_MTU_10240: return 10240;
-	default:            return -1;
-	}
-}
-
 /**
  * This function is what we would push to the core layer if we wanted to be a
  * "first class citizen".  Instead we hide this here and rely on Verbs ULPs
@@ -204,15 +195,10 @@ static inline int opa_mtu_enum_to_int(int mtu)
  */
 static inline int verbs_mtu_enum_to_int(struct ib_device *dev, enum ib_mtu mtu)
 {
-	int val;
-
 	/* Constraining 10KB packets to 8KB packets */
 	if (mtu == (enum ib_mtu)OPA_MTU_10240)
 		mtu = OPA_MTU_8192;
-	val = opa_mtu_enum_to_int((int)mtu);
-	if (val > 0)
-		return val;
-	return ib_mtu_enum_to_int(mtu);
+	return opa_mtu_enum_to_int(mtu);
 }
 
 int hfi1_check_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
@@ -307,6 +293,7 @@ void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
  * hfi1_setup_wqe - setup the wqe
  * @qp - The qp
  * @wqe - The built wqe
+ * @call_send - Determine if the send should be posted or scheduled.
  *
  * Perform setup of the wqe.  This is called
  * prior to inserting the wqe into the ring but after
@@ -317,11 +304,12 @@ void hfi1_modify_qp(struct rvt_qp *qp, struct ib_qp_attr *attr,
  * Returns 0 on success, -EINVAL on failure
  *
  */
-int hfi1_setup_wqe(struct rvt_qp *qp,
-		   struct rvt_swqe *wqe)
+int hfi1_setup_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe, bool *call_send)
 {
 	struct hfi1_ibport *ibp = to_iport(qp->ibqp.device, qp->port_num);
 	struct rvt_ah *ah;
+	struct hfi1_pportdata *ppd;
+	struct hfi1_devdata *dd;
 
 	switch (qp->ibqp.qp_type) {
 	case IB_QPT_RC:
@@ -329,10 +317,20 @@ int hfi1_setup_wqe(struct rvt_qp *qp,
 	case IB_QPT_UC:
 		if (wqe->length > 0x80000000U)
 			return -EINVAL;
+		if (wqe->length > qp->pmtu)
+			*call_send = false;
 		break;
 	case IB_QPT_SMI:
-		ah = ibah_to_rvtah(wqe->ud_wr.ah);
-		if (wqe->length > (1 << ah->log_pmtu))
+		/*
+		 * SM packets should exclusively use VL15 and their SL is
+		 * ignored (IBTA v1.3, Section 3.5.8.2). Therefore, when ah
+		 * is created, SL is 0 in most cases and as a result some
+		 * fields (vl and pmtu) in ah may not be set correctly,
+		 * depending on the SL2SC and SC2VL tables at the time.
+		 */
+		ppd = ppd_from_ibp(ibp);
+		dd = dd_from_ppd(ppd);
+		if (wqe->length > dd->vld[15].mtu)
 			return -EINVAL;
 		break;
 	case IB_QPT_GSI:
@@ -345,7 +343,14 @@ int hfi1_setup_wqe(struct rvt_qp *qp,
 	default:
 		break;
 	}
-	return wqe->length <= piothreshold;
+
+	/*
+	 * System latency between send and schedule is large enough that
+	 * forcing call_send to true for piothreshold packets is necessary.
+	 */
+	if (wqe->length <= piothreshold)
+		*call_send = true;
+	return 0;
 }
 
 /**
@@ -505,6 +510,7 @@ static int iowait_sleep(
 
 			ibp->rvp.n_dmawait++;
 			qp->s_flags |= RVT_S_WAIT_DMA_DESC;
+			iowait_get_priority(&priv->s_iowait);
 			iowait_queue(pkts_sent, &priv->s_iowait,
 				     &sde->dmawait);
 			priv->s_iowait.lock = &dev->iowait_lock;
@@ -552,6 +558,17 @@ static void iowait_sdma_drained(struct iowait *wait)
 		hfi1_schedule_send(qp);
 	}
 	spin_unlock_irqrestore(&qp->s_lock, flags);
+}
+
+static void hfi1_init_priority(struct iowait *w)
+{
+	struct rvt_qp *qp = iowait_to_qp(w);
+	struct hfi1_qp_priv *priv = qp->priv;
+
+	if (qp->s_flags & RVT_S_ACK_PENDING)
+		w->priority++;
+	if (priv->s_flags & RVT_S_ACK_PENDING)
+		w->priority++;
 }
 
 /**
@@ -739,7 +756,8 @@ void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 		_hfi1_do_tid_send,
 		iowait_sleep,
 		iowait_wakeup,
-		iowait_sdma_drained);
+		iowait_sdma_drained,
+		hfi1_init_priority);
 	return priv;
 }
 
@@ -896,7 +914,9 @@ void notify_error_qp(struct rvt_qp *qp)
 		if (!list_empty(&priv->s_iowait.list) &&
 		    !(qp->s_flags & RVT_S_BUSY) &&
 		    !(priv->s_flags & RVT_S_BUSY)) {
-			qp->s_flags &= ~RVT_S_ANY_WAIT_IO;
+			qp->s_flags &= ~HFI1_S_ANY_WAIT_IO;
+			iowait_clear_flag(&priv->s_iowait, IOWAIT_PENDING_IB);
+			iowait_clear_flag(&priv->s_iowait, IOWAIT_PENDING_TID);
 			list_del_init(&priv->s_iowait.list);
 			priv->s_iowait.lock = NULL;
 			rvt_put_qp(qp);

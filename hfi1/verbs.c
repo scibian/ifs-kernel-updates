@@ -68,6 +68,7 @@
 #include "tid_rdma.h"
 #include "fault.h"
 #include "affinity.h"
+#include "ipoib.h"
 
 extern unsigned int selinux_mode;
 
@@ -767,7 +768,12 @@ static inline void hfi1_handle_packet(struct hfi1_packet *packet,
 			wake_up(&mcast->wait);
 	} else {
 		/* Get the destination QP number. */
-		qp_num = ib_bth_get_qpn(packet->ohdr);
+		if (packet->etype == RHF_RCV_TYPE_BYPASS &&
+		    hfi1_16B_get_l4(packet->hdr) == OPA_16B_L4_FM)
+			qp_num = hfi1_16B_get_dest_qpn(packet->mgmt);
+		else
+			qp_num = ib_bth_get_qpn(packet->ohdr);
+
 		rcu_read_lock();
 		packet->qp = rvt_lookup_qpn(rdi, &ibp->rvp, qp_num);
 		if (!packet->qp)
@@ -1188,6 +1194,7 @@ static int pio_wait(struct rvt_qp *qp,
 			dev->n_piodrain += !!(flag & HFI1_S_WAIT_PIO_DRAIN);
 			qp->s_flags |= flag;
 			was_empty = list_empty(&sc->piowait);
+			iowait_get_priority(&priv->s_iowait);
 			iowait_queue(ps->pkts_sent, &priv->s_iowait,
 				     &sc->piowait);
 			priv->s_iowait.lock = &dev->iowait_lock;
@@ -1328,6 +1335,8 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 
 				if (slen > len)
 					slen = len;
+				if (slen > ps->s_txreq->ss->sge.sge_length)
+					slen = ps->s_txreq->ss->sge.sge_length;
 				rvt_update_sge(ps->s_txreq->ss, slen, false);
 				seg_pio_copy_mid(pbuf, addr, slen);
 				len -= slen;
@@ -1513,21 +1522,23 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 {
 	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
 	struct hfi1_qp_priv *priv = qp->priv;
-	struct ib_other_headers *ohdr;
+	struct ib_other_headers *ohdr = NULL;
 	send_routine sr;
 	int ret;
 	u16 pkey;
 	u32 slid;
+	u8 l4 = 0;
 
 	/* locate the pkey within the headers */
 	if (ps->s_txreq->phdr.hdr.hdr_type) {
 		struct hfi1_16b_header *hdr = &ps->s_txreq->phdr.hdr.opah;
-		u8 l4 = hfi1_16B_get_l4(hdr);
 
-		if (l4 == OPA_16B_L4_IB_GLOBAL)
-			ohdr = &hdr->u.l.oth;
-		else
+		l4 = hfi1_16B_get_l4(hdr);
+		if (l4 == OPA_16B_L4_IB_LOCAL)
 			ohdr = &hdr->u.oth;
+		else if (l4 == OPA_16B_L4_IB_GLOBAL)
+			ohdr = &hdr->u.l.oth;
+
 		slid = hfi1_16B_get_slid(hdr);
 		pkey = hfi1_16B_get_pkey(hdr);
 	} else {
@@ -1542,7 +1553,11 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 		pkey = ib_bth_get_pkey(ohdr);
 	}
 
-	ps->opcode = ib_bth_get_opcode(ohdr);
+	if (likely(l4 != OPA_16B_L4_FM))
+		ps->opcode = ib_bth_get_opcode(ohdr);
+	else
+		ps->opcode = IB_OPCODE_UD_SEND_ONLY;
+
 	sr = get_send_routine(qp, ps);
 	ret = egress_pkey_check(dd->pport, slid, pkey,
 				priv->s_sc, qp->s_pkey_index);
@@ -1571,8 +1586,7 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 				ps->s_txreq->psc,
 				ps,
 				HFI1_S_WAIT_PIO_DRAIN);
-	ret = sr(qp, ps, 0);
-	return ret;
+	return sr(qp, ps, 0);
 }
 
 /**
@@ -1595,7 +1609,7 @@ static void hfi1_fill_device_attr(struct hfi1_devdata *dd)
 			IB_DEVICE_SYS_IMAGE_GUID | IB_DEVICE_RC_RNR_NAK_GEN |
 			IB_DEVICE_PORT_ACTIVE_EVENT | IB_DEVICE_SRQ_RESIZE |
 			IB_DEVICE_MEM_MGT_EXTENSIONS |
-			IB_DEVICE_RDMA_NETDEV_OPA_VNIC;
+			IB_DEVICE_RDMA_NETDEV;
 	rdi->dparms.props.page_size_cap = PAGE_SIZE;
 	rdi->dparms.props.vendor_id = dd->oui1 << 16 | dd->oui2 << 8 | dd->oui3;
 	rdi->dparms.props.vendor_part_id = dd->pcidev->device;
@@ -1787,6 +1801,7 @@ static int hfi1_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr)
 	struct hfi1_pportdata *ppd;
 	struct hfi1_devdata *dd;
 	u8 sc5;
+	u8 sl;
 
 	if (hfi1_check_mcast(rdma_ah_get_dlid(ah_attr)) &&
 	    !(rdma_ah_get_ah_flags(ah_attr) & IB_AH_GRH))
@@ -1795,8 +1810,13 @@ static int hfi1_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr)
 	/* test the mapping for validity */
 	ibp = to_iport(ibdev, rdma_ah_get_port_num(ah_attr));
 	ppd = ppd_from_ibp(ibp);
-	sc5 = ibp->sl_to_sc[rdma_ah_get_sl(ah_attr)];
 	dd = dd_from_ppd(ppd);
+
+	sl = rdma_ah_get_sl(ah_attr);
+	if (sl >= ARRAY_SIZE(ibp->sl_to_sc))
+		return -EINVAL;
+
+	sc5 = ibp->sl_to_sc[sl];
 	if (sc_to_vlt(dd, sc5) > num_vls && sc_to_vlt(dd, sc5) != 0xf)
 		return -EINVAL;
 	return 0;
@@ -1914,7 +1934,7 @@ static const char * const driver_cntr_names[] = {
 static DEFINE_MUTEX(cntr_names_lock); /* protects the *_cntr_names bufers */
 static const char **dev_cntr_names;
 static const char **port_cntr_names;
-static int num_driver_cntrs = ARRAY_SIZE(driver_cntr_names);
+int num_driver_cntrs = ARRAY_SIZE(driver_cntr_names);
 static int num_dev_cntrs;
 static int num_port_cntrs;
 static int cntr_names_initialized;
@@ -2056,6 +2076,48 @@ static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats,
 	return count;
 }
 #endif
+
+#ifdef AIP
+static struct net_device *hfi1_alloc_rn(struct ib_device *device,
+					u8 port_num,
+					enum rdma_netdev_t type,
+					const char *name,
+					unsigned char name_assign_type,
+					void (*setup)(struct net_device *))
+{
+	struct net_device *dev;
+
+	switch (type) {
+
+#ifdef	CONFIG_INFINIBAND_OPA_VNIC
+	case RDMA_NETDEV_OPA_VNIC:
+		dev = hfi1_vnic_alloc_rn(device,
+					 port_num,
+					 type,
+					 name,
+					 name_assign_type,
+					 setup);
+		break;
+#endif
+
+	case RDMA_NETDEV_IPOIB:
+		dev = hfi1_ipoib_alloc_rn(device,
+					  port_num,
+					  type,
+					  name,
+					  name_assign_type,
+					  setup);
+		break;
+
+	default:
+		dev = ERR_PTR(-EOPNOTSUPP);
+		break;
+	}
+
+	return dev;
+}
+#endif
+
 /**
  * hfi1_register_ib_device - register our device with the infiniband core
  * @dd: the device data structure
@@ -2108,8 +2170,9 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	ibdev->alloc_hw_stats = alloc_hw_stats;
 	ibdev->get_hw_stats = get_hw_stats;
 #endif
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_SLES15)
-	ibdev->alloc_rdma_netdev = hfi1_vnic_alloc_rn;
+
+#ifdef AIP
+	ibdev->alloc_rdma_netdev = hfi1_alloc_rn; /* May not be in all distro kernels might need a guard */
 #endif
 	/* keep process mad in the driver */
 	ibdev->process_mad = hfi1_process_mad;
@@ -2140,9 +2203,8 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	dd->verbs_dev.rdi.dparms.qpn_start = 0;
 	dd->verbs_dev.rdi.dparms.qpn_inc = 1;
 	dd->verbs_dev.rdi.dparms.qos_shift = dd->qos_shift;
-	dd->verbs_dev.rdi.dparms.qpn_res_start = kdeth_qp << 16;
-	dd->verbs_dev.rdi.dparms.qpn_res_end =
-	dd->verbs_dev.rdi.dparms.qpn_res_start + 65535;
+	dd->verbs_dev.rdi.dparms.qpn_res_start = RVT_KDETH_QP_BASE;
+	dd->verbs_dev.rdi.dparms.qpn_res_end = RVT_AIP_QP_MAX;
 	dd->verbs_dev.rdi.dparms.max_rdma_atomic = HFI1_MAX_RDMA_ATOMIC;
 	dd->verbs_dev.rdi.dparms.psn_mask = PSN_MASK;
 	dd->verbs_dev.rdi.dparms.psn_shift = PSN_SHIFT;

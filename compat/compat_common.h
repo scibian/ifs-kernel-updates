@@ -58,6 +58,7 @@
 #include <linux/pci.h>
 #include <linux/msi.h>
 #include <linux/kthread.h>
+#include <rdma/opa_port_info.h>
 
 #define IB_QPN_MASK     0xFFFFFF
 #include <rdma/ib_hdrs.h>
@@ -71,7 +72,7 @@
 #define MAX_NICE        19
 #define MIN_NICE        -20
 #define NICE_WIDTH      (MAX_NICE - MIN_NICE + 1)
-#define IB_DEVICE_RDMA_NETDEV_OPA_VNIC	0
+#define IB_DEVICE_RDMA_NETDEV_OPA_VNIC	(1ULL << 35)
 #define IB_DEVICE_NODE_DESC_MAX 64
 #undef __get_dynamic_array_len
 #define __get_dynamic_array_len(field)	\
@@ -79,7 +80,7 @@
 
 #define  IB_PORT_OPA_MASK_CHG			  BIT(4)
 
-#if !defined(IFS_SLES15)
+#if !defined(IFS_SLES15) && !defined(IFS_SLES12SP4)
 #define  current_time(inode)			  CURRENT_TIME
 #endif
 
@@ -115,7 +116,7 @@ int pci_request_irq(struct pci_dev *dev, unsigned int nr,
 		    void *dev_id, const char *fmt, ...);
 void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id);
 
-#define NEED_MM_HELPER_FUNCTIONS (!defined(IFS_SLES15))
+#define NEED_MM_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
 
 #if NEED_MM_HELPER_FUNCTIONS
 /**
@@ -141,7 +142,7 @@ static inline void mmgrab(struct mm_struct *mm)
 }
 #endif
 
-#define NEED_IB_HELPER_FUNCTIONS (!defined(IFS_RH75) && !defined(IFS_SLES15))
+#define NEED_IB_HELPER_FUNCTIONS (!defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
 
 #if NEED_IB_HELPER_FUNCTIONS
 struct opa_class_port_info {
@@ -404,7 +405,7 @@ static inline enum rdma_ah_attr_type rdma_ah_find_type(struct ib_device *dev,
 }
 
 #endif /* NEED_IB_HELPER_FUNCTIONS */
-#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15))
+#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
 
 #if NEED_KTHREAD_HELPER_FUNCTIONS
 static inline bool kthread_queue_work(struct kthread_worker *worker,
@@ -469,9 +470,117 @@ static inline void kthread_destroy_worker(struct kthread_worker *worker)
  *  For SELinux until our patches are accepted by the distro
  */
 
-#if defined(IFS_RH75) || defined(IFS_SLES15)
+#if defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_SLES15)
 int ib_get_cached_subnet_prefix(struct ib_device *device,
 				u8                port_num,
 				u64              *sn_pfx);
 #endif
+
+#if !defined(IFS_RH76)
+static inline void *kmalloc_array_node(size_t n, size_t size, gfp_t flags, int node)
+{
+	if (size != 0 && n > SIZE_MAX / size)
+		return NULL;
+	if (__builtin_constant_p(n) && __builtin_constant_p(size))
+		return kmalloc_node(n * size, flags, node);
+	return __kmalloc_node(n * size, flags, node);
+}
+
+static inline void *kcalloc_node(size_t n, size_t size, gfp_t flags, int node)
+{
+	return kmalloc_array_node(n, size, flags | __GFP_ZERO, node);
+}
+#endif
+
+#define rdma_netdev ifs_aip_rdma_netdev
+
+struct ifs_aip_rdma_netdev {
+        void              *clnt_priv;
+        struct ib_device  *hca;
+        u8                 port_num;
+        int                mtu;
+
+        /*
+         * cleanup function must be specified.
+         * FIXME: This is only used for OPA_VNIC and that usage should be
+         * removed too.
+         */
+        void (*free_rdma_netdev)(struct net_device *netdev);
+
+        /* control functions */
+        void (*set_id)(struct net_device *netdev, int id);
+        /* send packet */
+        int (*send)(struct net_device *dev, struct sk_buff *skb,
+                    struct ib_ah *address, u32 dqpn);
+        /* multicast */
+        int (*attach_mcast)(struct net_device *dev, struct ib_device *hca,
+                            union ib_gid *gid, u16 mlid,
+                            int set_qkey, u32 qkey);
+        int (*detach_mcast)(struct net_device *dev, struct ib_device *hca,
+                            union ib_gid *gid, u16 mlid);
+};
+
+#define IB_DEVICE_RDMA_NETDEV IB_DEVICE_RDMA_NETDEV_OPA_VNIC
+#define IB_QP_CREATE_NETDEV_USE (1 << 7)
+
+#ifndef atomic_try_cmpxchg
+#define __atomic_try_cmpxchg(type, _p, _po, _n)                         \
+({                                                                      \
+        typeof(_po) __po = (_po);                                       \
+        typeof(*(_po)) __r, __o = *__po;                                \
+        __r = atomic_cmpxchg##type((_p), __o, (_n));                    \
+        if (unlikely(__r != __o))                                       \
+                *__po = __r;                                            \
+        likely(__r == __o);                                             \
+})
+
+#define atomic_try_cmpxchg(_p, _po, _n)         __atomic_try_cmpxchg(, _p, _po, _n)
+
+#endif
+
+#ifndef atomic_fetch_add_unless
+static inline int atomic_fetch_add_unless(atomic_t *v, int a, int u)
+{
+        int c = atomic_read(v);
+
+        do {
+                if (unlikely(c == u))
+                        break;
+        } while (!atomic_try_cmpxchg(v, &c, c + a));
+
+        return c;
+}
+#endif
+
+static inline bool rdma_core_cap_opa_port(struct ib_device *device,
+					  u32 port_num)
+{
+	if (!device)
+		return false;
+
+	return (device->port_immutable[port_num].core_cap_flags & RDMA_CORE_PORT_INTEL_OPA)
+		== RDMA_CORE_PORT_INTEL_OPA;
+}
+
+static inline int opa_mtu_enum_to_int(int mtu)
+{
+	switch (mtu) {
+	case OPA_MTU_8192:
+		return 8192;
+	case OPA_MTU_10240:
+		return 10240;
+	default:
+		return(ib_mtu_enum_to_int(mtu));
+	}
+}
+
+static inline int rdma_mtu_enum_to_int(struct ib_device *device, u8 port,
+				       int mtu)
+{
+	if (rdma_core_cap_opa_port(device, port))
+		return opa_mtu_enum_to_int(mtu);
+	else
+		return ib_mtu_enum_to_int((enum ib_mtu)mtu);
+}
+
 #endif

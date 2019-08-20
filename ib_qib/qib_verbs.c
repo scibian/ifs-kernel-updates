@@ -1377,13 +1377,13 @@ struct ib_ah *qib_create_qp0_ah(struct qib_ibport *ibp, u16 dlid)
 	struct ib_ah *ah = ERR_PTR(-EINVAL);
 	struct rvt_qp *qp0;
 	struct qib_pportdata *ppd = ppd_from_ibp(ibp);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 	struct qib_devdata *dd = dd_from_ppd(ppd);
 #endif
 	u8 port_num = ppd->port;
 
 	memset(&attr, 0, sizeof(attr));
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 	attr.type = rdma_ah_find_type(&dd->verbs_dev.rdi.ibdev, port_num);
 #endif
 	rdma_ah_set_dlid(&attr, dlid);

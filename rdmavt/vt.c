@@ -777,9 +777,9 @@ int rvt_register_device(struct rvt_dev_info *rdi)
 	spin_lock_init(&rdi->n_cqs_lock);
 
 	/* DMA Operations */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
-#elif defined(IFS_RH75)
+#elif defined(IFS_RH75) || defined(IFS_RH76)
 	rdi->ibdev.dev.device_rh->dma_ops =
 		rdi->ibdev.dev.device_rh->dma_ops ? : &dma_virt_ops;
 #else

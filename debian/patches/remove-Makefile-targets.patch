@@ -12,14 +12,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  ifneq ($(KERNELRELEASE),)
  #kbuild part of makefile
  
--CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_RH75
--obj-y := rdmavt/ hfi1/ ib_qib/
+-CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_RH76
+-obj-y := rdmavt/ hfi1/ ib_qib/ ib_ipoib/
 +CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_DEB8
 +obj-y :=
  
  else
  #normal makefile
-@@ -21,7 +21,7 @@
+@@ -21,6 +21,6 @@
  	$(MAKE) -C $(KDIR) M=$$PWD clean
  
  install:
@@ -27,4 +27,3 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	$(MAKE) INSTALL_MOD_PATH=$(DESTDIR) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
  
  endif
- 

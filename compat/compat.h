@@ -44,10 +44,12 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-#if !defined(RH75_COMPAT_H)
-#define RH75_COMPAT_H
+#if !defined(RH76_COMPAT_H)
+#define RH76_COMPAT_H
 
 #include "compat_common.h"
+
+#define KVZALLOC_NODE 1
 
 #define __GFP_RECLAIM	(__GFP_WAIT)
 
@@ -57,13 +59,13 @@
 #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
 #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
 
+#define NET_NAME_UNKNOWN 0
+
 struct hfi1_msix_entry;
 struct hfi1_devdata;
 
 void pcie_flr(struct pci_dev *dev);
 
-void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
-		struct hfi1_msix_entry *hfi1_msix_entry);
 int bitmap_print_to_pagebuf(bool list, char *buf,
 			    const unsigned long *maskp, int nmaskbits);
 int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
@@ -107,4 +109,4 @@ static inline void hfi1_enable_intx(struct pci_dev *pdev)
 #define for_each_msi_entry(desc, dev)   \
 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
 
-#endif //RH75_COMPAT
+#endif //RH76_COMPAT

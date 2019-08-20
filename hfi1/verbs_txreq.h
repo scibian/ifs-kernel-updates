@@ -1,5 +1,5 @@
 /*
- * Copyright(c) 2016 Intel Corporation.
+ * Copyright(c) 2016 - 2018 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -83,7 +83,7 @@ static inline struct verbs_txreq *get_txreq(struct hfi1_ibdev *dev,
 	if (unlikely(!tx)) {
 		/* call slow path to get the lock */
 		tx = __get_txreq(dev, qp);
-		if (IS_ERR(tx))
+		if (!tx)
 			return tx;
 	}
 	tx->qp = qp;
@@ -94,6 +94,7 @@ static inline struct verbs_txreq *get_txreq(struct hfi1_ibdev *dev,
 	tx->txreq.num_desc = 0;
 	/* Set the header type */
 	tx->phdr.hdr.hdr_type = priv->hdr_type;
+	tx->txreq.flags = 0;
 	return tx;
 }
 

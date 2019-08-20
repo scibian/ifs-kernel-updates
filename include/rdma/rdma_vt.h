@@ -199,7 +199,6 @@ struct rvt_ah {
 #define HAVE_IB_QP_CREATE_USE_GFP_NOIO \
 	(defined(IFS_RH73) || \
 	defined(IFS_RH74) || \
-	defined(IFS_RH75) || \
 	defined(IFS_SLES12SP2) || \
 	defined(IFS_SLES12SP3))
 
@@ -235,7 +234,8 @@ struct rvt_driver_provided {
 	 * underlying protocols. This includes private data structure
 	 * allocations.
 	 */
-	int (*setup_wqe)(struct rvt_qp *qp, struct rvt_swqe *wqe);
+	int (*setup_wqe)(struct rvt_qp *qp, struct rvt_swqe *wqe,
+		         bool *call_send);
 
 	/*
 	 * Sometimes rdmavt needs to kick the driver's send progress. That is

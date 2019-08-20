@@ -7,8 +7,8 @@
 ifneq ($(KERNELRELEASE),)
 #kbuild part of makefile
 
-CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_RH75
-obj-y := rdmavt/ hfi1/ ib_qib/
+CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_RH76
+obj-y := rdmavt/ hfi1/ ib_qib/ ib_ipoib/
 
 else
 #normal makefile
@@ -24,4 +24,3 @@ install:
 	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
 
 endif
-

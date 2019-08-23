@@ -1,3 +1,9 @@
+ifs-kernel-updates (1:3.10.0-957-1777-1ifs+deb9sci9+opa10.9u3) scibian9+opa10.9; urgency=medium
+
+  * New release to fix scibian maintainer and vcs.
+
+ -- MHamed Bouaziz <mhamed-externe.bouaziz@edf.fr>  Fri, 23 Aug 2019 13:20:19 +0200
+
 ifs-kernel-updates (1:3.10.0-957-1777-1ifs+deb9sci9+opa10.9u2) scibian9+opa10.9; urgency=medium
 
   * Add kmod-ifs-kernel-updates metapackage and scibianize the package

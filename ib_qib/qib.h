@@ -1187,7 +1187,7 @@ int qib_set_lid(struct qib_pportdata *, u32, u8);
 void qib_hol_down(struct qib_pportdata *);
 void qib_hol_init(struct qib_pportdata *);
 void qib_hol_up(struct qib_pportdata *);
-void qib_hol_event(unsigned long);
+void qib_hol_event(struct timer_list *);
 void qib_disable_after_error(struct qib_devdata *);
 int qib_set_uevent_bits(struct qib_pportdata *, const int);
 
@@ -1302,7 +1302,7 @@ void qib_get_eeprom_info(struct qib_devdata *);
 #define qib_inc_eeprom_err(dd, eidx, incr)
 void qib_dump_lookup_output_queue(struct qib_devdata *);
 void qib_force_pio_avail_update(struct qib_devdata *);
-void qib_clear_symerror_on_linkup(unsigned long opaque);
+void qib_clear_symerror_on_linkup(struct timer_list *t);
 
 /*
  * Set LED override, only the two LSBs have "public" meaning, but
@@ -1412,13 +1412,18 @@ static inline u32 qib_get_hdrqtail(const struct qib_ctxtdata *rcd)
  */
 
 extern const char ib_qib_version[];
+#if defined (IFS_SLES15SP1)
+extern const struct attribute_group qib_attr_group;
+#endif
 
 int qib_device_create(struct qib_devdata *);
 void qib_device_remove(struct qib_devdata *);
 
 int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 			  struct kobject *kobj);
+#if !defined (IFS_SLES15SP1)
 int qib_verbs_register_sysfs(struct qib_devdata *);
+#endif
 void qib_verbs_unregister_sysfs(struct qib_devdata *);
 /* Hook for sysfs read of QSFP */
 extern int qib_qsfp_dump(struct qib_pportdata *ppd, char *buf, int len);

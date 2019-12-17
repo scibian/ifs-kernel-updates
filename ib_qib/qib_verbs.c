@@ -389,9 +389,9 @@ drop:
  * This is called from a timer to check for QPs
  * which need kernel memory in order to send a packet.
  */
-static void mem_timer(unsigned long data)
+static void mem_timer(struct timer_list *t)
 {
-	struct qib_ibdev *dev = (struct qib_ibdev *) data;
+	struct qib_ibdev *dev = from_timer(dev, t, mem_timer);
 	struct list_head *list = &dev->memwait;
 	struct rvt_qp *qp = NULL;
 	struct qib_qp_priv *priv = NULL;
@@ -1494,7 +1494,12 @@ static void qib_fill_device_attr(struct qib_devdata *dd)
 	rdi->dparms.props.max_mr_size = ~0ULL;
 	rdi->dparms.props.max_qp = ib_qib_max_qps;
 	rdi->dparms.props.max_qp_wr = ib_qib_max_qp_wrs;
+#if !defined(IFS_SLES15SP1)
 	rdi->dparms.props.max_sge = ib_qib_max_sges;
+#else
+	rdi->dparms.props.max_send_sge = ib_qib_max_sges;
+	rdi->dparms.props.max_recv_sge = ib_qib_max_sges;
+#endif
 	rdi->dparms.props.max_sge_rd = ib_qib_max_sges;
 	rdi->dparms.props.max_cq = ib_qib_max_cqs;
 	rdi->dparms.props.max_cqe = ib_qib_max_cqes;
@@ -1536,7 +1541,7 @@ int qib_register_ib_device(struct qib_devdata *dd)
 		init_ibport(ppd + i);
 
 	/* Only need to initialize non-zero fields. */
-	setup_timer(&dev->mem_timer, mem_timer, (unsigned long)dev);
+	timer_setup(&dev->mem_timer, mem_timer, 0);
 
 	INIT_LIST_HEAD(&dev->piowait);
 	INIT_LIST_HEAD(&dev->dmawait);
@@ -1650,19 +1655,25 @@ int qib_register_ib_device(struct qib_devdata *dd)
 			      i,
 			      dd->rcd[ctxt]->pkeys);
 	}
-
+#if !defined(IFS_SLES15SP1)
 	ret = rvt_register_device(&dd->verbs_dev.rdi);
+#else
+	rdma_set_device_sysfs_group(&dd->verbs_dev.rdi.ibdev, &qib_attr_group);
+
+	ret = rvt_register_device(&dd->verbs_dev.rdi, RDMA_DRIVER_QIB);
+#endif
 	if (ret)
 		goto err_tx;
-
+#if !defined(IFS_SLES15SP1)
 	ret = qib_verbs_register_sysfs(dd);
 	if (ret)
 		goto err_class;
-
+#endif
 	return ret;
-
+#if !defined(IFS_SLES15SP1)
 err_class:
 	rvt_unregister_device(&dd->verbs_dev.rdi);
+#endif
 err_tx:
 	while (!list_empty(&dev->txreq_free)) {
 		struct list_head *l = dev->txreq_free.next;

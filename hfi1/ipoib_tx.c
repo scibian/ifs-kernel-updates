@@ -60,12 +60,14 @@
  * @txreq: sdma transmit request
  * @sdma_hdr: 9b ib headers
  * @priv: ipoib netdev private data
+ * @txq: txq on which skb was output
  * @skb: skb to send
  */
 struct ipoib_txreq {
 	struct sdma_txreq           txreq;
 	struct hfi1_sdma_header     sdma_hdr;
 	struct hfi1_ipoib_dev_priv *priv;
+	struct hfi1_ipoib_txq      *txq;
 	struct sk_buff             *skb;
 };
 
@@ -80,24 +82,49 @@ struct ipoib_txparms {
 	u8                          entropy;
 };
 
+static u64 hfi1_ipoib_skbs(const u64 sent, const u64 completed)
+{
+	return sent - completed;
+}
+
+static void hfi1_ipoib_check_queue_depth(struct hfi1_ipoib_txq *txq)
+{
+	if (unlikely(hfi1_ipoib_skbs(++txq->sent_skbs,
+				     atomic64_read(&txq->complete_skbs)) >=
+	    txq->priv->netdev->tx_queue_len))
+		netif_stop_subqueue(txq->priv->netdev, txq->q_idx);
+}
+
 static void hfi1_ipoib_sdma_complete(struct sdma_txreq *txreq, int status)
 {
 	struct ipoib_txreq *tx = container_of(txreq, struct ipoib_txreq, txreq);
+	struct hfi1_ipoib_txq *txq = tx->txq;
 	struct sk_buff *skb = tx->skb;
 	struct hfi1_ipoib_dev_priv *priv = tx->priv;
 	struct net_device *netdev = priv->netdev;
+	u64 inflight;
 
 	if (status == 0) {
 		hfi1_ipoib_update_tx_netstats(priv, 1, skb->len);
 	} else {
 		++netdev->stats.tx_errors;
-		dd_dev_warn(priv->dd, "%s: Status = 0x%x pbc 0x%llx\n",
-			    __func__, status, le64_to_cpu(tx->sdma_hdr.pbc));
+		dd_dev_warn(priv->dd,
+			    "%s: Status = 0x%x pbc 0x%llx txq = %d sde = %d\n",
+			    __func__, status, le64_to_cpu(tx->sdma_hdr.pbc),
+			    txq->q_idx, txq->sde->this_idx);
 	}
 
 	sdma_txclean(priv->dd, txreq);
 	dev_kfree_skb_any(skb);
 	kmem_cache_free(priv->txreq_cache, tx);
+
+	inflight = hfi1_ipoib_skbs(txq->sent_skbs,
+				   atomic64_inc_return(&txq->complete_skbs));
+
+	if (likely(netdev->reg_state == NETREG_REGISTERED) &&
+	    unlikely(__netif_subqueue_stopped(netdev, txq->q_idx)) &&
+	    inflight < netdev->tx_queue_len >> 1)
+		netif_wake_subqueue(netdev, txq->q_idx);
 }
 
 static int hfi1_ipoib_build_ulp_payload(struct ipoib_txreq *tx,
@@ -230,7 +257,7 @@ static void hfi1_ipoib_build_ib_tx_headers(struct ipoib_txreq *tx,
 
 	ohdr->bth[0] = cpu_to_be32(bth0);
 	ohdr->bth[1] = cpu_to_be32(txp->dqpn);
-	ohdr->bth[2] = cpu_to_be32(mask_psn(txp->txq->psn));
+	ohdr->bth[2] = cpu_to_be32(mask_psn((u32)txp->txq->sent_skbs));
 
 	/* Build the deth */
 	ohdr->u.ud.deth[0] = cpu_to_be32(priv->qkey);
@@ -265,6 +292,7 @@ static struct ipoib_txreq *hfi1_ipoib_send_dma_common(struct net_device *dev,
 	/* so that we can test if the sdma decriptors are there */
 	tx->txreq.num_desc = 0;
 	tx->priv = priv;
+	tx->txq = txp->txq;
 	tx->skb = skb;
 
 	hfi1_ipoib_build_ib_tx_headers(tx, txp);
@@ -369,6 +397,7 @@ static int hfi1_ipoib_send_dma_single(struct net_device *dev,
 		trace_sdma_output_ibhdr(tx->priv->dd,
 					&tx->sdma_hdr.hdr,
 					ib_is_sc5(txp->flow.sc5));
+		hfi1_ipoib_check_queue_depth(txq);
 		return NETDEV_TX_OK;
 	}
 
@@ -380,11 +409,14 @@ static int hfi1_ipoib_send_dma_single(struct net_device *dev,
 		trace_sdma_output_ibhdr(tx->priv->dd,
 					&tx->sdma_hdr.hdr,
 					ib_is_sc5(txp->flow.sc5));
+		hfi1_ipoib_check_queue_depth(txq);
 		return NETDEV_TX_OK;
 	}
 
-	if (ret == -ECOMM)
+	if (ret == -ECOMM) {
+		hfi1_ipoib_check_queue_depth(txq);
 		return NETDEV_TX_OK;
+	}
 
 	sdma_txclean(priv->dd, &tx->txreq);
 	dev_kfree_skb_any(skb);
@@ -420,6 +452,8 @@ static int hfi1_ipoib_send_dma_list(struct net_device *dev,
 	}
 
 	list_add_tail(&tx->txreq.list, &txq->tx_list);
+
+	hfi1_ipoib_check_queue_depth(txq);
 
 	trace_sdma_output_ibhdr(tx->priv->dd,
 				&tx->sdma_hdr.hdr,
@@ -469,7 +503,6 @@ int hfi1_ipoib_send_dma(struct net_device *dev,
 	txp.ibp = to_iport(priv->device, priv->port_num);
 	txp.txq = &priv->txqs[skb_get_queue_mapping(skb)];
 	txp.dqpn = dqpn;
-	txp.txq->psn++;
 	txp.flow.sc5 = txp.ibp->sl_to_sc[rdma_ah_get_sl(txp.ah_attr)];
 	txp.flow.tx_queue = (u8)skb_get_queue_mapping(skb);
 	txp.entropy = hfi1_ipoib_calc_entropy(skb);
@@ -597,7 +630,8 @@ int hfi1_ipoib_txreq_init(struct hfi1_ipoib_dev_priv *priv)
 		txq->priv = priv;
 		txq->sde = NULL;
 		INIT_LIST_HEAD(&txq->tx_list);
-		txq->psn = 0;
+		txq->sent_skbs = 0;
+		atomic64_set(&txq->complete_skbs, 0);
 		txq->q_idx = i;
 		txq->flow.tx_queue = 0xff;
 		txq->flow.sc5 = 0xff;
@@ -614,15 +648,25 @@ static void hfi1_ipoib_drain_tx_list(struct hfi1_ipoib_txq *txq)
 {
 	struct sdma_txreq *txreq;
 	struct sdma_txreq *txreq_tmp;
+	atomic64_t *complete_skbs = &txq->complete_skbs;
 
 	list_for_each_entry_safe(txreq, txreq_tmp, &txq->tx_list, list) {
 		struct ipoib_txreq *tx =
 			container_of(txreq, struct ipoib_txreq, txreq);
+
 		list_del(&txreq->list);
 		sdma_txclean(txq->priv->dd, &tx->txreq);
 		dev_kfree_skb_any(tx->skb);
 		kmem_cache_free(txq->priv->txreq_cache, tx);
+		atomic64_inc(complete_skbs);
 	}
+
+	if (hfi1_ipoib_skbs(txq->sent_skbs, atomic64_read(complete_skbs)))
+		dd_dev_warn(txq->priv->dd,
+			    "txq %d not empty found %llu requests\n",
+			    txq->q_idx,
+			    hfi1_ipoib_skbs(txq->sent_skbs,
+					    atomic64_read(complete_skbs)));
 }
 
 void hfi1_ipoib_txreq_deinit(struct hfi1_ipoib_dev_priv *priv)

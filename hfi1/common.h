@@ -404,7 +404,7 @@ static inline u32 rhf_egr_buf_offset(u64 rhf)
 	return (rhf >> RHF_EGR_OFFSET_SHIFT) & RHF_EGR_OFFSET_MASK;
 }
 
-#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES15)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_RH80)
 #if !defined(IFS_SLES12SP4)
 static inline int security_ib_pkey_access(void *sec, u64 subnet_prefix, u16 pkey)
 {

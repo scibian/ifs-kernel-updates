@@ -3421,10 +3421,10 @@ ack_op_err:
 	spin_unlock_irqrestore(&qp->s_lock, flags);
 }
 
-static void hfi1_tid_timeout(unsigned long arg)
+static void hfi1_tid_timeout(struct timer_list *t)
 {
-	struct rvt_qp *qp = (struct rvt_qp *)arg;
-	struct hfi1_qp_priv *qpriv = qp->priv;
+	struct hfi1_qp_priv *qpriv = from_timer(qpriv, t, s_tid_timer);
+	struct rvt_qp *qp = qpriv->owner;
 	struct rvt_dev_info *rdi = ib_to_rvt(qp->ibqp.device);
 	unsigned long flags;
 	u32 i;
@@ -4076,10 +4076,10 @@ bool hfi1_tid_rdma_ack_interlock(struct rvt_qp *qp, struct rvt_ack_entry *e)
 	return false;
 }
 
-static void hfi1_tid_retry_timeout(unsigned long arg)
+static void hfi1_tid_retry_timeout(struct timer_list *t)
 {
-	struct rvt_qp *qp = (struct rvt_qp *)arg;
-	struct hfi1_qp_priv *priv = qp->priv;
+	struct hfi1_qp_priv *priv = from_timer(priv, t, s_tid_retry_timer);
+	struct rvt_qp *qp = priv->owner;
 	struct rvt_swqe *wqe;
 	unsigned long flags;
 	struct tid_rdma_request *req;
@@ -4398,9 +4398,8 @@ int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 	qpriv->r_tid_ack = HFI1_QP_WQE_INVALID;
 	atomic_set(&qpriv->n_requests, 0);
 	atomic_set(&qpriv->n_tid_requests, 0);
-	setup_timer(&qpriv->s_tid_timer, hfi1_tid_timeout, (unsigned long)qp);
-	setup_timer(&qpriv->s_tid_retry_timer, hfi1_tid_retry_timeout,
-		    (unsigned long)qp);
+	timer_setup(&qpriv->s_tid_timer, hfi1_tid_timeout, 0);
+	timer_setup(&qpriv->s_tid_retry_timer, hfi1_tid_retry_timeout, 0);
 
 	INIT_LIST_HEAD(&qpriv->tid_wait);
 

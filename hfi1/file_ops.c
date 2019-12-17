@@ -864,11 +864,11 @@ static int complete_subctxt(struct hfi1_filedata *fd)
 	}
 
 	if (ret) {
-		hfi1_rcd_put(fd->uctxt);
-		fd->uctxt = NULL;
 		spin_lock_irqsave(&fd->dd->uctxt_lock, flags);
 		__clear_bit(fd->subctxt, fd->uctxt->in_use_ctxts);
 		spin_unlock_irqrestore(&fd->dd->uctxt_lock, flags);
+		hfi1_rcd_put(fd->uctxt);
+		fd->uctxt = NULL;
 	}
 
 	return ret;
@@ -1276,7 +1276,7 @@ static int get_ctxt_info(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 	cinfo.sdma_ring_size = fd->cq->nentries;
 	cinfo.rcvegr_size = uctxt->egrbufs.rcvtid_size;
 
-	trace_hfi1_ctxt_info(uctxt->dd, uctxt->ctxt, fd->subctxt, cinfo);
+	trace_hfi1_ctxt_info(uctxt->dd, uctxt->ctxt, fd->subctxt, &cinfo);
 	if (copy_to_user((void __user *)arg, &cinfo, len))
 		return -EFAULT;
 

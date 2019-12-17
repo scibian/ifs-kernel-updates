@@ -494,8 +494,13 @@ static struct kobj_type hfi1_vl2mtu_ktype = {
  * Start of per-unit (or driver, in some cases, but replicated
  * per unit) functions (these get a device *)
  */
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_rev(struct device *device, struct device_attribute *attr,
 			char *buf)
+#else
+static ssize_t hw_rev_show(struct device *device, struct device_attribute *attr,
+			   char *buf)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -503,8 +508,13 @@ static ssize_t show_rev(struct device *device, struct device_attribute *attr,
 	return sprintf(buf, "%x\n", dd_from_dev(dev)->minrev);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_hfi(struct device *device, struct device_attribute *attr,
 			char *buf)
+#else
+static ssize_t board_id_show(struct device *device,
+			     struct device_attribute *attr, char *buf)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -518,8 +528,13 @@ static ssize_t show_hfi(struct device *device, struct device_attribute *attr,
 	return ret;
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_boardversion(struct device *device,
 				 struct device_attribute *attr, char *buf)
+#else
+static ssize_t boardversion_show(struct device *device,
+				 struct device_attribute *attr, char *buf)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -529,8 +544,13 @@ static ssize_t show_boardversion(struct device *device,
 	return scnprintf(buf, PAGE_SIZE, "%s", dd->boardversion);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_nctxts(struct device *device,
 			   struct device_attribute *attr, char *buf)
+#else
+static ssize_t nctxts_show(struct device *device,
+			   struct device_attribute *attr, char *buf)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -547,8 +567,13 @@ static ssize_t show_nctxts(struct device *device,
 			     (u32)dd->sc_sizes[SC_USER].count));
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_nfreectxts(struct device *device,
 			       struct device_attribute *attr, char *buf)
+#else
+static ssize_t nfreectxts_show(struct device *device,
+			       struct device_attribute *attr, char *buf)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -558,8 +583,13 @@ static ssize_t show_nfreectxts(struct device *device,
 	return scnprintf(buf, PAGE_SIZE, "%u\n", dd->freectxts);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_serial(struct device *device,
 			   struct device_attribute *attr, char *buf)
+#else
+static ssize_t serial_show(struct device *device,
+			   struct device_attribute *attr, char *buf)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -568,9 +598,15 @@ static ssize_t show_serial(struct device *device,
 	return scnprintf(buf, PAGE_SIZE, "%s", dd->serial);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t store_chip_reset(struct device *device,
 				struct device_attribute *attr, const char *buf,
 				size_t count)
+#else
+static ssize_t chip_reset_store(struct device *device,
+				struct device_attribute *attr, const char *buf,
+				size_t count)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -598,8 +634,13 @@ bail:
 /*
  * Dump tempsense values, in decimal, to ease shell-scripts.
  */
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_tempsense(struct device *device,
 			      struct device_attribute *attr, char *buf)
+#else
+static ssize_t tempsense_show(struct device *device,
+			      struct device_attribute *attr, char *buf)
+#endif
 {
 	struct hfi1_ibdev *dev =
 		container_of(device, struct hfi1_ibdev, rdi.ibdev.dev);
@@ -629,6 +670,7 @@ static ssize_t show_tempsense(struct device *device,
  */
 
 /* start of per-unit file structures and support code */
+#if !defined (IFS_SLES15SP1)
 static DEVICE_ATTR(hw_rev, S_IRUGO, show_rev, NULL);
 static DEVICE_ATTR(board_id, S_IRUGO, show_hfi, NULL);
 static DEVICE_ATTR(nctxts, S_IRUGO, show_nctxts, NULL);
@@ -648,6 +690,33 @@ static struct device_attribute *hfi1_attributes[] = {
 	&dev_attr_tempsense,
 	&dev_attr_chip_reset,
 };
+#else
+static DEVICE_ATTR_RO(hw_rev);
+static DEVICE_ATTR_RO(board_id);
+static DEVICE_ATTR_RO(boardversion);
+static DEVICE_ATTR_RO(nctxts);
+static DEVICE_ATTR_RO(nfreectxts);
+static DEVICE_ATTR_RO(serial);
+static DEVICE_ATTR_WO(chip_reset);
+static DEVICE_ATTR_RO(tempsense);
+
+static struct attribute *hfi1_attributes[] = {
+	&dev_attr_hw_rev.attr,
+	&dev_attr_board_id.attr,
+	&dev_attr_nctxts.attr,
+	&dev_attr_nfreectxts.attr,
+	&dev_attr_serial.attr,
+	&dev_attr_boardversion.attr,
+	&dev_attr_tempsense.attr,
+	&dev_attr_chip_reset.attr,
+	NULL,
+};
+
+const struct attribute_group ib_hfi1_attr_group = {
+	.attrs = hfi1_attributes,
+};
+
+#endif
 
 int hfi1_create_port_files(struct ib_device *ibdev, u8 port_num,
 			   struct kobject *kobj)
@@ -831,13 +900,13 @@ int hfi1_verbs_register_sysfs(struct hfi1_devdata *dd)
 	struct ib_device *dev = &dd->verbs_dev.rdi.ibdev;
 	struct device *class_dev = &dev->dev;
 	int i, j, ret;
-
+#if !defined (IFS_SLES15SP1)
 	for (i = 0; i < ARRAY_SIZE(hfi1_attributes); ++i) {
 		ret = device_create_file(&dev->dev, hfi1_attributes[i]);
 		if (ret)
 			goto bail;
 	}
-
+#endif
 	for (i = 0; i < dd->num_sdma; i++) {
 		ret = kobject_init_and_add(&dd->per_sdma[i].kobj,
 					   &sde_ktype, &class_dev->kobj,
@@ -855,9 +924,10 @@ int hfi1_verbs_register_sysfs(struct hfi1_devdata *dd)
 
 	return 0;
 bail:
+#if !defined (IFS_SLES15SP1)
 	for (i = 0; i < ARRAY_SIZE(hfi1_attributes); ++i)
 		device_remove_file(&dev->dev, hfi1_attributes[i]);
-
+#endif
 	for (i = 0; i < dd->num_sdma; i++)
 		kobject_del(&dd->per_sdma[i].kobj);
 

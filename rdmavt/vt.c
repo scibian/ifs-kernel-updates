@@ -727,7 +727,11 @@ static noinline int check_support(struct rvt_dev_info *rdi, int verb)
  *
  * Return: 0 on success otherwise an errno.
  */
+#if !defined (IFS_SLES15SP1) && !defined (IFS_RH80)
 int rvt_register_device(struct rvt_dev_info *rdi)
+#else
+int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id)
+#endif
 {
 	int ret = 0, i;
 
@@ -833,7 +837,16 @@ int rvt_register_device(struct rvt_dev_info *rdi)
 		rdi->ibdev.num_comp_vectors = 1;
 
 	/* We are now good to announce we exist */
+#if !defined (IFS_SLES15SP1)
+	#if defined (IFS_RH80)
+		rdi->ibdev.driver_id = driver_id;
+	#endif
 	ret =  ib_register_device(&rdi->ibdev, rdi->driver_f.port_callback);
+#else
+	rdi->ibdev.driver_id = driver_id;
+	ret = ib_register_device(&rdi->ibdev, dev_name(&rdi->ibdev.dev),
+				 rdi->driver_f.port_callback);
+#endif
 	if (ret) {
 		rvt_pr_err(rdi, "Failed to register driver with ib core.\n");
 		goto bail_mr;

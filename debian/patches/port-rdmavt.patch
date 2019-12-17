@@ -39,7 +39,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				      BIT(umem->page_shift));
 --- a/rdmavt/vt.c
 +++ b/rdmavt/vt.c
-@@ -777,7 +777,8 @@
+@@ -781,7 +781,8 @@
  	spin_lock_init(&rdi->n_cqs_lock);
  
  	/* DMA Operations */
@@ -51,7 +51,16 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	rdi->ibdev.dev.device_rh->dma_ops =
 --- a/compat/compat_common.h
 +++ b/compat/compat_common.h
-@@ -213,6 +213,12 @@
+@@ -155,7 +155,7 @@
+ }
+ #endif
+ 
+-#define NEED_IB_HELPER_FUNCTIONS (defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3))
++#define NEED_IB_HELPER_FUNCTIONS (defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)) || defined(IFS_DEB9)
+ 
+ #if NEED_IB_HELPER_FUNCTIONS
+ struct opa_class_port_info {
+@@ -226,6 +226,12 @@
  	u8			src_path_bits;
  };
  
@@ -64,12 +73,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #define rdma_ah_attr ib_ah_attr
  
  static inline void rdma_ah_set_sl(struct rdma_ah_attr *attr, u8 sl)
-@@ -405,7 +411,7 @@
+@@ -418,7 +424,7 @@
  }
  
  #endif /* NEED_IB_HELPER_FUNCTIONS */
--#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
-+#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4) && !defined(IFS_DEB9))
+-#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_RH80))
++#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_RH80) && !defined(IFS_DEB9))
  
  #if NEED_KTHREAD_HELPER_FUNCTIONS
  static inline bool kthread_queue_work(struct kthread_worker *worker,
@@ -85,7 +94,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	struct msix_entry msix;
  #endif
  	int irq;
-@@ -2589,7 +2590,13 @@
+@@ -2592,7 +2593,13 @@
  
  static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
  {

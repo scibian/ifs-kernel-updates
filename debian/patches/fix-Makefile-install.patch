@@ -19,6 +19,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  endif
 --- a/hfi1/Makefile
 +++ b/hfi1/Makefile
+@@ -7,7 +7,7 @@
+ ifneq ($(KERNELRELEASE),)
+ #kbuild part of makefile
+ 
+-NOSTDINC_FLAGS += -I${M}/include -I${M}/compat
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
+ 
+ obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
+ 
 @@ -35,6 +35,6 @@
  	$(MAKE) -C $(KDIR) M=$$PWD clean
  
@@ -29,11 +38,40 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  endif
 --- a/rdmavt/Makefile
 +++ b/rdmavt/Makefile
+@@ -7,7 +7,7 @@
+ ifneq ($(KERNELRELEASE),)
+ #kbuild part of makefile
+ 
+-NOSTDINC_FLAGS += -I${M}/include -I${M}/compat
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
+ 
+ obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
+ 
 @@ -27,6 +27,6 @@
  	$(MAKE) -C $(KDIR) M=$$PWD clean
  
  install:
 -	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
 +	$(MAKE) INSTALL_MOD_PATH=$(DESTDIR) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
+ 
+ endif
+--- a/ib_ipoib/Makefile
++++ b/ib_ipoib/Makefile
+@@ -3,7 +3,7 @@
+ ifneq ($(KERNELRELEASE),)
+ EXTRA_CFLAGS += -D IPOIB_DRIVER
+ 
+-NOSTDINC_FLAGS := -I${M}/include -I${M}/compat
++NOSTDINC_FLAGS := -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
+ 
+ obj-$(CONFIG_INFINIBAND_IPOIB)			+= ib_ipoib.o
+ 
+@@ -28,7 +28,7 @@
+ 	$(MAKE) -C $(KDIR) M=$$PWD clean
+ 
+ install:
+-	$(MAKE) INSTALL_MOD_DIR=updates -C $(KDIR) M=$$PWD modules_install
++	$(MAKE) INSTALL_MOD_PATH=$(DESTDIR) INSTALL_MOD_DIR=updates/ifs-kernel-updates -C $(KDIR) M=$$PWD modules_install
+ 
  
  endif

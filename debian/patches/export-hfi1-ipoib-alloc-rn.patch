@@ -78,7 +78,7 @@
  extern unsigned int selinux_mode;
  
  unsigned int hfi1_lkey_table_size = 16;
-@@ -2079,7 +2081,7 @@
+@@ -2084,7 +2086,7 @@
  #endif
  
  #ifdef AIP
@@ -87,7 +87,7 @@
  					u8 port_num,
  					enum rdma_netdev_t type,
  					const char *name,
-@@ -2117,6 +2119,9 @@
+@@ -2122,6 +2124,9 @@
  
  	return dev;
  }
@@ -97,7 +97,7 @@
  #endif
  
  /**
-@@ -2174,7 +2179,7 @@
+@@ -2179,7 +2184,7 @@
  #endif
  
  #if defined(AIP) && !defined(IFS_DEB9)

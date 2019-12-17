@@ -551,8 +551,13 @@ static struct kobj_type qib_diagc_ktype = {
  * Start of per-unit (or driver, in some cases, but replicated
  * per unit) functions (these get a device *)
  */
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_rev(struct device *device, struct device_attribute *attr,
 			char *buf)
+#else
+static ssize_t hw_rev_show(struct device *device, struct device_attribute *attr,
+			   char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -560,8 +565,13 @@ static ssize_t show_rev(struct device *device, struct device_attribute *attr,
 	return sprintf(buf, "%x\n", dd_from_dev(dev)->minrev);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_hca(struct device *device, struct device_attribute *attr,
 			char *buf)
+#else
+static ssize_t hca_type_show(struct device *device,
+			     struct device_attribute *attr, char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -575,15 +585,25 @@ static ssize_t show_hca(struct device *device, struct device_attribute *attr,
 	return ret;
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_version(struct device *device,
 			    struct device_attribute *attr, char *buf)
+#else
+static ssize_t version_show(struct device *device,
+			    struct device_attribute *attr, char *buf)
+#endif
 {
 	/* The string printed here is already newline-terminated. */
 	return scnprintf(buf, PAGE_SIZE, "%s", (char *)ib_qib_version);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_boardversion(struct device *device,
 				 struct device_attribute *attr, char *buf)
+#else
+static ssize_t boardversion_show(struct device *device,
+				 struct device_attribute *attr, char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -593,9 +613,13 @@ static ssize_t show_boardversion(struct device *device,
 	return scnprintf(buf, PAGE_SIZE, "%s", dd->boardversion);
 }
 
-
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_localbus_info(struct device *device,
 				  struct device_attribute *attr, char *buf)
+#else
+static ssize_t localbus_info_show(struct device *device,
+				  struct device_attribute *attr, char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -605,9 +629,13 @@ static ssize_t show_localbus_info(struct device *device,
 	return scnprintf(buf, PAGE_SIZE, "%s", dd->lbus_info);
 }
 
-
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_nctxts(struct device *device,
 			   struct device_attribute *attr, char *buf)
+#else
+static ssize_t nctxts_show(struct device *device,
+			   struct device_attribute *attr, char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -621,8 +649,13 @@ static ssize_t show_nctxts(struct device *device,
 			(dd->cfgctxts - dd->first_user_ctxt));
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_nfreectxts(struct device *device,
 			   struct device_attribute *attr, char *buf)
+#else
+static ssize_t nfreectxts_show(struct device *device,
+			       struct device_attribute *attr, char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -632,8 +665,13 @@ static ssize_t show_nfreectxts(struct device *device,
 	return scnprintf(buf, PAGE_SIZE, "%u\n", dd->freectxts);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_serial(struct device *device,
 			   struct device_attribute *attr, char *buf)
+#else
+static ssize_t serial_show(struct device *device,
+			   struct device_attribute *attr, char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -645,9 +683,15 @@ static ssize_t show_serial(struct device *device,
 	return strlen(buf);
 }
 
+#if !defined (IFS_SLES15SP1)
 static ssize_t store_chip_reset(struct device *device,
 				struct device_attribute *attr, const char *buf,
 				size_t count)
+#else
+static ssize_t chip_reset_store(struct device *device,
+				struct device_attribute *attr, const char *buf,
+				size_t count)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -667,8 +711,13 @@ bail:
 /*
  * Dump tempsense regs. in decimal, to ease shell-scripts.
  */
+#if !defined (IFS_SLES15SP1)
 static ssize_t show_tempsense(struct device *device,
 			      struct device_attribute *attr, char *buf)
+#else
+static ssize_t tempsense_show(struct device *device,
+			      struct device_attribute *attr, char *buf)
+#endif
 {
 	struct qib_ibdev *dev =
 		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
@@ -700,7 +749,7 @@ static ssize_t show_tempsense(struct device *device,
  * end of per-unit (or driver, in some cases, but replicated
  * per unit) functions
  */
-
+#if !defined (IFS_SLES15SP1)
 /* start of per-unit file structures and support code */
 static DEVICE_ATTR(hw_rev, S_IRUGO, show_rev, NULL);
 static DEVICE_ATTR(hca_type, S_IRUGO, show_hca, NULL);
@@ -727,7 +776,39 @@ static struct device_attribute *qib_attributes[] = {
 	&dev_attr_localbus_info,
 	&dev_attr_chip_reset,
 };
+#else
 
+static DEVICE_ATTR_RO(hw_rev);
+static DEVICE_ATTR_RO(hca_type);
+static DEVICE_ATTR(board_id, 0444, hca_type_show, NULL);
+static DEVICE_ATTR_RO(version);
+static DEVICE_ATTR_RO(boardversion);
+static DEVICE_ATTR_RO(localbus_info);
+static DEVICE_ATTR_RO(nctxts);
+static DEVICE_ATTR_RO(nfreectxts);
+static DEVICE_ATTR_RO(serial);
+static DEVICE_ATTR_WO(chip_reset);
+static DEVICE_ATTR_RO(tempsense);
+
+static struct attribute *qib_attributes[] = {
+	&dev_attr_hw_rev.attr,
+	&dev_attr_hca_type.attr,
+	&dev_attr_board_id.attr,
+	&dev_attr_version.attr,
+	&dev_attr_nctxts.attr,
+	&dev_attr_nfreectxts.attr,
+	&dev_attr_serial.attr,
+	&dev_attr_boardversion.attr,
+	&dev_attr_tempsense.attr,
+	&dev_attr_localbus_info.attr,
+	&dev_attr_chip_reset.attr,
+	NULL,
+};
+
+const struct attribute_group qib_attr_group = {
+	.attrs = qib_attributes,
+};
+#endif
 int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 			  struct kobject *kobj)
 {
@@ -826,6 +907,7 @@ bail:
 	return ret;
 }
 
+#if !defined (IFS_SLES15SP1)
 /*
  * Register and create our files in /sys/class/infiniband.
  */
@@ -846,6 +928,7 @@ bail:
 		device_remove_file(&dev->dev, qib_attributes[i]);
 	return ret;
 }
+#endif
 
 /*
  * Unregister and remove our files in /sys/class/infiniband.

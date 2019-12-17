@@ -84,7 +84,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #include <linux/sched.h>
 --- a/hfi1/verbs.c
 +++ b/hfi1/verbs.c
-@@ -1893,7 +1893,8 @@
+@@ -1898,7 +1898,8 @@
  	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
  	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
  }
@@ -94,7 +94,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
  {
  	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
-@@ -1903,7 +1904,7 @@
+@@ -1908,7 +1909,7 @@
  	snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u.%u", dc8051_ver_maj(ver),
  		 dc8051_ver_min(ver), dc8051_ver_patch(ver));
  }
@@ -103,7 +103,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str,
  				size_t str_len)
  {
-@@ -2160,7 +2161,8 @@
+@@ -2165,7 +2166,8 @@
  		ib_hfi1_sys_image_guid = ibdev->node_guid;
  	ibdev->owner = THIS_MODULE;
  	ibdev->phys_port_cnt = dd->num_pports;
@@ -113,7 +113,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ibdev->dev.parent = &dd->pcidev->dev;
  #else
  	ibdev->dma_device = &dd->pcidev->dev;
-@@ -2171,7 +2173,8 @@
+@@ -2176,7 +2178,8 @@
  	ibdev->get_hw_stats = get_hw_stats;
  #endif
  
@@ -135,8 +135,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
 --- a/hfi1/ipoib_main.c
 +++ b/hfi1/ipoib_main.c
-@@ -149,8 +149,13 @@
- 	return ret;
+@@ -139,8 +139,13 @@
+ 	return priv->netdev_ops->ndo_stop(dev);
  }
  #if !defined(IFS_RH74) && !defined(IFS_SLES12SP2)
 -static void hfi1_ipoib_dev_get_stats64(struct net_device *dev,
@@ -151,7 +151,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct hfi1_ipoib_dev_priv *priv = hfi1_ipoib_priv(dev);
  	u64 rx_packets = 0ull;
-@@ -188,6 +193,9 @@
+@@ -178,6 +183,9 @@
  	storage->rx_bytes += rx_bytes;
  	storage->tx_packets += tx_packets;
  	storage->tx_bytes += tx_bytes;
@@ -161,13 +161,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  #endif
  
-@@ -301,7 +309,8 @@
+@@ -291,7 +299,7 @@
  
  	dev = alloc_netdev_mqs((int)sizeof(struct hfi1_ipoib_rdma_netdev),
  			       name,
--#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2)
-+#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2)\
-+	|| defined(IFS_DEB9)
+-#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2) || defined(IFS_RH80)
++#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2) || defined(IFS_RH80) || defined(IFS_DEB9)
  			       name_assign_type,
  #endif
  			       setup,

@@ -2215,6 +2215,9 @@ static inline bool hfi1_packet_present(struct hfi1_ctxtdata *rcd)
  */
 
 extern const char ib_hfi1_version[];
+#if defined (IFS_SLES15SP1)
+extern const struct attribute_group ib_hfi1_attr_group;
+#endif
 
 int hfi1_device_create(struct hfi1_devdata *dd);
 void hfi1_device_remove(struct hfi1_devdata *dd);

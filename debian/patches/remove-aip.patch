@@ -4430,7 +4430,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -
 --- a/ib_ipoib/ipoib_main.c
 +++ /dev/null
-@@ -1,2540 +0,0 @@
+@@ -1,2542 +0,0 @@
 -/*
 - * Copyright (c) 2004 Topspin Communications.  All rights reserved.
 - * Copyright (c) 2005 Sun Microsystems, Inc. All rights reserved.
@@ -4510,6 +4510,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -module_param_named(debug_level, ipoib_debug_level, int, 0644);
 -MODULE_PARM_DESC(debug_level, "Enable debug tracing if > 0");
 -#endif
+-
+-extern uint ipoib_accel;
 -
 -struct ipoib_path_iter {
 -	struct net_device *dev;
@@ -6703,7 +6705,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -		goto device_init_failed;
 -	}
 -
--	if (rdma_core_cap_opa_port(hca, port))
+-	if (rdma_core_cap_opa_port(hca, port) && ipoib_accel)
 -		priv->max_ib_mtu = hfi1_max_mtu;
 -	else
 -		priv->max_ib_mtu = ib_mtu_enum_to_int(attr.max_mtu);

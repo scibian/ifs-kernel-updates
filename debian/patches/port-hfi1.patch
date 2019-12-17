@@ -44,7 +44,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	return cpu_to_be64(ppd->guids[index]);
  }
  
-@@ -2585,7 +2588,9 @@
+@@ -2588,7 +2591,9 @@
  
  static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
  {
@@ -57,15 +57,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
 --- a/hfi1/opfn.c
 +++ b/hfi1/opfn.c
-@@ -125,7 +125,7 @@
- 	/* Drop opfn.lock before calling ib_post_send() */
+@@ -128,7 +128,7 @@
  	spin_unlock_irqrestore(&priv->opfn.lock, flags);
  
+ #if !defined (IFS_SLES15SP1)
 -	ret = ib_post_send(&qp->ibqp, &wr.wr, &bad_send_wr);
-+	ret = ib_post_send(&qp->ibqp, (struct ib_send_wr *)&wr.wr, &bad_send_wr);
- 	if (ret)
- 		goto err;
- 	trace_hfi1_opfn_state_conn_request(qp);
++	ret = ib_post_send(&qp->ibqp, (struct ib_send_wr *) &wr.wr, &bad_send_wr);
+ #else
+ 	ret = ib_post_send(&qp->ibqp, &wr.wr, NULL);
+ #endif
 --- a/hfi1/Makefile
 +++ b/hfi1/Makefile
 @@ -7,7 +7,7 @@
@@ -99,23 +99,16 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	rdi->dparms.props.page_size_cap = PAGE_SIZE;
  	rdi->dparms.props.vendor_id = dd->oui1 << 16 | dd->oui2 << 8 | dd->oui3;
  	rdi->dparms.props.vendor_part_id = dd->pcidev->device;
-@@ -1708,6 +1709,7 @@
+@@ -1713,7 +1714,7 @@
  	props->active_mtu = !valid_ib_mtu(ppd->ibmtu) ? props->max_mtu :
  		mtu_to_enum(ppd->ibmtu, IB_MTU_4096);
  
-+#if !defined(IFS_DEB8)
+-#if !defined (IFS_SLES15SP1)
++#if !defined (IFS_SLES15SP1) && !defined(IFS_DEB8)
  	/*
  	 * sm_lid of 0xFFFF needs special handling so that it can
  	 * be differentiated from a permissve LID of 0xFFFF.
-@@ -1716,6 +1718,7 @@
- 	 */
- 	if (props->sm_lid == be16_to_cpu(IB_LID_PERMISSIVE))
- 		props->grh_required = true;
-+#endif
- 
- 	return 0;
- }
-@@ -1893,7 +1896,8 @@
+@@ -1898,7 +1899,8 @@
  	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
  	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
  }
@@ -125,7 +118,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
  {
  	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
-@@ -1916,7 +1920,11 @@
+@@ -1921,7 +1923,11 @@
  }
  #endif
  
@@ -138,7 +131,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static const char * const driver_cntr_names[] = {
  	/* must be element 0*/
  	"DRIVER_KernIntr",
-@@ -2160,13 +2168,13 @@
+@@ -2165,13 +2171,13 @@
  		ib_hfi1_sys_image_guid = ibdev->node_guid;
  	ibdev->owner = THIS_MODULE;
  	ibdev->phys_port_cnt = dd->num_pports;
@@ -154,7 +147,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ibdev->alloc_hw_stats = alloc_hw_stats;
  	ibdev->get_hw_stats = get_hw_stats;
  #endif
-@@ -2176,7 +2184,7 @@
+@@ -2181,7 +2187,7 @@
  #endif
  	/* keep process mad in the driver */
  	ibdev->process_mad = hfi1_process_mad;
@@ -163,7 +156,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ibdev->get_dev_fw_str = hfi1_get_dev_fw_str;
  #endif
  	strncpy(ibdev->node_desc, init_utsname()->nodename,
-@@ -2291,7 +2299,7 @@
+@@ -2303,7 +2309,7 @@
  
  	del_timer_sync(&dev->mem_timer);
  	verbs_txreq_exit(dev);
@@ -318,7 +311,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  				    guid))
 --- a/compat/compat_common.h
 +++ b/compat/compat_common.h
-@@ -72,7 +72,15 @@
+@@ -73,7 +73,15 @@
  #define MAX_NICE        19
  #define MIN_NICE        -20
  #define NICE_WIDTH      (MAX_NICE - MIN_NICE + 1)

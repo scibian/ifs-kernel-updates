@@ -1,13 +1,11 @@
 Source: ifs-kernel-updates
-Maintainer: Scibian Project <packaging@scibian.org>
+Maintainer: Brian T. Smith <bsmith@systemfabricworks.com>
 Section: kernel
 Priority: extra
 Standards-Version: 3.9.6
 Homepage: http://www.intel.com
-Vcs-Git: https://github.com/scibian/ifs-kernel-updates.git
-Vcs-Browser: https://github.com/scibian/ifs-kernel-updates
 Build-Depends: debhelper (>= 9),
-               linux-headers-3.16.0-8-amd64,
+               linux-headers-3.16.0-10-amd64,
                unifdef,
 
 Package: ifs-kernel-updates-dev
@@ -20,24 +18,15 @@ Description: Development headers for Intel HFI1 driver interface
  used for software that communicates directly with the HFI1 driver,
  as opposed to using an API such as PSM2 or libibverbs.
 
-Package: kmod-ifs-kernel-updates-3.16.0-8-amd64
+Package: kmod-ifs-kernel-updates-3.16.0-10-amd64
 Architecture: amd64
-Depends: linux-image-3.16.0-8-amd64,
+Depends: linux-image-3.16.0-10-amd64,
          ${misc:Depends},
 Conflicts: compat-rdma,
 Replaces: compat-rdma,
 Description: Extra kernel modules for IFS
- Updated binary kernel modules for OPA IFS, compiled for kernel
- 3.16.0-8-amd64. This includes the hfi1 driver for
+ Updated kernel modules for OPA IFS, compiled for kernel
+ 3.16.0-10-amd64. This includes the hfi1 driver for
  Omni-Path hardware, patched ib_ipoib for performance and stability
  improvements, ib_mad with OPA MAD enhancements and core IB modules
  recompiled against the OPA MAD headers.
-
-Package: kmod-ifs-kernel-updates
-Architecture: amd64
-Depends: ${misc:Depends}, kmod-ifs-kernel-updates-3.16.0-8-amd64
-Description: Updated kernel modules for Omni-Path
- This is a metapackage that will depend on the latest version of the
- kernel modules for Omni-Path.
- Install this package to automatically install the latest OPA module
- when new versions of the kernel are released.

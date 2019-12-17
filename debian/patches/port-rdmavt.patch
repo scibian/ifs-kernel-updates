@@ -151,15 +151,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		mr->mr.map[m]->segs[n].length = BIT(umem->page_shift);
  		trace_rvt_mr_user_seg(&mr->mr, m, n, vaddr,
  				      BIT(umem->page_shift));
-@@ -498,17 +487,15 @@
- 	unsigned long timeout;
- 	struct rvt_dev_info *rdi = ib_to_rvt(mr->pd->device);
- 
--	if (percpu_ref_is_zero(&mr->refcount))
--		return 0;
- 	/* avoid dma mr */
- 	if (mr->lkey)
- 		rvt_dereg_clean_qps(mr);
+@@ -508,9 +497,9 @@
  	timeout = wait_for_completion_timeout(&mr->comp, 5 * HZ);
  	if (!timeout) {
  		rvt_pr_err(rdi,
@@ -171,7 +163,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		rvt_get_mr(mr);
  		return -EBUSY;
  	}
-@@ -601,6 +588,7 @@
+@@ -603,6 +592,7 @@
  	return &mr->ibmr;
  }
  
@@ -179,7 +171,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /**
   * rvt_set_page - page assignment function called by ib_sg_to_pages
   * @ibmr: memory region
-@@ -672,6 +660,7 @@
+@@ -674,6 +664,7 @@
  	return ib_sg_to_pages(ibmr, sg, sg_nents, rvt_set_page);
  }
  #endif
@@ -187,7 +179,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /**
   * rvt_fast_reg_mr - fast register physical MR
   * @qp: the queue pair where the work request comes from
-@@ -760,8 +749,7 @@
+@@ -762,8 +753,7 @@
  	if (!fmr)
  		goto bail;
  
@@ -197,7 +189,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (rval)
  		goto bail;
  
-@@ -817,7 +805,7 @@
+@@ -819,7 +809,7 @@
  	u32 ps;
  	struct rvt_dev_info *rdi = ib_to_rvt(ibfmr->device);
  
@@ -227,7 +219,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		goto bail;
 --- a/rdmavt/qp.c
 +++ b/rdmavt/qp.c
-@@ -1017,6 +1017,7 @@
+@@ -1023,6 +1023,7 @@
  	spin_lock(&rdi->n_qps_lock);
  	if (rdi->n_qps_allocated == rdi->dparms.props.max_qp) {
  		spin_unlock(&rdi->n_qps_lock);
@@ -309,7 +301,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		break;
  
  	case MAP_PHYS_FMR:
-@@ -777,7 +780,7 @@
+@@ -781,7 +784,7 @@
  	spin_lock_init(&rdi->n_cqs_lock);
  
  	/* DMA Operations */
@@ -719,7 +711,16 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  struct rvt_swqe;
 --- a/compat/compat_common.h
 +++ b/compat/compat_common.h
-@@ -552,6 +552,8 @@
+@@ -155,7 +155,7 @@
+ }
+ #endif
+ 
+-#define NEED_IB_HELPER_FUNCTIONS (defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3))
++#define NEED_IB_HELPER_FUNCTIONS (defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)) || defined(IFS_DEB8)
+ 
+ #if NEED_IB_HELPER_FUNCTIONS
+ struct opa_class_port_info {
+@@ -565,6 +565,8 @@
  }
  #endif
  
@@ -728,7 +729,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static inline bool rdma_core_cap_opa_port(struct ib_device *device,
  					  u32 port_num)
  {
-@@ -561,6 +563,7 @@
+@@ -574,6 +576,7 @@
  	return (device->port_immutable[port_num].core_cap_flags & RDMA_CORE_PORT_INTEL_OPA)
  		== RDMA_CORE_PORT_INTEL_OPA;
  }
@@ -736,7 +737,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  static inline int opa_mtu_enum_to_int(int mtu)
  {
-@@ -574,6 +577,8 @@
+@@ -587,6 +590,8 @@
  	}
  }
  
@@ -745,13 +746,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static inline int rdma_mtu_enum_to_int(struct ib_device *device, u8 port,
  				       int mtu)
  {
-@@ -582,5 +587,6 @@
+@@ -595,6 +600,7 @@
  	else
  		return ib_mtu_enum_to_int((enum ib_mtu)mtu);
  }
 +#endif
  
- #endif
+ #ifndef timer_setup
+ #define timer_setup(timer, callback, flags)				\
 --- /dev/null
 +++ b/include/linux/rhashtable.h
 @@ -0,0 +1,908 @@

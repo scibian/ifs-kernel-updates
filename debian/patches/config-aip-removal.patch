@@ -23,7 +23,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  CFLAGS_driver.o = -DHFI_DRIVER_VERSION_BASE=\"$(MVERSION)\"
 --- a/hfi1/chip.c
 +++ b/hfi1/chip.c
-@@ -8501,7 +8501,7 @@
+@@ -8500,7 +8500,7 @@
  	__hfi1_rcd_eoi_intr(rcd);
  	local_irq_restore(flags);
  }
@@ -32,7 +32,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /**
   * hfi1_netdev_rx_napi - napi poll function to move eoi inline
   * @napi - pointer to napi object
-@@ -8543,6 +8543,7 @@
+@@ -8542,6 +8542,7 @@
  
  	return IRQ_HANDLED;
  }
@@ -40,7 +40,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  /*
   * Receive packet IRQ handler.  This routine expects to be on its own IRQ.
-@@ -14263,7 +14264,7 @@
+@@ -14260,7 +14261,7 @@
  		add_rcvctrl(dd, RCV_CTRL_RCV_RSM_ENABLE_SMASK);
  	}
  }
@@ -49,7 +49,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /*
   * Is a receive side mapping rule
   */
-@@ -14272,6 +14273,7 @@
+@@ -14269,6 +14270,7 @@
  {
  	return read_csr(dd, RCV_RSM_CFG + (8 * rule_index)) != 0;
  }
@@ -57,7 +57,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  /*
   * Add a receive side mapping rule.
-@@ -14513,7 +14515,7 @@
+@@ -14510,7 +14512,7 @@
  {
  	return (start + spare) > NUM_MAP_ENTRIES;
  }
@@ -66,7 +66,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static bool hfi1_netdev_update_rmt(struct hfi1_devdata *dd)
  {
  	u8 i, j;
-@@ -14576,7 +14578,9 @@
+@@ -14573,7 +14575,9 @@
  	add_rsm_rule(dd, rule, rrd);
  	add_rcvctrl(dd, RCV_CTRL_RCV_RSM_ENABLE_SMASK);
  }
@@ -76,7 +76,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  void hfi1_init_aip_rsm(struct hfi1_devdata *dd)
  {
  	/*
-@@ -14608,7 +14612,8 @@
+@@ -14605,7 +14609,8 @@
  		hfi1_enable_rsm_rule(dd, RSM_INS_AIP, &rrd);
  	}
  }
@@ -86,7 +86,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /* Initialize RSM for VNIC */
  void hfi1_init_vnic_rsm(struct hfi1_devdata *dd)
  {
-@@ -14639,13 +14644,15 @@
+@@ -14636,13 +14641,15 @@
  {
  	clear_rsm_rule(dd, RSM_INS_VNIC);
  }
@@ -103,7 +103,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  static void init_rxe(struct hfi1_devdata *dd)
  {
-@@ -14660,8 +14667,10 @@
+@@ -14657,8 +14664,10 @@
  	init_qos(dd, rmt);
  	init_fecn_handling(dd, rmt);
  	complete_rsm_map_table(dd, rmt) /* Last if for netdev */;
@@ -114,7 +114,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	kfree(rmt);
  
  	/*
-@@ -15226,9 +15235,11 @@
+@@ -15223,9 +15232,11 @@
  		 (dd->revision >> CCE_REVISION_SW_SHIFT)
  		    & CCE_REVISION_SW_MASK);
  
@@ -126,7 +126,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ret = set_up_context_variables(dd);
  	if (ret)
  		goto bail_cleanup;
-@@ -15326,7 +15337,9 @@
+@@ -15323,7 +15334,9 @@
  	hfi1_comp_vectors_clean_up(dd);
  	msix_clean_up_interrupts(dd);
  bail_cleanup:
@@ -138,7 +138,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	hfi1_free_devdata(dd);
 --- a/hfi1/driver.c
 +++ b/hfi1/driver.c
-@@ -1688,7 +1688,7 @@
+@@ -1687,7 +1687,7 @@
  	if (rhf_err_flags(packet->rhf))
  		show_eflags_errs(packet);
  }
@@ -147,7 +147,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static void hfi1_ipoib_ib_rcv(struct hfi1_packet *packet)
  {
  	struct hfi1_ibport *ibp;
-@@ -1721,9 +1721,7 @@
+@@ -1720,9 +1720,7 @@
  
  	trace_input_ibhdr(rcd->dd, packet, !!(rhf_dc_info(packet->rhf)));
  
@@ -157,7 +157,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  	/* handle congesion notifications */
  	process_ecn(hfi1_ipoib_priv(netdev)->qp, packet);
-@@ -1761,6 +1759,7 @@
+@@ -1760,6 +1758,7 @@
  	ibp = rcd_to_iport(packet->rcd);
  	++ibp->rvp.n_pkt_drops;
  }
@@ -165,7 +165,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  /*
   * The following functions are called by the interrupt handler. They are type
-@@ -1964,15 +1963,18 @@
+@@ -1963,15 +1962,18 @@
  	[RHF_RCV_TYPE_INVALID6] = process_receive_invalid,
  	[RHF_RCV_TYPE_INVALID7] = process_receive_invalid,
  };
@@ -200,7 +200,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
 --- a/hfi1/init.c
 +++ b/hfi1/init.c
-@@ -2004,8 +2004,11 @@
+@@ -2005,8 +2005,11 @@
  	/* unregister from IB core */
  	hfi1_unregister_ib_device(dd);
  
@@ -214,7 +214,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	 * clear dma engines, etc.
 --- a/hfi1/ipoib.h
 +++ b/hfi1/ipoib.h
-@@ -66,7 +66,7 @@
+@@ -67,7 +67,7 @@
  #include "netdev.h"
  
  #include <rdma/ib_verbs.h>
@@ -223,7 +223,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #define HFI1_IPOIB_TXREQ_NAME_LEN   32
  
  #define HFI1_IPOIB_PSEUDO_LEN 20
-@@ -186,5 +186,5 @@
+@@ -189,5 +189,5 @@
  
  struct sk_buff *hfi1_ipoib_prepare_skb(struct hfi1_netdev_rxq *rxq,
  				       int size, void *data);
@@ -232,14 +232,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #endif /* _IPOIB_H */
 --- a/hfi1/ipoib_main.c
 +++ b/hfi1/ipoib_main.c
-@@ -55,16 +55,18 @@
+@@ -55,15 +55,17 @@
  #include "hfi.h"
  #include "netdev.h"
  
-+#if defined(CONFIG_INFINIBAND_OPA_AIP)
- #define HFI1_AIP_UP 0
- 
 -#ifdef AIP
++#if defined(CONFIG_INFINIBAND_OPA_AIP)
  uint ipoib_accel = 1;
  module_param(ipoib_accel, uint, 0644);
 -MODULE_PARM_DESC(ipoib_accel, "Accelerated ipoib mode");
@@ -248,12 +246,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +module_param(ipoib_accel, uint, 0444);
  #endif
 +MODULE_PARM_DESC(ipoib_accel, "Accelerated ipoib mode");
+ EXPORT_SYMBOL(ipoib_accel);
  
 +#if defined(CONFIG_INFINIBAND_OPA_AIP)
  static u32 qpn_from_mac(u8 *mac_arr)
  {
  	return (u32)mac_arr[1] << 16 | mac_arr[2] << 8 | mac_arr[3];
-@@ -360,3 +362,5 @@
+@@ -350,3 +352,5 @@
  	}
  	return dev;
  }
@@ -285,7 +284,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /**
   * struct ipoib_txreq - IPOIB transmit descriptor
   * @txreq: sdma transmit request
-@@ -643,3 +643,4 @@
+@@ -687,3 +687,4 @@
  	kmem_cache_destroy(priv->txreq_cache);
  	priv->txreq_cache = NULL;
  }
@@ -428,7 +427,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
 --- a/hfi1/verbs.c
 +++ b/hfi1/verbs.c
-@@ -2077,7 +2077,7 @@
+@@ -2082,7 +2082,7 @@
  }
  #endif
  
@@ -437,7 +436,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static struct net_device *hfi1_alloc_rn(struct ib_device *device,
  					u8 port_num,
  					enum rdma_netdev_t type,
-@@ -2099,7 +2099,7 @@
+@@ -2104,7 +2104,7 @@
  					 setup);
  		break;
  #endif
@@ -446,7 +445,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	case RDMA_NETDEV_IPOIB:
  		dev = hfi1_ipoib_alloc_rn(device,
  					  port_num,
-@@ -2108,7 +2108,7 @@
+@@ -2113,7 +2113,7 @@
  					  name_assign_type,
  					  setup);
  		break;
@@ -455,7 +454,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	default:
  		dev = ERR_PTR(-EOPNOTSUPP);
  		break;
-@@ -2171,7 +2171,7 @@
+@@ -2176,7 +2176,7 @@
  	ibdev->get_hw_stats = get_hw_stats;
  #endif
  

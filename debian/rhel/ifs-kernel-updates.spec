@@ -6,7 +6,7 @@ Name:           ifs-kernel-updates
 Group:		System Environment/Kernel
 Summary:        Extra kernel modules for IFS
 Version:        %(echo %{kver}|sed -e 's/-/_/g')
-Release:        1777
+Release:        1793
 License:        GPLv2
 Source0:        %{name}-3.10.0_957.el7.x86_64.tgz
 Source1:        %{name}.files

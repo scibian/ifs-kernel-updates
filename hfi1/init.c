@@ -819,7 +819,8 @@ static int create_workqueues(struct hfi1_devdata *dd)
 			ppd->hfi1_wq =
 				alloc_workqueue(
 				    "hfi%d_%d",
-				    WQ_SYSFS | WQ_HIGHPRI | WQ_CPU_INTENSIVE,
+				    WQ_SYSFS | WQ_HIGHPRI | WQ_CPU_INTENSIVE |
+				    WQ_MEM_RECLAIM,
 				    HFI1_MAX_ACTIVE_WORKQUEUE_ENTRIES,
 				    dd->unit, pidx);
 			if (!ppd->hfi1_wq)
@@ -1060,7 +1061,7 @@ static void stop_timers(struct hfi1_devdata *dd)
 
 	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
 		ppd = dd->pport + pidx;
-		if (ppd->led_override_timer.data) {
+		if (ppd->led_override_timer.function) {
 			del_timer_sync(&ppd->led_override_timer);
 			atomic_set(&ppd->led_override_timer_active, 0);
 		}
@@ -1436,7 +1437,7 @@ void hfi1_disable_after_error(struct hfi1_devdata *dd)
 
 static void remove_one(struct pci_dev *);
 static int init_one(struct pci_dev *, const struct pci_device_id *);
-static void hfi1_probe_done(unsigned long data);
+static void hfi1_probe_done(struct timer_list *t);
 static void shutdown_one(struct pci_dev *);
 
 #define DRIVER_LOAD_MSG "Intel " DRIVER_NAME " loaded: "
@@ -1565,7 +1566,7 @@ static int __init hfi1_mod_init(void)
 	if (ret < 0)
 		goto bail_wss;
 
-	setup_timer(&init_timer, hfi1_probe_done, 0);
+	timer_setup(&init_timer, hfi1_probe_done, 0);
 
 	ret = pci_register_driver(&hfi1_pci_driver);
 	if (ret < 0) {
@@ -1872,7 +1873,7 @@ static void hfi1_deferred_init(struct work_struct *work)
 	kfree(work);
 }
 
-static void hfi1_probe_done(unsigned long data)
+static void hfi1_probe_done(struct timer_list *t)
 {
 	struct work_struct *work;
 

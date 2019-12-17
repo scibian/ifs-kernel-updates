@@ -65,6 +65,36 @@
 static struct dentry *hfi1_dbg_root;
 
 /* wrappers to enforce srcu in seq file */
+#if defined (IFS_SLES15SP1) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0))
+ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
+		      loff_t *ppos)
+{
+	struct dentry *d = file->f_path.dentry;
+	ssize_t r;
+
+	r = debugfs_file_get(d);
+
+	if (likely(!r))
+		r = seq_read(file, buf, size, ppos);
+	debugfs_file_put(d);
+	return r;
+}
+
+loff_t hfi1_seq_lseek(struct file *file, loff_t offset, int whence)
+{
+	struct dentry *d = file->f_path.dentry;
+	loff_t r;
+
+	r = debugfs_file_get(d);
+
+	if (likely(!r))
+		r = seq_lseek(file, offset, whence);
+	debugfs_file_put(d);
+	return r;
+}
+
+#else
+
 ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
 		      loff_t *ppos)
 {
@@ -75,6 +105,7 @@ ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
 	r = debugfs_use_file_start(d, &srcu_idx);
 	if (likely(!r))
 		r = seq_read(file, buf, size, ppos);
+
 	debugfs_use_file_finish(srcu_idx);
 	return r;
 }
@@ -88,9 +119,11 @@ loff_t hfi1_seq_lseek(struct file *file, loff_t offset, int whence)
 	r = debugfs_use_file_start(d, &srcu_idx);
 	if (likely(!r))
 		r = seq_lseek(file, offset, whence);
+
 	debugfs_use_file_finish(srcu_idx);
 	return r;
 }
+#endif
 
 #define private2dd(file) (file_inode(file)->i_private)
 #define private2ppd(file) (file_inode(file)->i_private)

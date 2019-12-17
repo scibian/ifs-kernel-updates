@@ -57,7 +57,7 @@
 #include "vt.h"
 #include "trace.h"
 
-static void rvt_rc_timeout(unsigned long arg);
+static void rvt_rc_timeout(struct timer_list *t);
 
 /*
  * Convert the AETH RNR timeout code into the number of microseconds.
@@ -792,7 +792,11 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 	if (!rdi)
 		return ERR_PTR(-EINVAL);
 
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)) || defined (IFS_SLES15SP1)
+	if (init_attr->cap.max_send_sge > rdi->dparms.props.max_send_sge ||
+#else
 	if (init_attr->cap.max_send_sge > rdi->dparms.props.max_sge ||
+#endif
 	    init_attr->cap.max_send_wr > rdi->dparms.props.max_qp_wr ||
 #if HAVE_IB_QP_CREATE_USE_GFP_NOIO
 	    ((init_attr->create_flags & ~IB_QP_CREATE_USE_GFP_NOIO) &&
@@ -804,7 +808,11 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 
 	/* Check receive queue parameters if no SRQ is specified. */
 	if (!init_attr->srq) {
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)) || defined (IFS_SLES15SP1)
+		if (init_attr->cap.max_recv_sge > rdi->dparms.props.max_recv_sge ||
+#else
 		if (init_attr->cap.max_recv_sge > rdi->dparms.props.max_sge ||
+#endif
 		    init_attr->cap.max_recv_wr > rdi->dparms.props.max_qp_wr)
 			return ERR_PTR(-EINVAL);
 
@@ -879,7 +887,7 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 				goto bail_qp;
 		}
 		/* initialize timers needed for rc qp */
-		setup_timer(&qp->s_timer, rvt_rc_timeout, (unsigned long)qp);
+		timer_setup(&qp->s_timer, rvt_rc_timeout, 0);
 		hrtimer_init(&qp->s_rnr_timer, CLOCK_MONOTONIC,
 			     HRTIMER_MODE_REL);
 		qp->s_rnr_timer.function = rvt_rc_rnr_retry;
@@ -936,8 +944,6 @@ struct ib_qp *rvt_create_qp(struct ib_pd *ibpd,
 		atomic_set(&qp->refcount, 0);
 		atomic_set(&qp->local_ops_pending, 0);
 		init_waitqueue_head(&qp->wait);
-		init_timer(&qp->s_timer);
-		qp->s_timer.data = (unsigned long)qp;
 		INIT_LIST_HEAD(&qp->rspwait);
 		qp->state = IB_QPS_RESET;
 		qp->s_wq = swq;
@@ -1128,7 +1134,7 @@ int rvt_error_qp(struct rvt_qp *qp, enum ib_wc_status err)
 	rdi->driver_f.notify_error_qp(qp);
 
 	/* Schedule the sending tasklet to drain the send work queue. */
-	if (ACCESS_ONCE(qp->s_last) != qp->s_head)
+	if (READ_ONCE(qp->s_last) != qp->s_head)
 		rdi->driver_f.schedule_send(qp);
 
 	rvt_clear_mr_refs(qp, 0);
@@ -1235,8 +1241,13 @@ int rvt_modify_qp(struct ib_qp *ibqp, struct ib_qp_attr *attr,
 	new_state = attr_mask & IB_QP_STATE ? attr->qp_state : cur_state;
 	opa_ah = rdma_cap_opa_ah(ibqp->device, qp->port_num);
 
+#if !defined (IFS_SLES15SP1)
 	if (!ib_modify_qp_is_ok(cur_state, new_state, ibqp->qp_type,
 				attr_mask, link))
+#else
+	if (!ib_modify_qp_is_ok(cur_state, new_state, ibqp->qp_type,
+				attr_mask))
+#endif
 		goto inval;
 
 	if (rdi->driver_f.check_modify_qp &&
@@ -1742,7 +1753,7 @@ static inline int rvt_qp_is_avail(
 	if (likely(qp->s_avail))
 		return 0;
 	smp_read_barrier_depends(); /* see rc.c */
-	slast = ACCESS_ONCE(qp->s_last);
+	slast = READ_ONCE(qp->s_last);
 	if (qp->s_head >= slast)
 		avail = qp->s_size - (qp->s_head - slast);
 	else
@@ -1985,7 +1996,7 @@ int rvt_post_send(struct ib_qp *ibqp, struct ib_send_wr *wr,
 	 * ahead and kick the send engine into gear. Otherwise we will always
 	 * just schedule the send to happen later.
 	 */
-	call_send = qp->s_head == ACCESS_ONCE(qp->s_last) && !wr->next;
+	call_send = qp->s_head == READ_ONCE(qp->s_last) && !wr->next;
 
 	for (; wr; wr = wr->next) {
 		err = rvt_post_one_wr(qp, wr, &call_send);
@@ -2349,9 +2360,9 @@ EXPORT_SYMBOL(rvt_del_timers_sync);
 /**
  * This is called from s_timer for missing responses.
  */
-static void rvt_rc_timeout(unsigned long arg)
+static void rvt_rc_timeout(struct timer_list *t)
 {
-	struct rvt_qp *qp = (struct rvt_qp *)arg;
+	struct rvt_qp *qp = from_timer(qp, t, s_timer);
 	struct rvt_dev_info *rdi = ib_to_rvt(qp->ibqp.device);
 	unsigned long flags;
 

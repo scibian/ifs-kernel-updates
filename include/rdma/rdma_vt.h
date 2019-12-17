@@ -460,7 +460,18 @@ static inline void rvt_set_ibdev_name(struct rvt_dev_info *rdi,
 				      const char *fmt, const char *name,
 				      const int unit)
 {
+#if !defined (IFS_SLES15SP1)
 	snprintf(rdi->ibdev.name, sizeof(rdi->ibdev.name), fmt, name, unit);
+#else
+	/*
+	 * FIXME: rvt and its users want to touch the ibdev before
+	 * registration and have things like the name work. We don't have the
+	 * infrastructure in the core to support this directly today, hack it
+	 * to work by setting the name manually here.
+	 */
+	dev_set_name(&rdi->ibdev.dev, fmt, name, unit);
+	strlcpy(rdi->ibdev.name, dev_name(&rdi->ibdev.dev), IB_DEVICE_NAME_MAX);
+#endif
 }
 
 /**
@@ -583,7 +594,11 @@ static inline void rvt_mod_retry_timer(struct rvt_qp *qp)
 
 struct rvt_dev_info *rvt_alloc_device(size_t size, int nports);
 void rvt_dealloc_device(struct rvt_dev_info *rdi);
+#if !defined (IFS_SLES15SP1) && !defined (IFS_RH80)
 int rvt_register_device(struct rvt_dev_info *rvd);
+#else
+int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id);
+#endif
 void rvt_unregister_device(struct rvt_dev_info *rvd);
 int rvt_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr);
 int rvt_init_port(struct rvt_dev_info *rdi, struct rvt_ibport *port,

@@ -59,6 +59,7 @@
 #include <linux/msi.h>
 #include <linux/kthread.h>
 #include <rdma/opa_port_info.h>
+#include <linux/timer.h>
 
 #define IB_QPN_MASK     0xFFFFFF
 #include <rdma/ib_hdrs.h>
@@ -80,7 +81,7 @@
 
 #define  IB_PORT_OPA_MASK_CHG			  BIT(4)
 
-#if !defined(IFS_SLES15) && !defined(IFS_SLES12SP4)
+#if !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4)
 #define  current_time(inode)			  CURRENT_TIME
 #endif
 
@@ -110,13 +111,25 @@ extern struct srcu_struct debugfs_srcu;
 extern struct ib_dma_mapping_ops rvt_default_dma_mapping_ops;
 
 const char *get_unit_name(int unit);
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH80) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4)
 void cdev_set_parent(struct cdev *p, struct kobject *kobj);
+#endif
+#if !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_RH76) && !defined(IFS_RH80)
 int pci_request_irq(struct pci_dev *dev, unsigned int nr,
 		    irq_handler_t handler, irq_handler_t thread_fn,
 		    void *dev_id, const char *fmt, ...);
 void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id);
+#endif
+#if !defined(IFS_RH80)
+static inline int pci_bridge_secondary_bus_reset(struct pci_dev *dev)
+{
+	pci_reset_bridge_secondary_bus(dev);
 
-#define NEED_MM_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
+	return 0;
+}
+#endif
+
+#define NEED_MM_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_RH80))
 
 #if NEED_MM_HELPER_FUNCTIONS
 /**
@@ -142,7 +155,7 @@ static inline void mmgrab(struct mm_struct *mm)
 }
 #endif
 
-#define NEED_IB_HELPER_FUNCTIONS (!defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
+#define NEED_IB_HELPER_FUNCTIONS (defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3))
 
 #if NEED_IB_HELPER_FUNCTIONS
 struct opa_class_port_info {
@@ -405,7 +418,7 @@ static inline enum rdma_ah_attr_type rdma_ah_find_type(struct ib_device *dev,
 }
 
 #endif /* NEED_IB_HELPER_FUNCTIONS */
-#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
+#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_RH80))
 
 #if NEED_KTHREAD_HELPER_FUNCTIONS
 static inline bool kthread_queue_work(struct kthread_worker *worker,
@@ -470,13 +483,13 @@ static inline void kthread_destroy_worker(struct kthread_worker *worker)
  *  For SELinux until our patches are accepted by the distro
  */
 
-#if defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_SLES15)
+#if defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_RH80) || defined(IFS_SLES15) || defined(IFS_SLES15SP1)
 int ib_get_cached_subnet_prefix(struct ib_device *device,
 				u8                port_num,
 				u64              *sn_pfx);
 #endif
 
-#if !defined(IFS_RH76)
+#if !defined(IFS_RH76) && !defined(IFS_RH80) && !defined(IFS_SLES15SP1)
 static inline void *kmalloc_array_node(size_t n, size_t size, gfp_t flags, int node)
 {
 	if (size != 0 && n > SIZE_MAX / size)
@@ -582,5 +595,19 @@ static inline int rdma_mtu_enum_to_int(struct ib_device *device, u8 port,
 	else
 		return ib_mtu_enum_to_int((enum ib_mtu)mtu);
 }
+
+#ifndef timer_setup
+#define timer_setup(timer, callback, flags)				\
+	do {								\
+		__init_timer((timer), (flags));				\
+		(timer)->function = (void (*)(unsigned long))callback;	\
+		(timer)->data = (unsigned long)(timer);			\
+	} while (0)
+#endif
+
+#ifndef from_timer
+#define from_timer(var, callback_timer, timer_fieldname) \
+	container_of(callback_timer, typeof(*(var)), timer_fieldname)
+#endif
 
 #endif

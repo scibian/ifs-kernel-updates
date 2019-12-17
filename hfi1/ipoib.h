@@ -55,6 +55,7 @@
 
 #include <linux/types.h>
 #include <linux/stddef.h>
+#include <linux/atomic.h>
 #include <linux/netdevice.h>
 #include <linux/slab.h>
 #include <linux/skbuff.h>
@@ -84,25 +85,29 @@ union hfi1_ipoib_flow {
 
 /**
  * struct hfi1_ipoib_txq - IPOIB per Tx queue information
- * priv - private pointer
- * @sde - sdma engine
- * @wait - iowait structure
- * @stx - sdma tx request
- * @tx_list - tx request list
- * @psn - packet sequence number
- * @q_idx - ipoib Tx queue index
- * @sc5 - service channel
- * @pkts_sent - indicator packets have beeen sent from this queue
+ * @priv: private pointer
+ * @sde: sdma engine
+ * @wait: iowait structure
+ * @stx: sdma tx request
+ * @tx_list: tx request list
+ * @psn: packet sequence number
+ * @flow: tracks when list needs to be flushed for a flow change
+ * @q_idx: ipoib Tx queue index
+ * @pkts_sent: indicator packets have beeen sent from this queue
+ * @sent_skbs: count of skbs received from ipoib
+ * @complete_skbs: count of skbs completed ipoib
  */
 struct hfi1_ipoib_txq {
 	struct hfi1_ipoib_dev_priv *priv;
 	struct sdma_engine *sde;
 	struct iowait wait;
 	struct list_head tx_list;
-	u32 psn;
 	union hfi1_ipoib_flow flow;
 	u8 q_idx;
 	bool pkts_sent;
+	u64 sent_skbs;
+
+	atomic64_t complete_skbs ____cacheline_aligned_in_smp;
 };
 
 struct hfi1_ipoib_dev_priv {
@@ -122,9 +127,7 @@ struct hfi1_ipoib_dev_priv {
 
 	struct rvt_qp *qp;
 
-	struct pcpu_sw_netstats *netstats;
-
-	unsigned long flags;
+	struct pcpu_sw_netstats __percpu *netstats;
 };
 
 /* hfi1 ipoib rdma netdev's private data structure */

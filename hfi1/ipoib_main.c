@@ -55,8 +55,6 @@
 #include "hfi.h"
 #include "netdev.h"
 
-#define HFI1_AIP_UP 0
-
 #ifdef AIP
 uint ipoib_accel = 1;
 module_param(ipoib_accel, uint, 0644);
@@ -64,6 +62,7 @@ MODULE_PARM_DESC(ipoib_accel, "Accelerated ipoib mode");
 #else
 uint ipoib_accel = 0;
 #endif
+EXPORT_SYMBOL(ipoib_accel);
 
 static u32 qpn_from_mac(u8 *mac_arr)
 {
@@ -106,8 +105,6 @@ static int hfi1_ipoib_dev_open(struct net_device *dev)
 	struct hfi1_ipoib_dev_priv *priv = hfi1_ipoib_priv(dev);
 	int ret;
 
-	hfi1_netdev_enable_queues(priv->dd);
-
 	ret = priv->netdev_ops->ndo_open(dev);
 	if (!ret) {
 		struct hfi1_ibport *ibp = to_iport(priv->device,
@@ -121,7 +118,7 @@ static int hfi1_ipoib_dev_open(struct net_device *dev)
 		priv->qp = qp;
 		rcu_read_unlock();
 
-		set_bit(HFI1_AIP_UP, &priv->flags);
+		hfi1_netdev_enable_queues(priv->dd);
 	}
 
 	return ret;
@@ -130,23 +127,16 @@ static int hfi1_ipoib_dev_open(struct net_device *dev)
 static int hfi1_ipoib_dev_stop(struct net_device *dev)
 {
 	struct hfi1_ipoib_dev_priv *priv = hfi1_ipoib_priv(dev);
-	int ret;
 
-	if (!test_bit(HFI1_AIP_UP, &priv->flags))
+	if (!priv->qp)
 		return 0;
-
-	if (priv->qp) {
-		rvt_put_qp(priv->qp);
-		priv->qp = NULL;
-	}
-
-	ret = priv->netdev_ops->ndo_stop(dev);
 
 	hfi1_netdev_disable_queues(priv->dd);
 
-	clear_bit(HFI1_AIP_UP, &priv->flags);
+	rvt_put_qp(priv->qp);
+	priv->qp = NULL;
 
-	return ret;
+	return priv->netdev_ops->ndo_stop(dev);
 }
 #if !defined(IFS_RH74) && !defined(IFS_SLES12SP2)
 static void hfi1_ipoib_dev_get_stats64(struct net_device *dev,
@@ -301,7 +291,7 @@ struct net_device *hfi1_ipoib_alloc_rn(struct ib_device *device,
 
 	dev = alloc_netdev_mqs((int)sizeof(struct hfi1_ipoib_rdma_netdev),
 			       name,
-#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2)
+#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2) || defined(IFS_RH80)
 			       name_assign_type,
 #endif
 			       setup,

@@ -824,9 +824,9 @@ void hfi1_16B_rcv(struct hfi1_packet *packet)
  * This is called from a timer to check for QPs
  * which need kernel memory in order to send a packet.
  */
-static void mem_timer(unsigned long data)
+static void mem_timer(struct timer_list *t)
 {
-	struct hfi1_ibdev *dev = (struct hfi1_ibdev *)data;
+	struct hfi1_ibdev *dev = from_timer(dev, t, mem_timer);
 	struct list_head *list = &dev->memwait;
 	struct rvt_qp *qp = NULL;
 	struct iowait *wait;
@@ -1621,7 +1621,12 @@ static void hfi1_fill_device_attr(struct hfi1_devdata *dd)
 	rdi->dparms.props.max_qp_wr =
 		(hfi1_max_qp_wrs >= HFI1_QP_WQE_INVALID ?
 		 HFI1_QP_WQE_INVALID - 1 : hfi1_max_qp_wrs);
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)) || defined (IFS_SLES15SP1)
+	rdi->dparms.props.max_send_sge = hfi1_max_sges;
+	rdi->dparms.props.max_recv_sge = hfi1_max_sges;
+#else
 	rdi->dparms.props.max_sge = hfi1_max_sges;
+#endif
 	rdi->dparms.props.max_sge_rd = hfi1_max_sges;
 	rdi->dparms.props.max_cq = hfi1_max_cqs;
 	rdi->dparms.props.max_ah = hfi1_max_ahs;
@@ -1708,6 +1713,7 @@ static int query_port(struct rvt_dev_info *rdi, u8 port_num,
 	props->active_mtu = !valid_ib_mtu(ppd->ibmtu) ? props->max_mtu :
 		mtu_to_enum(ppd->ibmtu, IB_MTU_4096);
 
+#if !defined (IFS_SLES15SP1)
 	/*
 	 * sm_lid of 0xFFFF needs special handling so that it can
 	 * be differentiated from a permissve LID of 0xFFFF.
@@ -1716,7 +1722,7 @@ static int query_port(struct rvt_dev_info *rdi, u8 port_num,
 	 */
 	if (props->sm_lid == be16_to_cpu(IB_LID_PERMISSIVE))
 		props->grh_required = true;
-
+#endif
 	return 0;
 }
 
@@ -1870,8 +1876,7 @@ static void init_ibport(struct hfi1_pportdata *ppd)
 
 	for (i = 0; i < RVT_MAX_TRAP_LISTS ; i++)
 		INIT_LIST_HEAD(&ibp->rvp.trap_lists[i].list);
-	setup_timer(&ibp->rvp.trap_timer, hfi1_handle_trap_timer,
-		    (unsigned long)ibp);
+	timer_setup(&ibp->rvp.trap_timer, hfi1_handle_trap_timer, 0);
 
 	spin_lock_init(&ibp->rvp.lock);
 	/* Set the prefix to the default value (see ch. 4.1.1) */
@@ -2137,7 +2142,7 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 
 	/* Only need to initialize non-zero fields. */
 
-	setup_timer(&dev->mem_timer, mem_timer, (unsigned long)dev);
+	timer_setup(&dev->mem_timer, mem_timer, 0);
 
 	seqlock_init(&dev->iowait_lock);
 	seqlock_init(&dev->txwait_lock);
@@ -2257,8 +2262,15 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 			      &ppd->ibport_data.rvp,
 			      i,
 			      ppd->pkeys);
-
+#if !defined (IFS_SLES15SP1) && !defined (IFS_RH80)
 	ret = rvt_register_device(&dd->verbs_dev.rdi);
+#else
+	#if defined (IFS_SLES15SP1)
+		rdma_set_device_sysfs_group(&dd->verbs_dev.rdi.ibdev,
+					    &ib_hfi1_attr_group);
+	#endif
+	ret = rvt_register_device(&dd->verbs_dev.rdi, RDMA_DRIVER_HFI1);
+#endif
 	if (ret)
 		goto err_verbs_txreq;
 

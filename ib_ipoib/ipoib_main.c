@@ -78,6 +78,8 @@ module_param_named(debug_level, ipoib_debug_level, int, 0644);
 MODULE_PARM_DESC(debug_level, "Enable debug tracing if > 0");
 #endif
 
+extern uint ipoib_accel;
+
 struct ipoib_path_iter {
 	struct net_device *dev;
 	struct ipoib_path  path;
@@ -2270,7 +2272,7 @@ static struct net_device *ipoib_add_port(const char *format,
 		goto device_init_failed;
 	}
 
-	if (rdma_core_cap_opa_port(hca, port))
+	if (rdma_core_cap_opa_port(hca, port) && ipoib_accel)
 		priv->max_ib_mtu = hfi1_max_mtu;
 	else
 		priv->max_ib_mtu = ib_mtu_enum_to_int(attr.max_mtu);

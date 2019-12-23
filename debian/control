@@ -4,8 +4,8 @@ Section: kernel
 Priority: extra
 Standards-Version: 3.9.6
 Homepage: http://www.intel.com
-Vcs-Git: https://github.com/scibian/opa-fm.git
-Vcs-Browser: https://github.com/scibian/opa-fm
+Vcs-Git: https://github.com/scibian/ifs-kernel-updates.git
+Vcs-Browser: https://github.com/scibian/ifs-kernel-updates
 Build-Depends: debhelper (>= 9),
                linux-headers-3.16.0-10-amd64,
                unifdef,

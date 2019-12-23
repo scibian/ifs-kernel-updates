@@ -22,7 +22,7 @@ ifeq ($(strip $(MJOBS)),)
 MJOBS=1
 endif
 
-KVER ?= $(shell uname -r)
+KVER ?= 3.16.0-10-amd64
 KVER_NOARCH ?= $(shell echo $(KVER) | sed 's/-[^-]*$$//')
 KDIR ?= /lib/modules/$(KVER)/build/
 export KDIR

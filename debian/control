@@ -32,3 +32,12 @@ Description: Extra kernel modules for IFS
  Omni-Path hardware, patched ib_ipoib for performance and stability
  improvements, ib_mad with OPA MAD enhancements and core IB modules
  recompiled against the OPA MAD headers.
+
+Package: kmod-ifs-kernel-updates
+Architecture: amd64
+Depends: ${misc:Depends}, kmod-ifs-kernel-updates-4.9.0-10-amd64
+Description: Updated kernel modules for Omni-Path
+ This is a metapackage that will depend on the latest version of the
+ kernel modules for Omni-Path.
+ Install this package to automatically install the latest OPA module
+ when new versions of the kernel are released.

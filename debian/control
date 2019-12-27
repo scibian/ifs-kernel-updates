@@ -35,7 +35,7 @@ Description: Extra kernel modules for IFS
 
 Package: kmod-ifs-kernel-updates
 Architecture: amd64
-Depends: ${misc:Depends}, kmod-ifs-kernel-updates-4.9.0-10-amd64
+Depends: ${misc:Depends}, kmod-ifs-kernel-updates-3.16.0-10-amd64
 Description: Updated kernel modules for Omni-Path
  This is a metapackage that will depend on the latest version of the
  kernel modules for Omni-Path.

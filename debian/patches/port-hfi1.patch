@@ -28,23 +28,21 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #include <linux/sched/mm.h>
  #else
  #include <linux/aio.h>
-@@ -142,7 +143,8 @@
+@@ -142,7 +143,7 @@
  static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
  static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
  		       unsigned long arg);
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB9)
  static int vma_fault(struct vm_fault *vmf);
  #else
  static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
-@@ -685,7 +687,8 @@
+@@ -693,7 +694,7 @@
   * Local (non-chip) user memory is not mapped right away but as it is
   * accessed by the user-level code.
   */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB9)
  static int vma_fault(struct vm_fault *vmf)
  #else
  static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
@@ -84,26 +82,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #include <linux/sched.h>
 --- a/hfi1/verbs.c
 +++ b/hfi1/verbs.c
-@@ -1893,7 +1893,8 @@
+@@ -1678,6 +1678,7 @@
  	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
  	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
  }
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
++
+ #ifndef GET_DEV_FW_STR_HAS_LEN
  static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
  {
- 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
-@@ -1903,7 +1904,7 @@
- 	snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u.%u", dc8051_ver_maj(ver),
- 		 dc8051_ver_min(ver), dc8051_ver_patch(ver));
- }
--#elif defined(IFS_RH74) || defined(IFS_SLES12SP3)
-+#elif defined(IFS_RH74) || defined(IFS_SLES12SP3) || defined(IFS_DEB9)
- static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str,
- 				size_t str_len)
- {
-@@ -2160,7 +2161,8 @@
+@@ -1960,7 +1961,8 @@
  		ib_hfi1_sys_image_guid = ibdev->node_guid;
  	ibdev->owner = THIS_MODULE;
  	ibdev->phys_port_cnt = dd->num_pports;
@@ -113,30 +100,41 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	ibdev->dev.parent = &dd->pcidev->dev;
  #else
  	ibdev->dma_device = &dd->pcidev->dev;
-@@ -2171,7 +2173,8 @@
- 	ibdev->get_hw_stats = get_hw_stats;
- #endif
- 
--#ifdef AIP
-+#if defined(AIP) && !defined(IFS_DEB9)
-+	/* Debian 9 kernel 4.9.0 lacks alloc_rdma_netdev */
- 	ibdev->alloc_rdma_netdev = hfi1_alloc_rn; /* May not be in all distro kernels might need a guard */
- #endif
- 	/* keep process mad in the driver */
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -50,6 +50,7 @@
+@@ -51,10 +51,12 @@
+ #define NEED_MM_HELPER_FUNCTIONS
+ #define NEED_IB_HELPER_FUNCTIONS
+ #define HAVE_NOSPEC_H
++#define GET_DEV_FW_STR_HAS_LEN
+ 
  #include "compat_common.h"
  
- #define IB_FW_VERSION_NAME_MAX		   ETHTOOL_FWVERS_LEN
-+#define OPA_SM_CLASS_VERSION               0x80
+ #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
++#define OPA_SM_CLASS_VERSION               	  0x80
+ 
+ struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
+ int rdma_destroy_ah(struct ib_ah *ah);
+@@ -64,8 +66,6 @@
+ 
+ #define ib_register_device(a, b, c)  ib_register_device((a), (c))
+ #define rdma_set_device_sysfs_group(a, b)
+-#define alloc_netdev_mqs(size, name, name_assign_type, setup, sdma, ctxts) \
+-	alloc_netdev_mqs((size), (name), (setup), (sdma), (ctxts))
+ #undef access_ok
+ #define access_ok(addr, size) \
+ 	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
+@@ -73,6 +73,4 @@
  
  void pcie_flr(struct pci_dev *dev);
  
+-
+-
+ #endif //DEB9_COMPAT
 --- a/hfi1/ipoib_main.c
 +++ b/hfi1/ipoib_main.c
-@@ -149,8 +149,13 @@
- 	return ret;
+@@ -141,8 +141,13 @@
+ 	return priv->netdev_ops->ndo_stop(dev);
  }
  #if !defined(IFS_RH74) && !defined(IFS_SLES12SP2)
 -static void hfi1_ipoib_dev_get_stats64(struct net_device *dev,
@@ -151,7 +149,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  {
  	struct hfi1_ipoib_dev_priv *priv = hfi1_ipoib_priv(dev);
  	u64 rx_packets = 0ull;
-@@ -188,6 +193,9 @@
+@@ -180,6 +185,9 @@
  	storage->rx_bytes += rx_bytes;
  	storage->tx_packets += tx_packets;
  	storage->tx_bytes += tx_bytes;
@@ -161,13 +159,36 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  }
  #endif
  
-@@ -301,7 +309,8 @@
+--- a/hfi1/ipoib_tx.c
++++ b/hfi1/ipoib_tx.c
+@@ -52,6 +52,7 @@
  
- 	dev = alloc_netdev_mqs((int)sizeof(struct hfi1_ipoib_rdma_netdev),
- 			       name,
--#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2)
-+#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2)\
-+	|| defined(IFS_DEB9)
- 			       name_assign_type,
- #endif
- 			       setup,
+ #include <linux/log2.h>
+ #include <linux/circ_buf.h>
++#include <linux/vmalloc.h>
+ 
+ #include "sdma.h"
+ #include "verbs.h"
+--- a/hfi1/sdma.c
++++ b/hfi1/sdma.c
+@@ -1482,9 +1482,20 @@
+ 		);
+ 		if (!sde->descq)
+ 			goto bail;
++#if defined(KVZALLOC_NODE)
+ 		sde->tx_ring =
+ 			kvzalloc_node(sizeof(struct sdma_txreq *) * descq_cnt,
+ 				      GFP_KERNEL, dd->node);
++#else
++		sde->tx_ring =
++			kcalloc(descq_cnt, sizeof(struct sdma_txreq *),
++				GFP_KERNEL);
++		if (!sde->tx_ring)
++			sde->tx_ring =
++				vzalloc(
++					sizeof(struct sdma_txreq *) *
++					descq_cnt);
++#endif
+ 		if (!sde->tx_ring)
+ 			goto bail;
+ 	}

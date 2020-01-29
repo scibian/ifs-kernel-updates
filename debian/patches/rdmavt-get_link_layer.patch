@@ -28,16 +28,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	_VERB_IDX_MAX /* Must always be last! */
  };
  
-@@ -711,6 +718,12 @@
- 				      rvt_dealloc_pd);
- 		break;
- 
-+	case GET_LINK_LAYER:
-+		check_driver_override(rdi, offsetof(struct ib_device,
-+											get_link_layer),
-+							  rvt_get_link_layer);
-+		break;
-+
- 	default:
- 		return -EINVAL;
- 	}
+@@ -412,6 +419,7 @@
+ 	.detach_mcast = rvt_detach_mcast,
+ 	.get_dma_mr = rvt_get_dma_mr,
+ 	.get_port_immutable = rvt_get_port_immutable,
++	.get_link_layer = rvt_get_link_layer,
+ 	.map_mr_sg = rvt_map_mr_sg,
+ 	.map_phys_fmr = rvt_map_phys_fmr,
+ 	.mmap = rvt_mmap,

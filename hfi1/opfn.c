@@ -77,9 +77,6 @@ void opfn_conn_request(struct rvt_qp *qp)
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 	struct ib_atomic_wr wr;
-#if !defined (IFS_SLES15SP1)
-	struct ib_send_wr *bad_send_wr;
-#endif
 	u16 mask, capcode;
 	struct hfi1_opfn_type *extd;
 	u64 data;
@@ -127,11 +124,7 @@ void opfn_conn_request(struct rvt_qp *qp)
 	/* Drop opfn.lock before calling ib_post_send() */
 	spin_unlock_irqrestore(&priv->opfn.lock, flags);
 
-#if !defined (IFS_SLES15SP1)
-	ret = ib_post_send(&qp->ibqp, &wr.wr, &bad_send_wr);
-#else
 	ret = ib_post_send(&qp->ibqp, &wr.wr, NULL);
-#endif
 	if (ret)
 		goto err;
 	trace_hfi1_opfn_state_conn_request(qp);

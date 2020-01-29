@@ -471,15 +471,15 @@ static ssize_t diagpkt_send(struct diag_pkt *dp)
 	 * should catch most.
 	 */
 	if (dp->flags & F_DIAGPKT_WAIT) {
-		/* always force a credit return */
-		dp->pbc |= PBC_CREDIT_RETURN;
-		/* turn on credit return interrupts */
-		sc_add_credit_return_intr(sc);
 		wait = kmalloc(sizeof(*wait), GFP_KERNEL);
 		if (!wait) {
 			ret = -ENOMEM;
 			goto bail;
 		}
+		/* always force a credit return */
+		dp->pbc |= PBC_CREDIT_RETURN;
+		/* turn on credit return interrupts */
+		sc_add_credit_return_intr(sc);
 		init_completion(&wait->credits_returned);
 		atomic_set(&wait->count, 2);
 		wait->code = PRC_OK;
@@ -490,8 +490,8 @@ static ssize_t diagpkt_send(struct diag_pkt *dp)
 
 retry:
 	pbuf = sc_buffer_alloc(sc, total_len, credit_cb, credit_arg);
-	if (!pbuf) {
-		if (trycount == 0) {
+	if (IS_ERR_OR_NULL(pbuf)) {
+		if (!pbuf && trycount == 0) {
 			/* force a credit return and try again */
 			sc_return_credits(sc);
 			trycount = 1;
@@ -507,7 +507,10 @@ retry:
 			kfree(wait);
 			wait = NULL;
 		}
-		ret = -ENOSPC;
+		if (IS_ERR(pbuf))
+			ret = PTR_ERR(pbuf);
+		else
+			ret = -ENOSPC;
 		goto bail;
 	}
 
@@ -583,14 +586,16 @@ static ssize_t diagpkt_write(struct file *fp, const char __user *data,
 	return diagpkt_send(&dp);
 }
 
-static int hfi1_snoop_add(struct hfi1_devdata *dd, const char *name)
+void hfi1_snoop_init(struct hfi1_devdata *dd)
 {
-	int ret = 0;
-
-	dd->hfi1_snoop.mode_flag = 0;
 	spin_lock_init(&dd->hfi1_snoop.snoop_lock);
 	INIT_LIST_HEAD(&dd->hfi1_snoop.queue);
 	init_waitqueue_head(&dd->hfi1_snoop.waitq);
+}
+
+static int hfi1_snoop_add(struct hfi1_devdata *dd, const char *name)
+{
+	int ret = 0;
 
 	kobject_get(&dd->kobj);
 	ret = hfi1_cdev_init(HFI1_SNOOP_CAPTURE_BASE + dd->unit, name,
@@ -1080,19 +1085,14 @@ static long hfi1_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 	struct hfi1_pportdata *ppd = NULL;
 	unsigned int index;
 	struct hfi1_link_info link_info;
-	int read_cmd, write_cmd, read_ok, write_ok;
 
 	dd = hfi1_dd_from_sc_inode(fp->f_inode);
 	if (!dd)
 		return -ENODEV;
 
 	mode_flag = dd->hfi1_snoop.mode_flag;
-	read_cmd = _IOC_DIR(cmd) & _IOC_READ;
-	write_cmd = _IOC_DIR(cmd) & _IOC_WRITE;
-	write_ok = access_ok(VERIFY_WRITE, (void __user *)arg, _IOC_SIZE(cmd));
-	read_ok = access_ok(VERIFY_READ, (void __user *)arg, _IOC_SIZE(cmd));
 
-	if ((read_cmd && !write_ok) || (write_cmd && !read_ok))
+	if (!access_ok((void __user *)arg, _IOC_SIZE(cmd)))
 		return -EFAULT;
 
 	if (!capable(CAP_SYS_ADMIN))
@@ -1883,7 +1883,7 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			snoop_dbg("Dropping packet");
 			if (qp->s_wqe) {
 				spin_lock_irqsave(&qp->s_lock, flags);
-				hfi1_send_complete(
+				rvt_send_complete(
 					qp,
 					qp->s_wqe,
 					IB_WC_SUCCESS);

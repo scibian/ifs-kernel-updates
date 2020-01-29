@@ -9,7 +9,7 @@ ifneq ($(KERNELRELEASE),)
 
 EXTRA_CFLAGS +=-D QIB_DRIVER
 
-NOSTDINC_FLAGS := -I${M}/include -I${M}/compat
+NOSTDINC_FLAGS := -I${M}/include -I${M}/include/uapi -I${M}/compat
 
 obj-$(CONFIG_INFINIBAND_QIB) += ib_qib.o
 

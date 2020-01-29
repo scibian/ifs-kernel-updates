@@ -50,9 +50,27 @@
 
 #include <rdma/rdma_vt.h>
 
-struct ib_ah *rvt_create_ah(struct ib_pd *pd,
-			    struct rdma_ah_attr *ah_attr);
+#ifdef CREATE_AH_RETURNS_INT
+int rvt_create_ah(struct ib_ah *ah, struct rdma_ah_attr *ah_attr,
+		  u32 flags, struct ib_udata *udata);
+#elif defined(CREATE_AH_HAS_FLAGS)
+struct ib_ah *rvt_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr,
+			    u32 create_flags,
+			    struct ib_udata *udata);
+#elif defined(CREATE_AH_HAS_UDATA)
+struct ib_ah *rvt_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr,
+			    struct ib_udata *udata);
+#else
+struct ib_ah *rvt_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
+#endif
+
+#ifdef DESTROY_AH_RETURNS_VOID
+void (*destroy_ah)(struct ib_ah *ah, u32 flags);
+#elif defined(DESTROY_AH_HAS_FLAGS)
+int rvt_destroy_ah(struct ib_ah *ibah, u32 flags);
+#else
 int rvt_destroy_ah(struct ib_ah *ibah);
+#endif
 int rvt_modify_ah(struct ib_ah *ibah, struct rdma_ah_attr *ah_attr);
 int rvt_query_ah(struct ib_ah *ibah, struct rdma_ah_attr *ah_attr);
 

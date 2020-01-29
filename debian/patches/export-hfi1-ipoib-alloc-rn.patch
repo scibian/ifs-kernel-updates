@@ -67,7 +67,7 @@
 +#endif /* HFI1_HFI1_NETDEV_H */
 --- a/hfi1/verbs.c
 +++ b/hfi1/verbs.c
-@@ -69,7 +69,9 @@
+@@ -72,7 +72,9 @@
  #include "fault.h"
  #include "affinity.h"
  #include "ipoib.h"
@@ -78,16 +78,16 @@
  extern unsigned int selinux_mode;
  
  unsigned int hfi1_lkey_table_size = 16;
-@@ -2079,7 +2081,7 @@
+@@ -1864,7 +1866,7 @@
  #endif
  
- #ifdef AIP
+ #ifdef HAVE_ALLOC_RDMA_NETDEV
 -static struct net_device *hfi1_alloc_rn(struct ib_device *device,
 +struct net_device *hfi1_alloc_rn(struct ib_device *device,
  					u8 port_num,
  					enum rdma_netdev_t type,
  					const char *name,
-@@ -2117,6 +2119,9 @@
+@@ -1902,11 +1904,15 @@
  
  	return dev;
  }
@@ -96,13 +96,11 @@
 +#endif
  #endif
  
- /**
-@@ -2174,7 +2179,7 @@
- #endif
- 
- #if defined(AIP) && !defined(IFS_DEB9)
--	/* Debian 9 kernel 4.9.0 lacks alloc_rdma_netdev */
+ static const struct ib_device_ops hfi1_dev_ops = {
+ 	.alloc_hw_stats = alloc_hw_stats,
+-#ifdef HAVE_ALLOC_RDMA_NETDEV
++#if defined(HAVE_ALLOC_RDMA_NETDEV) && !defined(IFS_DEB9)
 +	/* Debian 9 kernel 4.9.0 lacks alloc_rdma_netdev, so hfi1 exports hfi_alloc_rn. */
- 	ibdev->alloc_rdma_netdev = hfi1_alloc_rn; /* May not be in all distro kernels might need a guard */
+ 	.alloc_rdma_netdev = hfi1_alloc_rn,
  #endif
- 	/* keep process mad in the driver */
+ 	.get_dev_fw_str = hfi1_get_dev_fw_str,

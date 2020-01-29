@@ -15,43 +15,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  else
  #normal makefile
---- a/rdmavt/mr.c
-+++ b/rdmavt/mr.c
-@@ -406,7 +406,8 @@
- 	mr->mr.offset = ib_umem_offset(umem);
- 	mr->mr.access_flags = mr_access_flags;
- 	mr->umem = umem;
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- 	mr->mr.page_shift = umem->page_shift;
- #else
- 	if (is_power_of_2(umem->page_size))
-@@ -423,7 +424,8 @@
- 			goto bail_inval;
- 		}
- 		mr->mr.map[m]->segs[n].vaddr = vaddr;
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- 		mr->mr.map[m]->segs[n].length = BIT(umem->page_shift);
- 		trace_rvt_mr_user_seg(&mr->mr, m, n, vaddr,
- 				      BIT(umem->page_shift));
---- a/rdmavt/vt.c
-+++ b/rdmavt/vt.c
-@@ -777,7 +777,8 @@
- 	spin_lock_init(&rdi->n_cqs_lock);
- 
- 	/* DMA Operations */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
- #elif defined(IFS_RH75) || defined(IFS_RH76)
- 	rdi->ibdev.dev.device_rh->dma_ops =
 --- a/compat/compat_common.h
 +++ b/compat/compat_common.h
-@@ -213,6 +213,12 @@
+@@ -227,6 +227,12 @@
  	u8			src_path_bits;
  };
  
@@ -64,18 +30,18 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #define rdma_ah_attr ib_ah_attr
  
  static inline void rdma_ah_set_sl(struct rdma_ah_attr *attr, u8 sl)
-@@ -405,7 +411,7 @@
+@@ -402,7 +408,7 @@
  }
  
  #endif /* NEED_IB_HELPER_FUNCTIONS */
--#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4))
-+#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES12SP4) && !defined(IFS_DEB9))
+-#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH80) && !defined(IFS_RH81))
++#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH80) && !defined(IFS_RH81) && !defined(IFS_DEB9))
  
  #if NEED_KTHREAD_HELPER_FUNCTIONS
  static inline bool kthread_queue_work(struct kthread_worker *worker,
 --- a/hfi1/hfi.h
 +++ b/hfi1/hfi.h
-@@ -709,7 +709,8 @@
+@@ -739,7 +739,8 @@
  #define MAX_NAME_SIZE 64
  struct hfi1_msix_entry {
  	enum irq_type type;
@@ -85,7 +51,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	struct msix_entry msix;
  #endif
  	int irq;
-@@ -2589,7 +2590,13 @@
+@@ -2628,7 +2629,13 @@
  
  static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
  {
@@ -102,7 +68,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -44,69 +44,15 @@
+@@ -44,25 +44,20 @@
   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   *
   */
@@ -111,24 +77,35 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +#if !defined(DEB9_COMPAT_H)
 +#define DEB9_COMPAT_H
  
+-#define CREATE_AH_HAS_UDATA
+ #define HAVE_ALLOC_RDMA_NETDEV
+ #define NEED_MM_HELPER_FUNCTIONS
++#define NEED_IB_HELPER_FUNCTIONS
+ #define HAVE_NOSPEC_H
+ 
  #include "compat_common.h"
  
--#define KVZALLOC_NODE 1
--
 -#define __GFP_RECLAIM	(__GFP_WAIT)
 -
 -#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
 -
 -
--#define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
+ #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
 -#define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
--
+ 
 -#define NET_NAME_UNKNOWN 0
--
++struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
++int rdma_destroy_ah(struct ib_ah *ah);
+ 
+ #define rdma_create_ah(a, b, c) rdma_create_ah(a, b)
+ #define rdma_destroy_ah(a, b) rdma_destroy_ah(a)
+@@ -76,52 +71,8 @@
+ 	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
+ #define _ib_alloc_device ib_alloc_device
+ 
 -struct hfi1_msix_entry;
 -struct hfi1_devdata;
-+#define IB_FW_VERSION_NAME_MAX		   ETHTOOL_FWVERS_LEN
- 
+-
  void pcie_flr(struct pci_dev *dev);
  
 -int bitmap_print_to_pagebuf(bool list, char *buf,
@@ -173,13 +150,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
 -#define for_each_msi_entry(desc, dev)   \
 -	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
-+struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
  
 -#endif //RH76_COMPAT
++
 +#endif //DEB9_COMPAT
 --- a/rdmavt/compat.c
 +++ b/rdmavt/compat.c
-@@ -58,49 +58,203 @@
+@@ -58,49 +58,221 @@
  #include "../hfi1/hfi.h"
  #include "compat.h"
  
@@ -199,6 +176,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 - * If -%EIO is returned, the file has already been removed and thus,
 - * it is not safe to access any of its data. If, on the other hand,
 - * it is allowed to access the file data, zero is returned.
++
++#undef rdma_create_ah
++#undef rdma_destroy_ah
 +
 +struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr)
 +{
@@ -229,7 +209,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
 -	__acquires(&debugfs_srcu)
 +static int rvt_mapping_error(struct ib_device *dev, u64 dma_addr)
-+{
+ {
+-	*srcu_idx = srcu_read_lock(&debugfs_srcu);
+-	barrier();
+-	if (d_unlinked(dentry))
+-		return -EIO;
+-	return 0;
 +	return dma_addr == BAD_DMA_ADDRESS;
 +}
 +
@@ -264,12 +249,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +
 +static void rvt_dma_unmap_page(struct ib_device *dev, u64 addr, size_t size,
 +                               enum dma_data_direction direction)
- {
--	*srcu_idx = srcu_read_lock(&debugfs_srcu);
--	barrier();
--	if (d_unlinked(dentry))
--		return -EIO;
--	return 0;
++{
 +	/* This is a stub, nothing to be done here */
 +}
 +
@@ -404,6 +384,21 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -EXPORT_SYMBOL(debugfs_use_file_finish);
 +EXPORT_SYMBOL_GPL(pcie_flr);
 +
++int rdma_destroy_ah(struct ib_ah *ah)
++{
++	struct ib_pd *pd;
++	int ret;
++
++	pd = ah->pd;
++	ret = ah->device->destroy_ah(ah);
++	if (!ret) {
++		atomic_dec(&pd->usecnt);
++	}
++
++	return ret;
++}
++EXPORT_SYMBOL(rdma_destroy_ah);
++
 +struct ib_dma_mapping_ops rvt_default_dma_mapping_ops = {
 +	.mapping_error = rvt_mapping_error,
 +	.map_single = rvt_dma_map_single,
@@ -421,7 +416,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +};
 --- a/include/rdma/rdma_vt.h
 +++ b/include/rdma/rdma_vt.h
-@@ -196,6 +196,10 @@
+@@ -204,6 +204,10 @@
  };
  
  
@@ -432,3 +427,74 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #define HAVE_IB_QP_CREATE_USE_GFP_NOIO \
  	(defined(IFS_RH73) || \
  	defined(IFS_RH74) || \
+--- a/rdmavt/vt.c
++++ b/rdmavt/vt.c
+@@ -625,7 +625,7 @@
+ 	spin_lock_init(&rdi->n_cqs_lock);
+ 
+ 	/* DMA Operations */
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB9)
+ 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
+ #elif defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_RH77)
+ 	rdi->ibdev.dev.device_rh->dma_ops =
+--- a/rdmavt/Makefile
++++ b/rdmavt/Makefile
+@@ -7,7 +7,7 @@
+ ifneq ($(KERNELRELEASE),)
+ #kbuild part of makefile
+ 
+-NOSTDINC_FLAGS += -I${M}/include -I${M}/compat
++NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi -I${M}/compat
+ 
+ obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
+ 
+--- a/rdmavt/compat_common.c
++++ b/rdmavt/compat_common.c
+@@ -200,7 +200,7 @@
+ 	SET_DEVICE_OP(dev_ops, alloc_mr);
+ 	SET_DEVICE_OP(dev_ops, alloc_mw);
+ 	SET_DEVICE_OP(dev_ops, alloc_pd);
+-#ifdef HAVE_ALLOC_RDMA_NETDEV
++#if defined(HAVE_ALLOC_RDMA_NETDEV) && !defined(IFS_DEB9)
+ 	SET_DEVICE_OP(dev_ops, alloc_rdma_netdev);
+ #endif
+ 	SET_DEVICE_OP(dev_ops, alloc_ucontext);
+@@ -337,3 +337,4 @@
+ }
+ EXPORT_SYMBOL(ib_set_device_ops);
+ #endif
++
+--- a/include/uapi/rdma/rdma_user_ioctl.h
++++ b/include/uapi/rdma/rdma_user_ioctl.h
+@@ -38,9 +38,10 @@
+ #include <rdma/hfi/hfi1_ioctl.h>
+ #include <rdma/rdma_user_ioctl_cmds.h>
+ 
++#ifndef IB_IOCTL_MAGIC
+ /* Legacy name, for user space application which already use it */
+ #define IB_IOCTL_MAGIC		RDMA_IOCTL_MAGIC
+-
++#endif
+ /*
+  * General blocks assignments
+  * It is closed on purpose do not expose it it user space
+@@ -49,10 +50,18 @@
+  */
+ 
+ /* MAD specific section */
++#ifndef IB_USER_MAD_REGISTER_AGENT
+ #define IB_USER_MAD_REGISTER_AGENT	_IOWR(RDMA_IOCTL_MAGIC, 0x01, struct ib_user_mad_reg_req)
++#endif
++#ifndef IB_USER_MAD_UNREGISTER_AGENT
+ #define IB_USER_MAD_UNREGISTER_AGENT	_IOW(RDMA_IOCTL_MAGIC,  0x02, __u32)
++#endif
++#ifndef IB_USER_MAD_ENABLE_PKEY
+ #define IB_USER_MAD_ENABLE_PKEY		_IO(RDMA_IOCTL_MAGIC,   0x03)
++#endif
++#ifndef IB_USER_MAD_REGISTER_AGENT2
+ #define IB_USER_MAD_REGISTER_AGENT2	_IOWR(RDMA_IOCTL_MAGIC, 0x04, struct ib_user_mad_reg_req2)
++#endif
+ 
+ /* HFI specific section */
+ /* allocate HFI and context */

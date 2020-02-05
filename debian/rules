@@ -58,7 +58,7 @@ override_dh_auto_clean:
 
 .PHONY: override_dh_auto_build
 override_dh_auto_build:
-	$(MAKE) -j$(MJOBS) $(CONFIG_OPTS) M=$$PWD V=1
+#	$(MAKE) -j$(MJOBS) $(CONFIG_OPTS) M=$$PWD V=1
 
 .PHONY: override_dh_auto_install
 override_dh_auto_install:

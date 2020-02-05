@@ -20,7 +20,7 @@ Description: Development headers for Intel HFI1 driver interface
  used for software that communicates directly with the HFI1 driver,
  as opposed to using an API such as PSM2 or libibverbs.
 
-Package: kmod-ifs-kernel-updates-4.9.0-9-amd64
+Package: kmod-ifs-kernel-updates-4.19.0-6-amd64
 Architecture: amd64
 Depends: linux-image-4.19.0-6-amd64,
          ${misc:Depends},

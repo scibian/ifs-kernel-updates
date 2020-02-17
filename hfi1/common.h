@@ -199,7 +199,7 @@
  * to the driver itself, not the software interfaces it supports.
  */
 #ifndef HFI1_DRIVER_VERSION_BASE
-#define HFI1_DRIVER_VERSION_BASE "10.9-0"
+#define HFI1_DRIVER_VERSION_BASE "10.10.1.0"
 #endif
 
 /* create the final driver version string */
@@ -404,8 +404,8 @@ static inline u32 rhf_egr_buf_offset(u64 rhf)
 	return (rhf >> RHF_EGR_OFFSET_SHIFT) & RHF_EGR_OFFSET_MASK;
 }
 
-#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_RH80)
-#if !defined(IFS_SLES12SP4)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_RH80) && !defined(IFS_RH81)
+#if !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5)
 static inline int security_ib_pkey_access(void *sec, u64 subnet_prefix, u16 pkey)
 {
         return 0;
@@ -426,7 +426,6 @@ static inline int ib_get_cached_subnet_prefix(struct ib_device *device,
 {
 	return 0;
 }
-
 #endif /* !IFS_RH75 */
 
 #endif /* _COMMON_H */

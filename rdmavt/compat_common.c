@@ -93,7 +93,7 @@ void hfi1_vnic_cleanup(struct hfi1_devdata *dd)
 {
 }
 EXPORT_SYMBOL(hfi1_vnic_cleanup);
-#if !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_RH76) && !defined(IFS_RH80)
+#if !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_RH80) && !defined(IFS_RH81)
 /*
  * pci_request_irq - allocate an interrupt line for a PCI device
  * @dev:       PCI device to operate on
@@ -152,7 +152,7 @@ void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id)
 }
 EXPORT_SYMBOL(pci_free_irq);
 #endif
-#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH80) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_RH80) && !defined(IFS_RH81) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5)
 /**
  * cdev_set_parent() - set the parent kobject for a char device
  * @p: the cdev structure
@@ -169,4 +169,171 @@ void cdev_set_parent(struct cdev *p, struct kobject *kobj)
 }
 EXPORT_SYMBOL(cdev_set_parent);
 
+#endif
+
+#ifndef HAVE_IB_SET_DEVICE_OPS
+void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops)
+{
+#ifdef IB_DEV_HAS_EMBEDDED_OPS
+	struct ib_device_ops *dev_ops = &dev->ops;
+#else
+	struct ib_device *dev_ops = dev;
+#endif
+#define SET_DEVICE_OP(ptr, name)                                               \
+	do {                                                                   \
+		if (ops->name)                                                 \
+			if (!((ptr)->name))				       \
+				(ptr)->name = ops->name;                       \
+	} while (0)
+
+#define SET_OBJ_SIZE(ptr, name) SET_DEVICE_OP(ptr, size_##name)
+
+	SET_DEVICE_OP(dev_ops, add_gid);
+#ifdef HAVE_ADVICE_MR
+	SET_DEVICE_OP(dev_ops, advise_mr);
+#endif
+#ifdef HAVE_ALLOC_DM
+	SET_DEVICE_OP(dev_ops, alloc_dm);
+#endif
+	SET_DEVICE_OP(dev_ops, alloc_fmr);
+	SET_DEVICE_OP(dev_ops, alloc_hw_stats);
+	SET_DEVICE_OP(dev_ops, alloc_mr);
+	SET_DEVICE_OP(dev_ops, alloc_mw);
+	SET_DEVICE_OP(dev_ops, alloc_pd);
+#ifdef HAVE_ALLOC_RDMA_NETDEV
+	SET_DEVICE_OP(dev_ops, alloc_rdma_netdev);
+#endif
+	SET_DEVICE_OP(dev_ops, alloc_ucontext);
+#ifdef HAVE_ALLOC_XRCD
+	SET_DEVICE_OP(dev_ops, alloc_xrcd);
+#endif
+	SET_DEVICE_OP(dev_ops, attach_mcast);
+	SET_DEVICE_OP(dev_ops, check_mr_status);
+	SET_DEVICE_OP(dev_ops, create_ah);
+#ifdef HAVE_CREATE_COUNTERS
+	SET_DEVICE_OP(dev_ops, create_counters);
+#endif
+	SET_DEVICE_OP(dev_ops, create_cq);
+	SET_DEVICE_OP(dev_ops, create_flow);
+#ifdef HAVE_CREATE_FLOW_ACTION_ESP
+	SET_DEVICE_OP(dev_ops, create_flow_action_esp);
+#endif
+	SET_DEVICE_OP(dev_ops, create_qp);
+	SET_DEVICE_OP(dev_ops, create_rwq_ind_table);
+	SET_DEVICE_OP(dev_ops, create_srq);
+	SET_DEVICE_OP(dev_ops, create_wq);
+#ifdef HAVE_ALLOC_DM
+	SET_DEVICE_OP(dev_ops, dealloc_dm);
+#endif
+#ifdef HAVE_DEALLOC_DRIVER
+	SET_DEVICE_OP(dev_ops, dealloc_driver);
+#endif
+	SET_DEVICE_OP(dev_ops, dealloc_fmr);
+	SET_DEVICE_OP(dev_ops, dealloc_mw);
+	SET_DEVICE_OP(dev_ops, dealloc_pd);
+	SET_DEVICE_OP(dev_ops, dealloc_ucontext);
+#ifdef HAVE_ALLOC_XRCD
+	SET_DEVICE_OP(dev_ops, dealloc_xrcd);
+#endif
+	SET_DEVICE_OP(dev_ops, del_gid);
+	SET_DEVICE_OP(dev_ops, dereg_mr);
+	SET_DEVICE_OP(dev_ops, destroy_ah);
+#ifdef HAVE_CREATE_COUNTERS
+	SET_DEVICE_OP(dev_ops, destroy_counters);
+#endif
+	SET_DEVICE_OP(dev_ops, destroy_cq);
+	SET_DEVICE_OP(dev_ops, destroy_flow);
+#ifdef HAVE_DESTROY_FLOW_ACTION
+	SET_DEVICE_OP(dev_ops, destroy_flow_action);
+#endif
+	SET_DEVICE_OP(dev_ops, destroy_qp);
+	SET_DEVICE_OP(dev_ops, destroy_rwq_ind_table);
+	SET_DEVICE_OP(dev_ops, destroy_srq);
+	SET_DEVICE_OP(dev_ops, destroy_wq);
+	SET_DEVICE_OP(dev_ops, detach_mcast);
+	SET_DEVICE_OP(dev_ops, disassociate_ucontext);
+	SET_DEVICE_OP(dev_ops, drain_rq);
+	SET_DEVICE_OP(dev_ops, drain_sq);
+#ifdef HAVE_ENABLE_DRIVER
+	SET_DEVICE_OP(dev_ops, enable_driver);
+#endif
+#ifdef HAVE_FILL_RES_ENTRY
+	SET_DEVICE_OP(dev_ops, fill_res_entry);
+#endif
+	SET_DEVICE_OP(dev_ops, get_dev_fw_str);
+	SET_DEVICE_OP(dev_ops, get_dma_mr);
+	SET_DEVICE_OP(dev_ops, get_hw_stats);
+	SET_DEVICE_OP(dev_ops, get_link_layer);
+	SET_DEVICE_OP(dev_ops, get_netdev);
+	SET_DEVICE_OP(dev_ops, get_port_immutable);
+#ifdef HAVE_GET_VECTOR_AFFINITY
+	SET_DEVICE_OP(dev_ops, get_vector_affinity);
+#endif
+	SET_DEVICE_OP(dev_ops, get_vf_config);
+	SET_DEVICE_OP(dev_ops, get_vf_stats);
+#ifdef HAVE_INIT_PORT
+	SET_DEVICE_OP(dev_ops, init_port);
+#endif
+#ifdef HAVE_IW_ACCEPT
+	SET_DEVICE_OP(dev_ops, iw_accept);
+	SET_DEVICE_OP(dev_ops, iw_add_ref);
+	SET_DEVICE_OP(dev_ops, iw_connect);
+	SET_DEVICE_OP(dev_ops, iw_create_listen);
+	SET_DEVICE_OP(dev_ops, iw_destroy_listen);
+	SET_DEVICE_OP(dev_ops, iw_get_qp);
+	SET_DEVICE_OP(dev_ops, iw_reject);
+	SET_DEVICE_OP(dev_ops, iw_rem_ref);
+#endif
+	SET_DEVICE_OP(dev_ops, map_mr_sg);
+	SET_DEVICE_OP(dev_ops, map_phys_fmr);
+	SET_DEVICE_OP(dev_ops, mmap);
+	SET_DEVICE_OP(dev_ops, modify_ah);
+	SET_DEVICE_OP(dev_ops, modify_cq);
+	SET_DEVICE_OP(dev_ops, modify_device);
+#ifdef HAVE_CREATE_FLOW_ACTION_ESP
+	SET_DEVICE_OP(dev_ops, modify_flow_action_esp);
+#endif
+	SET_DEVICE_OP(dev_ops, modify_port);
+	SET_DEVICE_OP(dev_ops, modify_qp);
+	SET_DEVICE_OP(dev_ops, modify_srq);
+	SET_DEVICE_OP(dev_ops, modify_wq);
+	SET_DEVICE_OP(dev_ops, peek_cq);
+	SET_DEVICE_OP(dev_ops, poll_cq);
+	SET_DEVICE_OP(dev_ops, post_recv);
+	SET_DEVICE_OP(dev_ops, post_send);
+	SET_DEVICE_OP(dev_ops, post_srq_recv);
+	SET_DEVICE_OP(dev_ops, process_mad);
+	SET_DEVICE_OP(dev_ops, query_ah);
+	SET_DEVICE_OP(dev_ops, query_device);
+	SET_DEVICE_OP(dev_ops, query_gid);
+	SET_DEVICE_OP(dev_ops, query_pkey);
+	SET_DEVICE_OP(dev_ops, query_port);
+	SET_DEVICE_OP(dev_ops, query_qp);
+	SET_DEVICE_OP(dev_ops, query_srq);
+#ifdef HAVE_RDMA_NETDEV_GET_PARAMS
+	SET_DEVICE_OP(dev_ops, rdma_netdev_get_params);
+#endif
+#ifdef HAVE_CREATE_COUNTERS
+	SET_DEVICE_OP(dev_ops, read_counters);
+#endif
+#ifdef HAVE_REG_DM_MR
+	SET_DEVICE_OP(dev_ops, reg_dm_mr);
+#endif
+	SET_DEVICE_OP(dev_ops, reg_user_mr);
+	SET_DEVICE_OP(dev_ops, req_ncomp_notif);
+	SET_DEVICE_OP(dev_ops, req_notify_cq);
+	SET_DEVICE_OP(dev_ops, rereg_user_mr);
+	SET_DEVICE_OP(dev_ops, resize_cq);
+	SET_DEVICE_OP(dev_ops, set_vf_guid);
+	SET_DEVICE_OP(dev_ops, set_vf_link_state);
+	SET_DEVICE_OP(dev_ops, unmap_fmr);
+
+#if 0
+	SET_OBJ_SIZE(dev_ops, ib_ah);
+	SET_OBJ_SIZE(dev_ops, ib_pd);
+	SET_OBJ_SIZE(dev_ops, ib_srq);
+	SET_OBJ_SIZE(dev_ops, ib_ucontext);
+#endif
+}
+EXPORT_SYMBOL(ib_set_device_ops);
 #endif

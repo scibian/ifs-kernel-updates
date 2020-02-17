@@ -54,7 +54,7 @@
 
 struct mmu_rb_handler {
 	struct mmu_notifier mn;
-#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4)
+#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4) || defined(IFS_SLES12SP5)
 	struct rb_root root;
 #else
 	struct rb_root_cached root;
@@ -108,7 +108,7 @@ int hfi1_mmu_rb_register(void *ops_arg, struct mm_struct *mm,
 	handlr = kmalloc(sizeof(*handlr), GFP_KERNEL);
 	if (!handlr)
 		return -ENOMEM;
-#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4)
+#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4) || defined(IFS_SLES12SP5)
 	handlr->root = RB_ROOT;
 #else
 	handlr->root = RB_ROOT_CACHED;
@@ -157,13 +157,13 @@ void hfi1_mmu_rb_unregister(struct mmu_rb_handler *handler)
 	INIT_LIST_HEAD(&del_list);
 
 	spin_lock_irqsave(&handler->lock, flags);
-#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4)
+#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4) || defined(IFS_SLES12SP5)
 	while ((node = rb_first(&handler->root))) {
 #else
 	while ((node = rb_first_cached(&handler->root))) {
 #endif
 		rbnode = rb_entry(node, struct mmu_rb_node, node);
-#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4)
+#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4) || defined(IFS_SLES12SP5)
 		rb_erase(node, &handler->root);
 #else
 		rb_erase_cached(node, &handler->root);
@@ -309,7 +309,7 @@ static void mmu_notifier_range_start(struct mmu_notifier *mn,
 {
 	struct mmu_rb_handler *handler =
 		container_of(mn, struct mmu_rb_handler, mn);
-#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4)
+#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4) || defined(IFS_SLES12SP5)
 	struct rb_root *root = &handler->root;
 #else
 	struct rb_root_cached *root = &handler->root;
@@ -395,7 +395,7 @@ struct mmu_rb_node *hfi1_mmu_rb_first_cached(struct mmu_rb_handler *handler)
 	unsigned long flags;
 
 	spin_lock_irqsave(&handler->lock, flags);
-#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4)
+#if defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP4) || defined(IFS_SLES12SP5)
 	node = rb_first(&handler->root);
 #else
 	node = rb_first_cached(&handler->root);

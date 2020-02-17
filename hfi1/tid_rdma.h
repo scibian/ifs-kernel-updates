@@ -44,7 +44,6 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-
 #ifndef HFI1_TID_RDMA_H
 #define HFI1_TID_RDMA_H
 
@@ -59,21 +58,7 @@
 #define TID_RDMA_MIN_SEGMENT_SIZE       BIT(18)   /* 256 KiB (for now) */
 #define TID_RDMA_MAX_SEGMENT_SIZE       BIT(18)   /* 256 KiB (for now) */
 #define TID_RDMA_MAX_PAGES              (BIT(18) >> PAGE_SHIFT)
-
-/*
- * Maximum number of receive context flows to be used for TID RDMA
- * READ and WRITE requests from any QP.
- */
-#define TID_RDMA_MAX_READ_FLOWS		(RXE_NUM_TID_FLOWS / 2)
-#define TID_RDMA_MAX_WRITE_FLOWS			\
-	(RXE_NUM_TID_FLOWS - TID_RDMA_MAX_READ_FLOWS)
-/* Maximum number of segments in flight per QP request. */
-#define TID_RDMA_MAX_READ_SEGS_PER_REQ  6
-#define TID_RDMA_MAX_WRITE_SEGS_PER_REQ 4
-#define TID_RDMA_MAX_READ_SEGS          6
-#define MAX_REQ max_t(u16, TID_RDMA_MAX_READ_SEGS_PER_REQ, \
-		     TID_RDMA_MAX_WRITE_SEGS_PER_REQ)
-#define MAX_FLOWS roundup_pow_of_two(MAX_REQ + 1)
+#define TID_RDMA_SEGMENT_SHIFT		18
 
 /*
  * Bit definitions for priv->s_flags.
@@ -97,8 +82,8 @@
 /* BIT(18) reserved for RVT_S_ECN. */
 #define HFI1_R_TID_SW_PSN         BIT(19)
 /* BIT(26) reserved for HFI1_S_WAIT_HALT */
-/* BIT(27) reserved for HFI1_S_WAIT_TID_SPACE */
-/* BIT(28) reserved for HFI1_S_WAIT_TID_RESP */
+/* BIT(27) reserved for HFI1_S_WAIT_TID_RESP */
+/* BIT(28) reserved for HFI1_S_WAIT_TID_SPACE */
 
 /*
  * Unlike regular IB RDMA VERBS, which do not require an entry
@@ -124,13 +109,12 @@ struct tid_rdma_params {
 };
 
 struct tid_rdma_qp_params {
-	u8 n_read;
-	u8 n_write;
 	struct work_struct trigger_work;
 	struct tid_rdma_params local;
 	struct tid_rdma_params __rcu *remote;
 };
 
+/* Track state for each hardware flow */
 struct tid_flow_state {
 	u32 generation;
 	u32 psn;
@@ -165,17 +149,14 @@ struct tid_rdma_request {
 	u16 setup_head;		/* flow index we are setting up */
 	u16 clear_tail;		/* flow index we are clearing */
 	u16 flow_idx;		/* flow index most recently set up */
-	u16 kdeth_seq;          /* the sequence (10bits) of the KDETH PSN */
 	u16 acked_tail;
 
-	u32 lkey;
-	u32 rkey;
 	u32 seg_len;
 	u32 total_len;
 	u32 r_ack_psn;          /* next expected ack PSN */
 	u32 r_flow_psn;         /* IB PSN of next segment start */
 	u32 r_last_acked;       /* IB PSN of last ACK'ed packet */
-	u32 s_next_psn;         /* IB PSN of next segment start for read */
+	u32 s_next_psn;		/* IB PSN of next segment start for read */
 
 	u32 total_segs;		/* segments required to complete a request */
 	u32 cur_seg;		/* index of current segment */
@@ -188,37 +169,10 @@ struct tid_rdma_request {
 	enum tid_rdma_req_state state;
 };
 
-struct tid_rdma_pageset {
-	dma_addr_t addr : 48; /* Only needed for the first page */
-	u8 idx: 8;
-	u8 count : 7;
-	u8 mapped : 1;
-};
-
-static inline u8 trdma_pset_order(struct tid_rdma_pageset *s)
-{
-	u8 count = s->count;
-
-	return ilog2(count) + 1;
-}
-
-/**
- * kern_tid_node - used for managing TID's in TID groups
- *
- * @grp: TID group referred to by this TID node
- * @map: grp->map captured prior to programming this TID group in HW
- * @cnt: Only @cnt of available group entries are actually programmed
- */
-struct kern_tid_node {
-	struct tid_group *grp;
-	u8 map;
-	u8 cnt;
-};
-
 /*
  * When header suppression is used, PSNs associated with a "flow" are
  * relevant (and not the PSNs maintained by verbs). Track per-flow
- * PSNs here.
+ * PSNs here for a TID RDMA segment.
  *
  */
 struct flow_state {
@@ -228,11 +182,33 @@ struct flow_state {
 	u32 spsn;            /* starting PSN in TID space */
 	u32 lpsn;            /* last PSN in TID space */
 	u32 r_next_psn;      /* next PSN to be received (in TID space) */
+
 	/* For tid rdma read */
 	u32 ib_spsn;         /* starting PSN in Verbs space */
 	u32 ib_lpsn;         /* last PSn in Verbs space */
 };
 
+struct tid_rdma_pageset {
+	dma_addr_t addr : 48; /* Only needed for the first page */
+	u8 idx: 8;
+	u8 count : 7;
+	u8 mapped: 1;
+};
+
+/**
+ * kern_tid_node - used for managing TID's in TID groups
+ *
+ * @grp_idx: rcd relative index to tid_group
+ * @map: grp->map captured prior to programming this TID group in HW
+ * @cnt: Only @cnt of available group entries are actually programmed
+ */
+struct kern_tid_node {
+	struct tid_group *grp;
+	u8 map;
+	u8 cnt;
+};
+
+/* Overall info for a TID RDMA segment */
 struct tid_rdma_flow {
 	/*
 	 * While a TID RDMA segment is being transferred, it uses a QP number
@@ -269,89 +245,13 @@ bool tid_rdma_conn_req(struct rvt_qp *qp, u64 *data);
 bool tid_rdma_conn_reply(struct rvt_qp *qp, u64 data);
 bool tid_rdma_conn_resp(struct rvt_qp *qp, u64 *data);
 void tid_rdma_conn_error(struct rvt_qp *qp);
-
-void hfi1_kern_init_ctxt_generations(struct hfi1_ctxtdata *rcd);
-void tid_rdma_flush_wait(struct rvt_qp *qp);
-
-void hfi1_compute_tid_rdma_flow_wt(void);
-void hfi1_kern_clear_hw_flow(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp);
-int hfi1_kern_exp_rcv_init(struct hfi1_ctxtdata *rcd, int reinit);
-int hfi1_kern_exp_rcv_clear(struct tid_rdma_request *req);
-void hfi1_kern_exp_rcv_clear_all(struct tid_rdma_request *req);
-void hfi1_kern_read_tid_flow_free(struct rvt_qp *qp);
-
-struct cntr_entry;
-u64 hfi1_access_sw_tid_wait(const struct cntr_entry *entry,
-			    void *context, int vl, int mode, u64 data);
-
-void hfi1_rc_rcv_tid_rdma_write_req(struct hfi1_packet *packet);
-
-void hfi1_rc_rcv_tid_rdma_write_data(struct hfi1_packet *packet);
-
-void hfi1_rc_rcv_tid_rdma_write_resp(struct hfi1_packet *packet);
-
-void hfi1_rc_rcv_tid_rdma_read_req(struct hfi1_packet *packet);
-
-void hfi1_rc_rcv_tid_rdma_read_resp(struct hfi1_packet *packet);
-
-void hfi1_rc_rcv_tid_rdma_resync(struct hfi1_packet *packet);
-
-void hfi1_rc_rcv_tid_rdma_ack(struct hfi1_packet *packet);
-
-bool hfi1_handle_kdeth_eflags(struct hfi1_ctxtdata *rcd,
-			      struct hfi1_pportdata *ppd,
-			      struct hfi1_packet *packet);
-
-bool hfi1_tid_rdma_wqe_interlock(struct rvt_qp *qp, struct rvt_swqe *wqe);
-bool hfi1_tid_rdma_ack_interlock(struct rvt_qp *qp, struct rvt_ack_entry *e);
-
-void hfi1_del_tid_reap_timer(struct rvt_qp *qp);
-
-void hfi1_add_tid_retry_timer(struct rvt_qp *qp);
-void hfi1_del_tid_retry_timer(struct rvt_qp *qp);
-
-void setup_tid_rdma_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
-static inline void hfi1_setup_tid_rdma_wqe(struct rvt_qp *qp,
-					   struct rvt_swqe *wqe)
-{
-	if (wqe->priv &&
-	    (wqe->wr.opcode == IB_WR_RDMA_READ ||
-	     wqe->wr.opcode == IB_WR_RDMA_WRITE) &&
-	    wqe->length >= TID_RDMA_MIN_SEGMENT_SIZE)
-		setup_tid_rdma_wqe(qp, wqe);
-}
-
-bool hfi1_schedule_tid_send(struct rvt_qp *qp);
-
-void hfi1_qp_tid_print(struct seq_file *s, struct rvt_qp *qp);
-int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
-		      struct ib_qp_init_attr *init_attr);
-void hfi1_qp_priv_tid_free(struct rvt_dev_info *rdi, struct rvt_qp *qp);
-void hfi1_qp_kern_exp_rcv_clear_all(struct rvt_qp *qp);
-
-void hfi1_tid_rdma_restart_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-			       u32 *bth2);
-
-void _hfi1_do_tid_send(struct work_struct *work);
 void tid_rdma_opfn_init(struct rvt_qp *qp, struct tid_rdma_params *p);
 
-u32 hfi1_build_tid_rdma_write_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-				  struct ib_other_headers *ohdr,
-				  u32 *bth1, u32 *bth2, u32 *len);
-u32 hfi1_build_tid_rdma_write_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
-				   struct ib_other_headers *ohdr, u32 *bth1,
-				   u32 bth2, u32 *len,
-				   struct rvt_sge_state **ss);
-u32 hfi1_build_tid_rdma_read_packet(struct rvt_swqe *wqe,
-				    struct ib_other_headers *ohdr,
-				    u32 *bth1, u32 *bth2, u32 *len);
-u32 hfi1_build_tid_rdma_read_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
-				 struct ib_other_headers *ohdr, u32 *bth1,
-				 u32 *bth2, u32 *len);
-u32 hfi1_build_tid_rdma_read_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
-				  struct ib_other_headers *ohdr, u32 *bth0,
-				  u32 *bth1, u32 *bth2, u32 *len, bool *last);
-
+int hfi1_kern_exp_rcv_init(struct hfi1_ctxtdata *rcd, int reinit);
+int hfi1_kern_exp_rcv_setup(struct tid_rdma_request *req,
+			    struct rvt_sge_state *ss, bool *last);
+int hfi1_kern_exp_rcv_clear(struct tid_rdma_request *req);
+void hfi1_kern_exp_rcv_clear_all(struct tid_rdma_request *req);
 void __trdma_clean_swqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
 
 /**
@@ -365,5 +265,98 @@ static inline void trdma_clean_swqe(struct rvt_qp *qp, struct rvt_swqe *wqe)
 		return;
 	__trdma_clean_swqe(qp, wqe);
 }
+
+void hfi1_kern_read_tid_flow_free(struct rvt_qp *qp);
+
+int hfi1_qp_priv_init(struct rvt_dev_info *rdi, struct rvt_qp *qp,
+		      struct ib_qp_init_attr *init_attr);
+void hfi1_qp_priv_tid_free(struct rvt_dev_info *rdi, struct rvt_qp *qp);
+
+void hfi1_tid_rdma_flush_wait(struct rvt_qp *qp);
+
+int hfi1_kern_setup_hw_flow(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp);
+void hfi1_kern_clear_hw_flow(struct hfi1_ctxtdata *rcd, struct rvt_qp *qp);
+void hfi1_kern_init_ctxt_generations(struct hfi1_ctxtdata *rcd);
+
+struct cntr_entry;
+u64 hfi1_access_sw_tid_wait(const struct cntr_entry *entry,
+			    void *context, int vl, int mode, u64 data);
+
+u32 hfi1_build_tid_rdma_read_packet(struct rvt_swqe *wqe,
+				    struct ib_other_headers *ohdr,
+				    u32 *bth1, u32 *bth2, u32 *len);
+u32 hfi1_build_tid_rdma_read_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
+				 struct ib_other_headers *ohdr, u32 *bth1,
+				 u32 *bth2, u32 *len);
+void hfi1_rc_rcv_tid_rdma_read_req(struct hfi1_packet *packet);
+u32 hfi1_build_tid_rdma_read_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
+				  struct ib_other_headers *ohdr, u32 *bth0,
+				  u32 *bth1, u32 *bth2, u32 *len, bool *last);
+void hfi1_rc_rcv_tid_rdma_read_resp(struct hfi1_packet *packet);
+bool hfi1_handle_kdeth_eflags(struct hfi1_ctxtdata *rcd,
+			      struct hfi1_pportdata *ppd,
+			      struct hfi1_packet *packet);
+void hfi1_tid_rdma_restart_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
+			       u32 *bth2);
+void hfi1_qp_kern_exp_rcv_clear_all(struct rvt_qp *qp);
+bool hfi1_tid_rdma_wqe_interlock(struct rvt_qp *qp, struct rvt_swqe *wqe);
+
+void setup_tid_rdma_wqe(struct rvt_qp *qp, struct rvt_swqe *wqe);
+static inline void hfi1_setup_tid_rdma_wqe(struct rvt_qp *qp,
+					   struct rvt_swqe *wqe)
+{
+	if (wqe->priv &&
+	    (wqe->wr.opcode == IB_WR_RDMA_READ ||
+	     wqe->wr.opcode == IB_WR_RDMA_WRITE) &&
+	    wqe->length >= TID_RDMA_MIN_SEGMENT_SIZE)
+		setup_tid_rdma_wqe(qp, wqe);
+}
+
+u32 hfi1_build_tid_rdma_write_req(struct rvt_qp *qp, struct rvt_swqe *wqe,
+				  struct ib_other_headers *ohdr,
+				  u32 *bth1, u32 *bth2, u32 *len);
+
+void hfi1_rc_rcv_tid_rdma_write_req(struct hfi1_packet *packet);
+
+u32 hfi1_build_tid_rdma_write_resp(struct rvt_qp *qp, struct rvt_ack_entry *e,
+				   struct ib_other_headers *ohdr, u32 *bth1,
+				   u32 bth2, u32 *len,
+				   struct rvt_sge_state **ss);
+
+void hfi1_del_tid_reap_timer(struct rvt_qp *qp);
+
+void hfi1_rc_rcv_tid_rdma_write_resp(struct hfi1_packet *packet);
+
+bool hfi1_build_tid_rdma_packet(struct rvt_swqe *wqe,
+				struct ib_other_headers *ohdr,
+				u32 *bth1, u32 *bth2, u32 *len);
+
+void hfi1_rc_rcv_tid_rdma_write_data(struct hfi1_packet *packet);
+
+u32 hfi1_build_tid_rdma_write_ack(struct rvt_qp *qp, struct rvt_ack_entry *e,
+				  struct ib_other_headers *ohdr, u16 iflow,
+				  u32 *bth1, u32 *bth2);
+
+void hfi1_rc_rcv_tid_rdma_ack(struct hfi1_packet *packet);
+
+void hfi1_add_tid_retry_timer(struct rvt_qp *qp);
+void hfi1_del_tid_retry_timer(struct rvt_qp *qp);
+
+u32 hfi1_build_tid_rdma_resync(struct rvt_qp *qp, struct rvt_swqe *wqe,
+			       struct ib_other_headers *ohdr, u32 *bth1,
+			       u32 *bth2, u16 fidx);
+
+void hfi1_rc_rcv_tid_rdma_resync(struct hfi1_packet *packet);
+
+struct hfi1_pkt_state;
+int hfi1_make_tid_rdma_pkt(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
+
+void _hfi1_do_tid_send(struct work_struct *work);
+
+bool hfi1_schedule_tid_send(struct rvt_qp *qp);
+
+bool hfi1_tid_rdma_ack_interlock(struct rvt_qp *qp, struct rvt_ack_entry *e);
+
+void hfi1_qp_tid_print(struct seq_file *s, struct rvt_qp *qp);
 
 #endif /* HFI1_TID_RDMA_H */

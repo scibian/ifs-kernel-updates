@@ -171,6 +171,7 @@ struct hfi1_qp_priv {
 	struct tid_flow_state flow_state;
 	struct tid_rdma_qp_params tid_rdma;
 	struct rvt_qp *owner;
+	u16 s_running_pkt_size;
 	u8 hdr_type; /* 9B or 16B */
 	struct rvt_sge_state tid_ss;       /* SGE state pointer for 2nd leg */
 	atomic_t n_requests;               /* # of TID RDMA requests in the */
@@ -403,9 +404,6 @@ void hfi1_put_txreq(struct verbs_txreq *tx);
 
 int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
 
-void hfi1_copy_sge(struct rvt_sge_state *ss, void *data, u32 length,
-		   bool release, bool copy_last);
-
 void hfi1_cnp_rcv(struct hfi1_packet *packet);
 
 void hfi1_uc_rcv(struct hfi1_packet *packet);
@@ -419,6 +417,7 @@ void hfi1_rc_hdrerr(
 
 u8 ah_to_sc(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr);
 
+void hfi1_rc_verbs_aborted(struct rvt_qp *qp, struct hfi1_opa_header *opah);
 void hfi1_rc_send_complete(struct rvt_qp *qp, struct hfi1_opa_header *opah);
 
 void hfi1_ud_rcv(struct hfi1_packet *packet);
@@ -457,9 +456,6 @@ void hfi1_do_send_from_rvt(struct rvt_qp *qp);
 
 void hfi1_do_send(struct rvt_qp *qp, bool in_thread);
 
-void hfi1_send_complete(struct rvt_qp *qp, struct rvt_swqe *wqe,
-			enum ib_wc_status status);
-
 void hfi1_send_rc_ack(struct hfi1_packet *packet, bool is_fecn);
 
 int hfi1_make_rc_req(struct rvt_qp *qp, struct hfi1_pkt_state *ps);
@@ -488,31 +484,8 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			u64 pbc);
 
-int hfi1_wss_init(void);
-void hfi1_wss_exit(void);
-
 void hfi1_wait_kmem(struct rvt_qp *qp);
-
 int hfi1_get_verbs_subnet_prefix(struct hfi1_devdata *dd, int port, u64 *subn);
-
-/* platform specific: return the lowest level cache (llc) size, in KiB */
-static inline int wss_llc_size(void)
-{
-	/* assume that the boot CPU value is universal for all CPUs */
-	return boot_cpu_data.x86_cache_size;
-}
-
-/* platform specific: cacheless copy */
-static inline void cacheless_memcpy(void *dst, void *src, size_t n)
-{
-	/*
-	 * Use the only available X64 cacheless copy.  Add a __user cast
-	 * to quiet sparse.  The src agument is already in the kernel so
-	 * there are no security issues.  The extra fault recovery machinery
-	 * is not invoked.
-	 */
-	__copy_user_nocache(dst, (void __user *)src, n, 0);
-}
 
 static inline bool opa_bth_is_migration(struct ib_other_headers *ohdr)
 {
@@ -524,7 +497,7 @@ static inline void hfi1_trdma_send_complete(struct rvt_qp *qp,
 					    enum ib_wc_status status)
 {
 	trdma_clean_swqe(qp, wqe);
-	hfi1_send_complete(qp, wqe, status);
+	rvt_send_complete(qp, wqe, status);
 }
 
 extern const enum ib_wc_opcode ib_hfi1_wc_opcode[];

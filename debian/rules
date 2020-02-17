@@ -2,6 +2,8 @@
 
 #export DH_VERBOSE=1
 
+DESTDIR=debian/tmp
+
 export CFLAGS=
 
 # used by debian/bin/gen-compat-config
@@ -11,7 +13,8 @@ export CONFIG_OPTS=CONFIG_COMPAT=y \
 	CONFIG_INFINIBAND_RDMAVT=m \
 	CONFIG_INFINIBAND_SRPT=m \
 	CONFIG_INFINIBAND_IPOIB=m \
-	CONFIG_INFINIBAND_IPOIB_CM=y
+	CONFIG_INFINIBAND_IPOIB_CM=y \
+	CONFIG_INFINIBAND_IPOIB_DEBUG=y
 
 PREP_FILES=debian/control \
 	debian/kmod-ifs-kernel-updates-$(KVER).lintian-overrides \
@@ -64,15 +67,14 @@ override_dh_auto_build:
 .PHONY: override_dh_auto_install
 override_dh_auto_install:
 	dh_auto_install $@
-	install -m 0755 -d debian/tmp/usr/include/uapi/rdma/hfi/
-	./debian/bin/headers_install debian/tmp/usr/include/uapi/rdma/hfi/ \
+	install -m 0755 -d $(DESTDIR)/usr/include/uapi/rdma/hfi/
+	./debian/bin/headers_install $(DESTDIR)/usr/include/uapi/rdma/hfi/ \
 		$(CURDIR)/include/rdma/hfi \
 		hfi1_user.h \
 		hfi1_ioctl.h
-	chmod 0644 debian/tmp/usr/include/uapi/rdma/hfi/*.h
-	./debian/bin/headers_install debian/tmp/usr/include/uapi/rdma/ \
-		$(CURDIR)/include/rdma \
-		rdma_user_ioctl.h
-	chmod 0644 debian/tmp/usr/include/uapi/rdma/*.h
-
+	./debian/bin/headers_install $(DESTDIR)/usr/include/uapi/rdma/ \
+		$(CURDIR)/include/uapi/rdma \
+		rdma_user_ioctl.h \
+		rdma_user_ioctl_cmds.h
+		find $(DESTDIR)/usr/include -type f -name \*.h -exec chmod 0644 {} \;
 

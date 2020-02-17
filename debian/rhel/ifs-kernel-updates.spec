@@ -6,7 +6,7 @@ Name:           ifs-kernel-updates
 Group:		System Environment/Kernel
 Summary:        Extra kernel modules for IFS
 Version:        %(echo %{kver}|sed -e 's/-/_/g')
-Release:        1793
+Release:        1919
 License:        GPLv2
 Source0:        %{name}-3.10.0_957.el7.x86_64.tgz
 Source1:        %{name}.files
@@ -105,12 +105,13 @@ for flavor in %flavors_to_build ; do
 done
 (targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/hfi/
  mkdir -p $targetdir
- rsrcdir=$(pwd)/include/rdma/
+ rsrcdir=$(pwd)/include/uapi/rdma
  srcdir=$(pwd)/include/rdma/hfi/
  cd %kdir
  sh ./scripts/headers_install.sh $targetdir $srcdir hfi1_user.h hfi1_ioctl.h
  targetdir=$RPM_BUILD_ROOT%{_includedir}/uapi/rdma/
- sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl.h)
+ sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl.h
+ sh ./scripts/headers_install.sh $targetdir $rsrcdir rdma_user_ioctl_cmds.h)
 
 %files devel
 %defattr(-,root,root,-)
@@ -119,6 +120,7 @@ done
 %{_includedir}/uapi/rdma/hfi/hfi1_user.h
 %{_includedir}/uapi/rdma/hfi/hfi1_ioctl.h
 %{_includedir}/uapi/rdma/rdma_user_ioctl.h
+%{_includedir}/uapi/rdma/rdma_user_ioctl_cmds.h
 
 
 %changelog

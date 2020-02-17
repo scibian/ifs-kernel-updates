@@ -47,9 +47,12 @@
 #if !defined(RH76_COMPAT_H)
 #define RH76_COMPAT_H
 
-#include "compat_common.h"
+#define CREATE_AH_HAS_UDATA
+#define HAVE_ALLOC_RDMA_NETDEV
+#define NEED_MM_HELPER_FUNCTIONS
+#define HAVE_NOSPEC_H
 
-#define KVZALLOC_NODE 1
+#include "compat_common.h"
 
 #define __GFP_RECLAIM	(__GFP_WAIT)
 
@@ -60,6 +63,18 @@
 #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
 
 #define NET_NAME_UNKNOWN 0
+
+#define rdma_create_ah(a, b, c) rdma_create_ah(a, b)
+#define rdma_destroy_ah(a, b) rdma_destroy_ah(a)
+
+#define ib_register_device(a, b, c)  ib_register_device((a), (c))
+#define rdma_set_device_sysfs_group(a, b)
+#define alloc_netdev_mqs(size, name, name_assign_type, setup, sdma, ctxts) \
+	alloc_netdev_mqs((size), (name), (setup), (sdma), (ctxts))
+#undef access_ok
+#define access_ok(addr, size) \
+	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
+#define _ib_alloc_device ib_alloc_device
 
 struct hfi1_msix_entry;
 struct hfi1_devdata;

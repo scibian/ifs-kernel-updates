@@ -119,6 +119,7 @@ static int hfi1_ipoib_dev_open(struct net_device *dev)
 		rcu_read_unlock();
 
 		hfi1_netdev_enable_queues(priv->dd);
+		hfi1_ipoib_napi_tx_enable(dev);
 	}
 
 	return ret;
@@ -131,6 +132,7 @@ static int hfi1_ipoib_dev_stop(struct net_device *dev)
 	if (!priv->qp)
 		return 0;
 
+	hfi1_ipoib_napi_tx_disable(dev);
 	hfi1_netdev_disable_queues(priv->dd);
 
 	rvt_put_qp(priv->qp);
@@ -216,14 +218,18 @@ static int hfi1_ipoib_mcast_attach(struct net_device *dev,
 
 	qp = rvt_lookup_qpn(ib_to_rvt(priv->device), &ibp->rvp, qpn);
 	if (qp) {
+		rvt_get_qp(qp);
+		rcu_read_unlock();
 		if (set_qkey)
 			priv->qkey = qkey;
 
 		/* attach QP to multicast group */
 		ret = ib_attach_mcast(&qp->ibqp, mgid, mlid);
+		rvt_put_qp(qp);
+	} else {
+		rcu_read_unlock();
 	}
 
-	rcu_read_unlock();
 	return ret;
 }
 
@@ -241,14 +247,18 @@ static int hfi1_ipoib_mcast_detach(struct net_device *dev,
 	rcu_read_lock();
 
 	qp = rvt_lookup_qpn(ib_to_rvt(priv->device), &ibp->rvp, qpn);
-	if (qp)
+	if (qp) {
+		rvt_get_qp(qp);
+		rcu_read_unlock();
 		ret = ib_detach_mcast(&qp->ibqp, mgid, mlid);
-
-	rcu_read_unlock();
+		rvt_put_qp(qp);
+	} else {
+		rcu_read_unlock();
+	}
 	return ret;
 }
 
-static void hfi1_ipoib_free_rdma_netdev(struct net_device *dev)
+static void hfi1_ipoib_netdev_dtor(struct net_device *dev)
 {
 	struct hfi1_ipoib_dev_priv *priv = hfi1_ipoib_priv(dev);
 
@@ -256,6 +266,11 @@ static void hfi1_ipoib_free_rdma_netdev(struct net_device *dev)
 	hfi1_ipoib_rxq_deinit(priv->netdev);
 
 	free_percpu(priv->netstats);
+}
+
+static void hfi1_ipoib_free_rdma_netdev(struct net_device *dev)
+{
+	hfi1_ipoib_netdev_dtor(dev);
 	free_netdev(dev);
 }
 
@@ -291,9 +306,7 @@ struct net_device *hfi1_ipoib_alloc_rn(struct ib_device *device,
 
 	dev = alloc_netdev_mqs((int)sizeof(struct hfi1_ipoib_rdma_netdev),
 			       name,
-#if defined(IFS_SLES12SP4) || defined(IFS_SLES15) || defined(IFS_SLES15SP1) || defined(IFS_SLES12SP3) || defined(IFS_SLES12SP2) || defined(IFS_RH80)
 			       name_assign_type,
-#endif
 			       setup,
 			       dd->num_sdma,
 			       dd->num_netdev_contexts);
@@ -337,7 +350,6 @@ struct net_device *hfi1_ipoib_alloc_rn(struct ib_device *device,
 	if (rc) {
 		dd_dev_err(dd, "IPoIB netdev TX init - failed(%d)\n", rc);
 		hfi1_ipoib_free_rdma_netdev(dev);
-		free_netdev(dev);
 		return ERR_PTR(rc);
 	}
 
@@ -345,8 +357,88 @@ struct net_device *hfi1_ipoib_alloc_rn(struct ib_device *device,
 	if (rc) {
 		dd_dev_err(dd, "IPoIB netdev RX init - failed(%d)\n", rc);
 		hfi1_ipoib_free_rdma_netdev(dev);
-		free_netdev(dev);
 		return ERR_PTR(rc);
 	}
 	return dev;
 }
+
+#ifdef HAVE_RDMA_NETDEV_GET_PARAMS
+static int hfi1_ipoib_setup_rn(struct ib_device *device,
+			       u8 port_num,
+			       struct net_device *netdev,
+			       void *param)
+{
+	struct hfi1_devdata *dd = dd_from_ibdev(device);
+	struct rdma_netdev *rn = netdev_priv(netdev);
+	struct hfi1_ipoib_dev_priv *priv;
+	int rc;
+
+	rn->send = hfi1_ipoib_send;
+	rn->attach_mcast = hfi1_ipoib_mcast_attach;
+	rn->detach_mcast = hfi1_ipoib_mcast_detach;
+	rn->set_id = hfi1_ipoib_set_id;
+	rn->hca = device;
+	rn->port_num = port_num;
+	rn->mtu = netdev->mtu;
+
+	priv = hfi1_ipoib_priv(netdev);
+	priv->dd = dd;
+	priv->netdev = netdev;
+	priv->device = device;
+	priv->port_num = port_num;
+	priv->netdev_ops = netdev->netdev_ops;
+
+	netdev->netdev_ops = &hfi1_ipoib_netdev_ops;
+
+	ib_query_pkey(device, port_num, priv->pkey_index, &priv->pkey);
+
+	rc = hfi1_ipoib_txreq_init(priv);
+	if (rc) {
+		dd_dev_err(dd, "IPoIB netdev TX init - failed(%d)\n", rc);
+		hfi1_ipoib_free_rdma_netdev(netdev);
+		return rc;
+	}
+
+	rc = hfi1_ipoib_rxq_init(netdev);
+	if (rc) {
+		dd_dev_err(dd, "IPoIB netdev RX init - failed(%d)\n", rc);
+		hfi1_ipoib_free_rdma_netdev(netdev);
+		return rc;
+	}
+
+#ifdef HAVE_NET_DEVICE_EXTENDED
+	netdev->extended->priv_destructor = hfi1_ipoib_netdev_dtor;
+	netdev->extended->needs_free_netdev = true;
+#else
+	netdev->priv_destructor = hfi1_ipoib_netdev_dtor;
+	netdev->needs_free_netdev = true;
+#endif
+
+	return 0;
+}
+
+int hfi1_ipoib_rn_get_params(struct ib_device *device,
+			     u8 port_num,
+			     enum rdma_netdev_t type,
+			     struct rdma_netdev_alloc_params *params)
+{
+	struct hfi1_devdata *dd = dd_from_ibdev(device);
+
+	if (type != RDMA_NETDEV_IPOIB)
+		return -EOPNOTSUPP;
+
+	if (!ipoib_accel || !dd->num_netdev_contexts)
+		return -EOPNOTSUPP;
+
+	if (!port_num || port_num > dd->num_pports)
+		return -EINVAL;
+
+	params->sizeof_priv = sizeof(struct hfi1_ipoib_rdma_netdev);
+	params->txqs = dd->num_sdma;
+	params->rxqs = dd->num_netdev_contexts;
+	params->param = NULL;
+	params->initialize_rdma_netdev = hfi1_ipoib_setup_rn;
+
+	return 0;
+}
+#endif

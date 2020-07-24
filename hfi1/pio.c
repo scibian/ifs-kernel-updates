@@ -750,6 +750,7 @@ struct send_context *sc_alloc(struct hfi1_devdata *dd, int type,
 	spin_lock_init(&sc->alloc_lock);
 	spin_lock_init(&sc->release_lock);
 	spin_lock_init(&sc->credit_ctrl_lock);
+	seqlock_init(&sc->waitlock);
 	INIT_LIST_HEAD(&sc->piowait);
 	INIT_WORK(&sc->halt_work, sc_halted);
 	init_waitqueue_head(&sc->halt_wait);
@@ -959,6 +960,22 @@ void sc_disable(struct send_context *sc)
 		}
 	}
 	spin_unlock(&sc->release_lock);
+
+	write_seqlock(&sc->waitlock);
+	while (!list_empty(&sc->piowait)) {
+		struct iowait *wait;
+		struct rvt_qp *qp;
+		struct hfi1_qp_priv *priv;
+
+		wait = list_first_entry(&sc->piowait, struct iowait, list);
+		qp = iowait_to_qp(wait);
+		priv = qp->priv;
+		list_del_init(&priv->s_iowait.list);
+		priv->s_iowait.lock = NULL;
+		hfi1_qp_wakeup(qp, RVT_S_WAIT_PIO | HFI1_S_WAIT_PIO_DRAIN);
+	}
+	write_sequnlock(&sc->waitlock);
+
 	spin_unlock_irq(&sc->alloc_lock);
 }
 
@@ -1434,7 +1451,8 @@ void sc_stop(struct send_context *sc, int flag)
  * @cb: optional callback to call when the buffer is finished sending
  * @arg: argument for cb
  *
- * Return a pointer to a PIO buffer if successful, NULL if not enough room.
+ * Return a pointer to a PIO buffer, NULL if not enough room, -ECOMM
+ * when link is down.
  */
 struct pio_buf *sc_buffer_alloc(struct send_context *sc, u32 dw_len,
 				pio_release_cb cb, void *arg)
@@ -1450,7 +1468,7 @@ struct pio_buf *sc_buffer_alloc(struct send_context *sc, u32 dw_len,
 	spin_lock_irqsave(&sc->alloc_lock, flags);
 	if (!(sc->flags & SCF_ENABLED)) {
 		spin_unlock_irqrestore(&sc->alloc_lock, flags);
-		goto done;
+		return ERR_PTR(-ECOMM);
 	}
 
 retry:
@@ -1601,7 +1619,6 @@ void hfi1_sc_wantpiobuf_intr(struct send_context *sc, u32 needint)
 static void sc_piobufavail(struct send_context *sc)
 {
 	struct hfi1_devdata *dd = sc->dd;
-	struct hfi1_ibdev *dev = &dd->verbs_dev;
 	struct list_head *list;
 	struct rvt_qp *qps[PIO_WAIT_BATCH_SIZE];
 	struct rvt_qp *qp;
@@ -1619,7 +1636,7 @@ static void sc_piobufavail(struct send_context *sc)
 	 * could end up with QPs on the wait list with the interrupt
 	 * disabled.
 	 */
-	write_seqlock_irqsave(&dev->iowait_lock, flags);
+	write_seqlock_irqsave(&sc->waitlock, flags);
 	while (!list_empty(list)) {
 		struct iowait *wait;
 
@@ -1650,7 +1667,7 @@ static void sc_piobufavail(struct send_context *sc)
 		if (!list_empty(list))
 			hfi1_sc_wantpiobuf_intr(sc, 1);
 	}
-	write_sequnlock_irqrestore(&dev->iowait_lock, flags);
+	write_sequnlock_irqrestore(&sc->waitlock, flags);
 
 	/* Wake up the top-priority one first */
 	if (n)

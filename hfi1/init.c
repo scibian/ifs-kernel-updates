@@ -272,10 +272,13 @@ int hfi1_rcd_put(struct hfi1_ctxtdata *rcd)
  * @rcd: pointer to an initialized rcd data structure
  *
  * Use this to get a reference after the init.
+ *
+ * Return : reflect kref_get_unless_zero(), which returns non-zero on
+ * increment, otherwise 0.
  */
-void hfi1_rcd_get(struct hfi1_ctxtdata *rcd)
+int hfi1_rcd_get(struct hfi1_ctxtdata *rcd)
 {
-	kref_get(&rcd->kref);
+	return kref_get_unless_zero(&rcd->kref);
 }
 
 /**
@@ -355,10 +358,8 @@ struct hfi1_ctxtdata *hfi1_rcd_get_by_index(struct hfi1_devdata *dd, u16 ctxt)
 	spin_lock_irqsave(&dd->uctxt_lock, flags);
 	if (dd->rcd[ctxt]) {
 		rcd = dd->rcd[ctxt];
-		if (rcd->del_pend)
+		if (!hfi1_rcd_get(rcd))
 			rcd = NULL;
-		else
-			hfi1_rcd_get(rcd);
 	}
 	spin_unlock_irqrestore(&dd->uctxt_lock, flags);
 
@@ -1318,6 +1319,7 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 						     nports);
 	if (!dd)
 		return ERR_PTR(-ENOMEM);
+	hfi1_snoop_init(dd);
 	dd->num_pports = nports;
 	dd->pport = (struct hfi1_pportdata *)(dd + 1);
 	dd->pcidev = pdev;
@@ -1554,7 +1556,6 @@ static int __init hfi1_mod_init(void)
 	/* sanitize link CRC options */
 	link_crc_mask &= SUPPORTED_CRCS;
 
-	hfi1_compute_tid_rdma_flow_wt();
 	/*
 	 * These must be called before the driver is registered with
 	 * the PCI subsystem.
@@ -1562,9 +1563,6 @@ static int __init hfi1_mod_init(void)
 	idr_init(&hfi1_unit_table);
 
 	hfi1_dbg_init();
-	ret = hfi1_wss_init();
-	if (ret < 0)
-		goto bail_wss;
 
 	timer_setup(&init_timer, hfi1_probe_done, 0);
 
@@ -1576,8 +1574,6 @@ static int __init hfi1_mod_init(void)
 	goto bail; /* all OK */
 
 bail_dev:
-	hfi1_wss_exit();
-bail_wss:
 	hfi1_dbg_exit();
 	idr_destroy(&hfi1_unit_table);
 #ifdef NVIDIA_GPU_DIRECT
@@ -1606,7 +1602,6 @@ static void __exit hfi1_mod_cleanup(void)
 #endif  /* NVIDIA_GPU_DIRECT */
 	pci_unregister_driver(&hfi1_pci_driver);
 	node_affinity_destroy_all();
-	hfi1_wss_exit();
 	hfi1_dbg_exit();
 
 	idr_destroy(&hfi1_unit_table);

@@ -7,7 +7,7 @@
 ifneq ($(KERNELRELEASE),)
 #kbuild part of makefile
 
-NOSTDINC_FLAGS += -I${M}/include -I${M}/compat
+NOSTDINC_FLAGS += -I${M}/include -I${M}/include/uapi -I${M}/compat
 
 obj-$(CONFIG_INFINIBAND_HFI1) += hfi1.o
 

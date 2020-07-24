@@ -60,7 +60,6 @@
 #include <rdma/ib_verbs.h>
 #include <rdma/ib_mad.h>
 #include <rdma/rdmavt_mr.h>
-#include <rdma/rdmavt_qp.h>
 
 #define RVT_MAX_PKEY_VALUES 16
 
@@ -73,6 +72,8 @@ struct trap_list {
 	struct list_head list;
 };
 
+struct rvt_qp;
+struct rvt_qpn_table;
 struct rvt_ibport {
 	struct rvt_qp __rcu *qp[2];
 	struct ib_mad_agent *send_agent;	/* agent for SMI (traps) */
@@ -150,6 +151,10 @@ struct rvt_ibport {
 
 #define RVT_CQN_MAX 16 /* maximum length of cq name */
 
+#define RVT_SGE_COPY_MEMCPY	0
+#define RVT_SGE_COPY_CACHELESS	1
+#define RVT_SGE_COPY_ADAPTIVE	2
+
 /*
  * Things that are driver specific, module parameters in hfi1 and qib
  */
@@ -162,6 +167,9 @@ struct rvt_driver_params {
 	 */
 	unsigned int lkey_table_size;
 	unsigned int qp_table_size;
+	unsigned int sge_copy_mode;
+	unsigned int wss_threshold;
+	unsigned int wss_clean_period;
 	int qpn_start;
 	int qpn_inc;
 	int qpn_res_start;
@@ -201,6 +209,33 @@ struct rvt_ah {
 	defined(IFS_RH74) || \
 	defined(IFS_SLES12SP2) || \
 	defined(IFS_SLES12SP3))
+
+/*
+ * This structure is used by rvt_mmap() to validate an offset
+ * when an mmap() request is made.  The vm_area_struct then uses
+ * this as its vm_private_data.
+ */
+struct rvt_mmap_info {
+	struct list_head pending_mmaps;
+	struct ib_ucontext *context;
+	void *obj;
+	__u64 offset;
+	struct kref ref;
+	u32 size;
+};
+
+/* memory working set size */
+struct rvt_wss {
+	unsigned long *entries;
+	atomic_t total_count;
+	atomic_t clean_counter;
+	atomic_t clean_entry;
+
+	int threshold;
+	int num_entries;
+	long pages_mask;
+	unsigned int clean_period;
+};
 
 struct rvt_dev_info;
 struct rvt_swqe;
@@ -408,6 +443,9 @@ struct rvt_dev_info {
 	/* post send table */
 	const struct rvt_operation_params *post_parms;
 
+	/* opcode translation table */
+	const enum ib_wc_opcode *wc_opcode;
+
 	/* Driver specific helper functions */
 	struct rvt_driver_provided driver_f;
 
@@ -448,6 +486,8 @@ struct rvt_dev_info {
 	u32 n_mcast_grps_allocated; /* number of mcast groups allocated */
 	spinlock_t n_mcast_grps_lock;
 
+	/* Memory Working Set Size */
+	struct rvt_wss *wss;
 };
 
 /**
@@ -460,9 +500,6 @@ static inline void rvt_set_ibdev_name(struct rvt_dev_info *rdi,
 				      const char *fmt, const char *name,
 				      const int unit)
 {
-#if !defined (IFS_SLES15SP1)
-	snprintf(rdi->ibdev.name, sizeof(rdi->ibdev.name), fmt, name, unit);
-#else
 	/*
 	 * FIXME: rvt and its users want to touch the ibdev before
 	 * registration and have things like the name work. We don't have the
@@ -471,7 +508,6 @@ static inline void rvt_set_ibdev_name(struct rvt_dev_info *rdi,
 	 */
 	dev_set_name(&rdi->ibdev.dev, fmt, name, unit);
 	strlcpy(rdi->ibdev.name, dev_name(&rdi->ibdev.dev), IB_DEVICE_NAME_MAX);
-#endif
 }
 
 /**
@@ -498,16 +534,6 @@ static inline struct rvt_ah *ibah_to_rvtah(struct ib_ah *ibah)
 static inline struct rvt_dev_info *ib_to_rvt(struct ib_device *ibdev)
 {
 	return  container_of(ibdev, struct rvt_dev_info, ibdev);
-}
-
-static inline struct rvt_srq *ibsrq_to_rvtsrq(struct ib_srq *ibsrq)
-{
-	return container_of(ibsrq, struct rvt_srq, ibsrq);
-}
-
-static inline struct rvt_qp *ibqp_to_rvtqp(struct ib_qp *ibqp)
-{
-	return container_of(ibqp, struct rvt_qp, ibqp);
 }
 
 static inline unsigned rvt_get_npkeys(struct rvt_dev_info *rdi)
@@ -547,58 +573,9 @@ static inline u16 rvt_get_pkey(struct rvt_dev_info *rdi,
 		return rdi->ports[port_index]->pkey_table[index];
 }
 
-/**
- * rvt_lookup_qpn - return the QP with the given QPN
- * @ibp: the ibport
- * @qpn: the QP number to look up
- *
- * The caller must hold the rcu_read_lock(), and keep the lock until
- * the returned qp is no longer in use.
- */
-/* TODO: Remove this and put in rdmavt/qp.h when no longer needed by drivers */
-static inline struct rvt_qp *rvt_lookup_qpn(struct rvt_dev_info *rdi,
-					    struct rvt_ibport *rvp,
-					    u32 qpn) __must_hold(RCU)
-{
-	struct rvt_qp *qp = NULL;
-
-	if (unlikely(qpn <= 1)) {
-		qp = rcu_dereference(rvp->qp[qpn]);
-	} else {
-		u32 n = hash_32(qpn, rdi->qp_dev->qp_table_bits);
-
-		for (qp = rcu_dereference(rdi->qp_dev->qp_table[n]); qp;
-			qp = rcu_dereference(qp->next))
-			if (qp->ibqp.qp_num == qpn)
-				break;
-	}
-	return qp;
-}
-
-/**
- * rvt_mod_retry_timer - mod a retry timer
- * @qp - the QP
- * Modify a potentially already running retry timer
- */
-static inline void rvt_mod_retry_timer(struct rvt_qp *qp)
-{
-	struct ib_qp *ibqp = &qp->ibqp;
-	struct rvt_dev_info *rdi = ib_to_rvt(ibqp->device);
-
-	lockdep_assert_held(&qp->s_lock);
-	qp->s_flags |= RVT_S_TIMER;
-	/* 4.096 usec. * (1 << qp->timeout) */
-	mod_timer(&qp->s_timer, jiffies + rdi->busy_jiffies +
-		  (qp->timeout_jiffies << qp->s_timeout_shift));
-}
-
 struct rvt_dev_info *rvt_alloc_device(size_t size, int nports);
 void rvt_dealloc_device(struct rvt_dev_info *rdi);
-#if !defined (IFS_SLES15SP1) && !defined (IFS_RH80)
-int rvt_register_device(struct rvt_dev_info *rvd);
-#else
 int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id);
-#endif
 void rvt_unregister_device(struct rvt_dev_info *rvd);
 int rvt_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr);
 int rvt_init_port(struct rvt_dev_info *rdi, struct rvt_ibport *port,

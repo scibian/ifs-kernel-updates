@@ -96,8 +96,21 @@ EXPORT_SYMBOL(rvt_check_ah);
  *
  * Return: newly allocated ah
  */
+#ifdef CREATE_AH_RETURNS_INT
+int rvt_create_ah(struct ib_ah *ah, struct rdma_ah_attr *ah_attr,
+		  u32 create_flags, struct ib_udata *udata)
+#elif defined(CREATE_AH_HAS_FLAGS)
+struct ib_ah *rvt_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr,
+			    u32 create_flags,
+			    struct ib_udata *udata)
+
+#elif defined(CREATE_AH_HAS_UDATA)
+struct ib_ah *rvt_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr,
+			    struct ib_udata *udata)
+#else
 struct ib_ah *rvt_create_ah(struct ib_pd *pd,
 			    struct rdma_ah_attr *ah_attr)
+#endif
 {
 	struct rvt_ah *ah;
 	struct rvt_dev_info *dev = ib_to_rvt(pd->device);
@@ -135,7 +148,13 @@ struct ib_ah *rvt_create_ah(struct ib_pd *pd,
  *
  * Return: 0 on success
  */
+#ifdef DESTROY_AH_RETURNS_VOID
+void rvt_destroy_ah(struct ib_ah *ah, u32 create_flags)
+#elif defined(DESTROY_AH_HAS_FLAGS)
+int rvt_destroy_ah(struct ib_ah *ibah, u32 create_flags)
+#else
 int rvt_destroy_ah(struct ib_ah *ibah)
+#endif
 {
 	struct rvt_dev_info *dev = ib_to_rvt(ibah->device);
 	struct rvt_ah *ah = ibah_to_rvtah(ibah);

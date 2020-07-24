@@ -64,7 +64,8 @@
 static int hfi1_netdev_setup_ctxt(struct hfi1_netdev_priv *priv,
 				  struct hfi1_ctxtdata *uctxt)
 {
-	unsigned int rcvctrl_ops = 0;
+	unsigned int rcvctrl_ops = HFI1_RCVCTRL_CTXT_DIS |
+				   HFI1_RCVCTRL_INTRAVAIL_DIS;
 	struct hfi1_devdata *dd = priv->dd;
 	int ret;
 
@@ -121,8 +122,6 @@ static int hfi1_netdev_allocate_ctxt(struct hfi1_devdata *dd,
 	hfi1_set_seq_cnt(uctxt, 1);
 	uctxt->is_vnic = true;
 
-	msix_netdev_request_rcd_irq(uctxt);
-
 	hfi1_stats.sps_ctxts++;
 
 	dd_dev_info(dd, "created netdev context %d\n", uctxt->ctxt);
@@ -147,7 +146,8 @@ static void hfi1_netdev_deallocate_ctxt(struct hfi1_devdata *dd,
 		     HFI1_RCVCTRL_NO_RHQ_DROP_DIS |
 		     HFI1_RCVCTRL_NO_EGR_DROP_DIS, uctxt);
 
-	msix_free_irq(dd, uctxt->msix_intr);
+	if (uctxt->msix_intr != CCE_NUM_MSIX_VECTORS)
+		msix_free_irq(dd, uctxt->msix_intr);
 
 	uctxt->msix_intr = CCE_NUM_MSIX_VECTORS;
 	uctxt->event_flags = 0;
@@ -185,6 +185,7 @@ static int hfi1_netdev_allot_ctxt(struct hfi1_netdev_priv *priv,
 static int hfi1_netdev_rxq_init(struct net_device *dev)
 {
 	int i;
+	int rc;
 	struct hfi1_netdev_priv *priv = hfi1_netdev_priv(dev);
 	struct hfi1_devdata *dd = priv->dd;
 
@@ -200,26 +201,11 @@ static int hfi1_netdev_rxq_init(struct net_device *dev)
 	for (i = 0; i < priv->num_rx_q; i++) {
 		struct hfi1_netdev_rxq *rxq = &priv->rxq[i];
 
-		if (hfi1_netdev_allot_ctxt(priv, &rxq->rcd)) {
-			int j;
+		rc = hfi1_netdev_allot_ctxt(priv, &rxq->rcd);
+		if (rc)
+			goto bail_context_irq_failure;
 
-			dd_dev_err(dd, "Unable to allot receive context\n");
-			for (j = 0; j < i; j++) {
-				rxq = &priv->rxq[j];
-				hfi1_netdev_deallocate_ctxt(dd, rxq->rcd);
-				hfi1_rcd_put(rxq->rcd);
-				rxq->rcd = NULL;
-			}
-			kfree(priv->rxq);
-			priv->rxq = NULL;
-			return (-ENOMEM);
-		}
 		hfi1_rcd_get(rxq->rcd);
-	}
-
-	for (i = 0; i < priv->num_rx_q; i++) {
-		struct hfi1_netdev_rxq *rxq = &priv->rxq[i];
-
 		rxq->priv = priv;
 		rxq->rcd->napi = &rxq->napi;
 		dd_dev_info(dd, "Setting rcv queue %d napi to context %d\n",
@@ -230,9 +216,28 @@ static int hfi1_netdev_rxq_init(struct net_device *dev)
 		 */
 		set_bit(NAPI_STATE_NO_BUSY_POLL, &rxq->napi.state);
 		netif_napi_add(dev, &rxq->napi, hfi1_netdev_rx_napi, 64);
+		rc = msix_netdev_request_rcd_irq(rxq->rcd);
+		if (rc)
+			goto bail_context_irq_failure;
 	}
 
 	return 0;
+
+bail_context_irq_failure:
+	dd_dev_err(dd, "Unable to allot receive context\n");
+	for (; i >= 0; i--) {
+		struct hfi1_netdev_rxq *rxq = &priv->rxq[i];
+
+		if (rxq->rcd) {
+			hfi1_netdev_deallocate_ctxt(dd, rxq->rcd);
+			hfi1_rcd_put(rxq->rcd);
+			rxq->rcd = NULL;
+		}
+	}
+	kfree(priv->rxq);
+	priv->rxq = NULL;
+
+	return rc;
 }
 
 static void hfi1_netdev_rxq_deinit(struct net_device *dev)

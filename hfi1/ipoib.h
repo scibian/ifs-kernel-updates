@@ -84,49 +84,66 @@ union hfi1_ipoib_flow {
 };
 
 /**
+ * struct hfi1_ipoib_circ_buf - List of items to be processed
+ * @items: ring of items
+ * @head: ring head
+ * @tail: ring tail
+ * @max_items: max items + 1 that the ring can contain
+ * @producer_lock: producer sync lock
+ * @consumer_lock: consumer sync lock
+ */
+struct hfi1_ipoib_circ_buf {
+	void **items;
+	unsigned long head;
+	unsigned long tail;
+	unsigned long max_items;
+	spinlock_t producer_lock; /* head sync lock */
+	spinlock_t consumer_lock; /* tail sync lock */
+};
+
+/**
  * struct hfi1_ipoib_txq - IPOIB per Tx queue information
  * @priv: private pointer
  * @sde: sdma engine
- * @wait: iowait structure
- * @stx: sdma tx request
  * @tx_list: tx request list
- * @psn: packet sequence number
+ * @sent_txreqs: count of txreqs posted to sdma
  * @flow: tracks when list needs to be flushed for a flow change
  * @q_idx: ipoib Tx queue index
- * @pkts_sent: indicator packets have beeen sent from this queue
- * @sent_skbs: count of skbs received from ipoib
- * @complete_skbs: count of skbs completed ipoib
+ * @pkts_sent: indicator packets have been sent from this queue
+ * @wait: iowait structure
+ * @complete_txreqs: count of txreqs completed by sdma
+ * @napi: pointer to tx napi interface
+ * @tx_ring: ring of ipoib txreqs to be reaped by napi callback
  */
 struct hfi1_ipoib_txq {
 	struct hfi1_ipoib_dev_priv *priv;
 	struct sdma_engine *sde;
-	struct iowait wait;
 	struct list_head tx_list;
+	u64 sent_txreqs;
 	union hfi1_ipoib_flow flow;
 	u8 q_idx;
 	bool pkts_sent;
-	u64 sent_skbs;
+	struct iowait wait;
 
-	atomic64_t complete_skbs ____cacheline_aligned_in_smp;
+	atomic64_t ____cacheline_aligned_in_smp complete_txreqs;
+	struct napi_struct *napi;
+	struct hfi1_ipoib_circ_buf tx_ring;
 };
 
 struct hfi1_ipoib_dev_priv {
 	struct hfi1_devdata *dd;
 	struct net_device   *netdev;
 	struct ib_device    *device;
-	u8                   port_num;
-
 	struct hfi1_ipoib_txq *txqs;
 	struct kmem_cache *txreq_cache;
-
-	const struct net_device_ops *netdev_ops;
-
+	struct napi_struct *tx_napis;
 	u16 pkey;
 	u16 pkey_index;
 	u32 qkey;
+	u8 port_num;
 
+	const struct net_device_ops *netdev_ops;
 	struct rvt_qp *qp;
-
 	struct pcpu_sw_netstats __percpu *netstats;
 };
 
@@ -180,6 +197,9 @@ void hfi1_ipoib_txreq_deinit(struct hfi1_ipoib_dev_priv *priv);
 int hfi1_ipoib_rxq_init(struct net_device *dev);
 void hfi1_ipoib_rxq_deinit(struct net_device *dev);
 
+void hfi1_ipoib_napi_tx_enable(struct net_device *dev);
+void hfi1_ipoib_napi_tx_disable(struct net_device *dev);
+
 struct net_device *hfi1_ipoib_alloc_rn(struct ib_device *device,
 				       u8 port_num,
 				       enum rdma_netdev_t type,
@@ -189,5 +209,12 @@ struct net_device *hfi1_ipoib_alloc_rn(struct ib_device *device,
 
 struct sk_buff *hfi1_ipoib_prepare_skb(struct hfi1_netdev_rxq *rxq,
 				       int size, void *data);
+
+#ifdef HAVE_RDMA_NETDEV_GET_PARAMS
+int hfi1_ipoib_rn_get_params(struct ib_device *device,
+			     u8 port_num,
+			     enum rdma_netdev_t type,
+			     struct rdma_netdev_alloc_params *params);
+#endif
 
 #endif /* _IPOIB_H */

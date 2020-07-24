@@ -93,9 +93,6 @@ int hfi1_user_exp_rcv_init(struct hfi1_filedata *fd,
 	struct hfi1_devdata *dd = uctxt->dd;
 	int ret = 0;
 
-	spin_lock_init(&fd->tid_lock);
-	spin_lock_init(&fd->invalid_lock);
-
 	fd->entry_to_rb = kcalloc(uctxt->expected_count,
 				  sizeof(struct rb_node *),
 				  GFP_KERNEL);
@@ -176,6 +173,7 @@ void hfi1_user_exp_rcv_free(struct hfi1_filedata *fd)
 {
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 
+	mutex_lock(&uctxt->exp_mutex);
 	/*
 	 * The notifier would have been removed when the process'es mm
 	 * was freed.
@@ -191,6 +189,7 @@ void hfi1_user_exp_rcv_free(struct hfi1_filedata *fd)
 		if (!EXP_TID_SET_EMPTY(uctxt->tid_used_list))
 			unlock_exp_tids(uctxt, &uctxt->tid_used_list, fd);
 	}
+	mutex_unlock(&uctxt->exp_mutex);
 
 	kfree(fd->invalid_tids);
 	fd->invalid_tids = NULL;
@@ -257,7 +256,7 @@ static int pin_rcv_pages(struct hfi1_filedata *fd, struct tid_user_buf *tidbuf)
 	}
 
 	/* Verify that access is OK for the user buffer */
-	if (!access_ok(VERIFY_WRITE, (void __user *)vaddr,
+	if (!access_ok((void __user *)vaddr,
 		       npages * PAGE_SIZE)) {
 		dd_dev_err(dd, "Fail vaddr %p, %u pages, !access_ok\n",
 			   (void *)vaddr, npages);
@@ -356,6 +355,9 @@ int hfi1_user_exp_rcv_setup(struct hfi1_filedata *fd,
 		tididx = 0, mapped, mapped_pages = 0;
 	u32 *tidlist = NULL;
 	struct tid_user_buf *tidbuf;
+
+	if (!PAGE_ALIGNED(tinfo->vaddr))
+		return -EINVAL;
 
 	tidbuf = kzalloc(sizeof(*tidbuf), GFP_KERNEL);
 	if (!tidbuf)

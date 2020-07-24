@@ -65,7 +65,7 @@
 static struct dentry *hfi1_dbg_root;
 
 /* wrappers to enforce srcu in seq file */
-#if defined (IFS_SLES15SP1) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0))
+#if defined(IFS_SLES15SP1) || defined(IFS_SLES12SP5) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0))
 ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
 		      loff_t *ppos)
 {
@@ -1145,6 +1145,18 @@ static int exprom_wp_debugfs_release(struct inode *in, struct file *fp)
 	return 0;
 }
 
+#ifdef NEED_DEBUGFS_OPEN
+#define DEBUGFS_OPS(nm, readroutine, writeroutine)      \
+{ \
+	.name = nm, \
+	.ops = { \
+		.open = simple_open, \
+		.read = readroutine, \
+		.write = writeroutine, \
+		.llseek = generic_file_llseek, \
+	}, \
+}
+#else
 #define DEBUGFS_OPS(nm, readroutine, writeroutine)	\
 { \
 	.name = nm, \
@@ -1154,6 +1166,7 @@ static int exprom_wp_debugfs_release(struct inode *in, struct file *fp)
 		.llseek = generic_file_llseek, \
 	}, \
 }
+#endif
 
 #define DEBUGFS_XOPS(nm, readf, writef, openf, releasef) \
 { \

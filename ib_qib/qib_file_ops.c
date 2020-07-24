@@ -57,7 +57,7 @@
 static int qib_open(struct inode *, struct file *);
 static int qib_close(struct inode *, struct file *);
 static ssize_t qib_write(struct file *, const char __user *, size_t, loff_t *);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77)
 static ssize_t qib_write_iter(struct kiocb *, struct iov_iter *);
 #else
 static ssize_t qib_aio_write(struct kiocb *, const struct iovec *,
@@ -74,7 +74,7 @@ static int qib_mmapf(struct file *, struct vm_area_struct *);
 static const struct file_operations qib_file_ops = {
 	.owner = THIS_MODULE,
 	.write = qib_write,
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77)
 	.write_iter = qib_write_iter,
 #else
 	.aio_write = qib_aio_write,
@@ -352,7 +352,7 @@ static int qib_tid_update(struct qib_ctxtdata *rcd, struct file *fp,
 
 	/* virtual address of first page in transfer */
 	vaddr = ti->tidvaddr;
-	if (!access_ok(VERIFY_WRITE, (void __user *) vaddr,
+	if (!access_ok((void __user *)vaddr,
 		       cnt * PAGE_SIZE)) {
 		ret = -EFAULT;
 		goto done;
@@ -906,7 +906,7 @@ bail:
 /*
  * qib_file_vma_fault - handle a VMA page fault.
  */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 static int qib_file_vma_fault(struct vm_fault *vmf)
 #else
 static int qib_file_vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
@@ -2281,7 +2281,7 @@ bail:
 	return ret;
 }
 
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76)
+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77)
 static ssize_t qib_write_iter(struct kiocb *iocb, struct iov_iter *from)
 {
 	struct qib_filedata *fp = iocb->ki_filp->private_data;

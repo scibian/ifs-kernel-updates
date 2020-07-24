@@ -56,6 +56,9 @@
 #include <linux/vmalloc.h>
 #include <rdma/opa_addr.h>
 #include <rdma/ib_cache.h>
+#ifdef HAVE_NOSPEC_H
+#include <linux/nospec.h>
+#endif
 
 #include "hfi.h"
 #include "common.h"
@@ -135,8 +138,6 @@ unsigned short piothreshold = 256;
 module_param(piothreshold, ushort, S_IRUGO);
 MODULE_PARM_DESC(piothreshold, "size used to determine sdma vs. pio");
 
-#define COPY_CACHELESS 1
-#define COPY_ADAPTIVE  2
 static unsigned int sge_copy_mode;
 module_param(sge_copy_mode, uint, S_IRUGO);
 MODULE_PARM_DESC(sge_copy_mode,
@@ -157,158 +158,12 @@ static int pio_wait(struct rvt_qp *qp,
 /* 16B trailing buffer */
 static const u8 trail_buf[MAX_16B_PADDING];
 
-static uint wss_threshold;
+static uint wss_threshold = 80;
 module_param(wss_threshold, uint, S_IRUGO);
 MODULE_PARM_DESC(wss_threshold, "Percentage (1-100) of LLC to use as a threshold for a cacheless copy");
 static uint wss_clean_period = 256;
 module_param(wss_clean_period, uint, S_IRUGO);
 MODULE_PARM_DESC(wss_clean_period, "Count of verbs copies before an entry in the page copy table is cleaned");
-
-/* memory working set size */
-struct hfi1_wss {
-	unsigned long *entries;
-	atomic_t total_count;
-	atomic_t clean_counter;
-	atomic_t clean_entry;
-
-	int threshold;
-	int num_entries;
-	long pages_mask;
-};
-
-static struct hfi1_wss wss;
-
-int hfi1_wss_init(void)
-{
-	long llc_size;
-	long llc_bits;
-	long table_size;
-	long table_bits;
-
-	/* check for a valid percent range - default to 80 if none or invalid */
-	if (wss_threshold < 1 || wss_threshold > 100)
-		wss_threshold = 80;
-	/* reject a wildly large period */
-	if (wss_clean_period > 1000000)
-		wss_clean_period = 256;
-	/* reject a zero period */
-	if (wss_clean_period == 0)
-		wss_clean_period = 1;
-
-	/*
-	 * Calculate the table size - the next power of 2 larger than the
-	 * LLC size.  LLC size is in KiB.
-	 */
-	llc_size = wss_llc_size() * 1024;
-	table_size = roundup_pow_of_two(llc_size);
-
-	/* one bit per page in rounded up table */
-	llc_bits = llc_size / PAGE_SIZE;
-	table_bits = table_size / PAGE_SIZE;
-	wss.pages_mask = table_bits - 1;
-	wss.num_entries = table_bits / BITS_PER_LONG;
-
-	wss.threshold = (llc_bits * wss_threshold) / 100;
-	if (wss.threshold == 0)
-		wss.threshold = 1;
-
-	atomic_set(&wss.clean_counter, wss_clean_period);
-
-	wss.entries = kcalloc(wss.num_entries, sizeof(*wss.entries),
-			      GFP_KERNEL);
-	if (!wss.entries) {
-		hfi1_wss_exit();
-		return -ENOMEM;
-	}
-
-	return 0;
-}
-
-void hfi1_wss_exit(void)
-{
-	/* coded to handle partially initialized and repeat callers */
-	kfree(wss.entries);
-	wss.entries = NULL;
-}
-
-/*
- * Advance the clean counter.  When the clean period has expired,
- * clean an entry.
- *
- * This is implemented in atomics to avoid locking.  Because multiple
- * variables are involved, it can be racy which can lead to slightly
- * inaccurate information.  Since this is only a heuristic, this is
- * OK.  Any innaccuracies will clean themselves out as the counter
- * advances.  That said, it is unlikely the entry clean operation will
- * race - the next possible racer will not start until the next clean
- * period.
- *
- * The clean counter is implemented as a decrement to zero.  When zero
- * is reached an entry is cleaned.
- */
-static void wss_advance_clean_counter(void)
-{
-	int entry;
-	int weight;
-	unsigned long bits;
-
-	/* become the cleaner if we decrement the counter to zero */
-	if (atomic_dec_and_test(&wss.clean_counter)) {
-		/*
-		 * Set, not add, the clean period.  This avoids an issue
-		 * where the counter could decrement below the clean period.
-		 * Doing a set can result in lost decrements, slowing the
-		 * clean advance.  Since this a heuristic, this possible
-		 * slowdown is OK.
-		 *
-		 * An alternative is to loop, advancing the counter by a
-		 * clean period until the result is > 0. However, this could
-		 * lead to several threads keeping another in the clean loop.
-		 * This could be mitigated by limiting the number of times
-		 * we stay in the loop.
-		 */
-		atomic_set(&wss.clean_counter, wss_clean_period);
-
-		/*
-		 * Uniquely grab the entry to clean and move to next.
-		 * The current entry is always the lower bits of
-		 * wss.clean_entry.  The table size, wss.num_entries,
-		 * is always a power-of-2.
-		 */
-		entry = (atomic_inc_return(&wss.clean_entry) - 1)
-			& (wss.num_entries - 1);
-
-		/* clear the entry and count the bits */
-		bits = xchg(&wss.entries[entry], 0);
-		weight = hweight64((u64)bits);
-		/* only adjust the contended total count if needed */
-		if (weight)
-			atomic_sub(weight, &wss.total_count);
-	}
-}
-
-/*
- * Insert the given address into the working set array.
- */
-static void wss_insert(void *address)
-{
-	u32 page = ((unsigned long)address >> PAGE_SHIFT) & wss.pages_mask;
-	u32 entry = page / BITS_PER_LONG; /* assumes this ends up a shift */
-	u32 nr = page & (BITS_PER_LONG - 1);
-
-	if (!test_and_set_bit(nr, &wss.entries[entry]))
-		atomic_inc(&wss.total_count);
-
-	wss_advance_clean_counter();
-}
-
-/*
- * Is the working set larger than the threshold?
- */
-static inline bool wss_exceeds_threshold(void)
-{
-	return atomic_read(&wss.total_count) >= wss.threshold;
-}
 
 /*
  * Translate ib_wr_opcode into ib_wc_opcode.
@@ -468,79 +323,6 @@ static const u32 pio_opmask[BIT(3)] = {
  * System image GUID.
  */
 __be64 ib_hfi1_sys_image_guid;
-
-/**
- * hfi1_copy_sge - copy data to SGE memory
- * @ss: the SGE state
- * @data: the data to copy
- * @length: the length of the data
- * @release: boolean to release MR
- * @copy_last: do a separate copy of the last 8 bytes
- */
-void hfi1_copy_sge(
-	struct rvt_sge_state *ss,
-	void *data, u32 length,
-	bool release,
-	bool copy_last)
-{
-	struct rvt_sge *sge = &ss->sge;
-	int i;
-	bool in_last = false;
-	bool cacheless_copy = false;
-
-	if (sge_copy_mode == COPY_CACHELESS) {
-		cacheless_copy = length >= PAGE_SIZE;
-	} else if (sge_copy_mode == COPY_ADAPTIVE) {
-		if (length >= PAGE_SIZE) {
-			/*
-			 * NOTE: this *assumes*:
-			 * o The first vaddr is the dest.
-			 * o If multiple pages, then vaddr is sequential.
-			 */
-			wss_insert(sge->vaddr);
-			if (length >= (2 * PAGE_SIZE))
-				wss_insert(sge->vaddr + PAGE_SIZE);
-
-			cacheless_copy = wss_exceeds_threshold();
-		} else {
-			wss_advance_clean_counter();
-		}
-	}
-	if (copy_last) {
-		if (length > 8) {
-			length -= 8;
-		} else {
-			copy_last = false;
-			in_last = true;
-		}
-	}
-
-again:
-	while (length) {
-		u32 len = rvt_get_sge_length(sge, length);
-
-		WARN_ON_ONCE(len == 0);
-		if (unlikely(in_last)) {
-			/* enforce byte transfer ordering */
-			for (i = 0; i < len; i++)
-				((u8 *)sge->vaddr)[i] = ((u8 *)data)[i];
-		} else if (cacheless_copy) {
-			cacheless_memcpy(sge->vaddr, data, len);
-		} else {
-			memcpy(sge->vaddr, data, len);
-		}
-		rvt_update_sge(ss, len, release);
-		data += len;
-		length -= len;
-	}
-
-	if (copy_last) {
-		copy_last = false;
-		in_last = true;
-		length = 8;
-		goto again;
-	}
-}
 
 /*
  * Make sure the QP is ready and able to accept the given opcode.
@@ -864,11 +646,13 @@ static void verbs_sdma_complete(
 
 	spin_lock(&qp->s_lock);
 	if (tx->wqe) {
-		hfi1_send_complete(qp, tx->wqe, IB_WC_SUCCESS);
+		rvt_send_complete(qp, tx->wqe, IB_WC_SUCCESS);
 	} else if (qp->ibqp.qp_type == IB_QPT_RC) {
 		struct hfi1_opa_header *hdr;
 
 		hdr = &tx->phdr.hdr;
+		if (unlikely(status == SDMA_TXREQ_S_ABORTED))
+			hfi1_rc_verbs_aborted(qp, hdr);
 		hfi1_rc_send_complete(qp, hdr);
 	}
 	spin_unlock(&qp->s_lock);
@@ -1171,7 +955,6 @@ static int pio_wait(struct rvt_qp *qp,
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 	struct hfi1_devdata *dd = sc->dd;
-	struct hfi1_ibdev *dev = &dd->verbs_dev;
 	unsigned long flags;
 	int ret = 0;
 
@@ -1183,7 +966,7 @@ static int pio_wait(struct rvt_qp *qp,
 	 */
 	spin_lock_irqsave(&qp->s_lock, flags);
 	if (ib_rvt_state_ops[qp->state] & RVT_PROCESS_RECV_OK) {
-		write_seqlock(&dev->iowait_lock);
+		write_seqlock(&sc->waitlock);
 		list_add_tail(&ps->s_txreq->txreq.list,
 			      &ps->wait->tx_head);
 		if (list_empty(&priv->s_iowait.list)) {
@@ -1197,14 +980,14 @@ static int pio_wait(struct rvt_qp *qp,
 			iowait_get_priority(&priv->s_iowait);
 			iowait_queue(ps->pkts_sent, &priv->s_iowait,
 				     &sc->piowait);
-			priv->s_iowait.lock = &dev->iowait_lock;
+			priv->s_iowait.lock = &sc->waitlock;
 			trace_hfi1_qpsleep(qp, RVT_S_WAIT_PIO);
 			rvt_get_qp(qp);
 			/* counting: only call wantpiobuf_intr if first user */
 			if (was_empty)
 				hfi1_sc_wantpiobuf_intr(sc, 1);
 		}
-		write_sequnlock(&dev->iowait_lock);
+		write_sequnlock(&sc->waitlock);
 		hfi1_qp_unbusy(qp, ps->wait);
 		ret = -EBUSY;
 	}
@@ -1292,10 +1075,10 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	if (cb)
 		iowait_pio_inc(&priv->s_iowait);
 	pbuf = sc_buffer_alloc(sc, plen, cb, qp);
-	if (unlikely(!pbuf)) {
+	if (unlikely(IS_ERR_OR_NULL(pbuf))) {
 		if (cb)
 			verbs_pio_complete(qp, 0);
-		if (ppd->host_link_state != HLS_UP_ACTIVE) {
+		if (IS_ERR(pbuf)) {
 			/*
 			 * If we have filled the PIO buffers to capacity and are
 			 * not in an active state this request is not going to
@@ -1354,15 +1137,15 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			       &ps->s_txreq->phdr.hdr, ib_is_sc5(sc5));
 
 pio_bail:
+	spin_lock_irqsave(&qp->s_lock, flags);
 	if (qp->s_wqe) {
-		spin_lock_irqsave(&qp->s_lock, flags);
-		hfi1_send_complete(qp, qp->s_wqe, wc_status);
-		spin_unlock_irqrestore(&qp->s_lock, flags);
+		rvt_send_complete(qp, qp->s_wqe, wc_status);
 	} else if (qp->ibqp.qp_type == IB_QPT_RC) {
-		spin_lock_irqsave(&qp->s_lock, flags);
+		if (unlikely(wc_status == IB_WC_GENERAL_ERR))
+			hfi1_rc_verbs_aborted(qp, &ps->s_txreq->phdr.hdr);
 		hfi1_rc_send_complete(qp, &ps->s_txreq->phdr.hdr);
-		spin_unlock_irqrestore(&qp->s_lock, flags);
 	}
+	spin_unlock_irqrestore(&qp->s_lock, flags);
 
 	ret = 0;
 
@@ -1489,17 +1272,13 @@ static inline send_routine get_send_routine(struct rvt_qp *qp,
 	case IB_QPT_GSI:
 	case IB_QPT_UD:
 		break;
-	case IB_QPT_RC:
 	case IB_QPT_UC:
-		/*
-		 * RC QPs which support TID RDMA could use PIO for
-		 * TID RDMA WRITE REQ packets. The opcode test should
-		 * allow both valid RC opcodes and TID RDMA WRITE REQ.
-		 */
+	case IB_QPT_RC:
+		priv->s_running_pkt_size =
+			(tx->s_cur_size + priv->s_running_pkt_size) / 2;
 		if (piothreshold &&
-		    tx->s_cur_size <= min(piothreshold, qp->pmtu) &&
-		    ((BIT(ps->opcode & OPMASK) &
-		      pio_opmask[ps->opcode >> 5])) &&
+		    priv->s_running_pkt_size <= min(piothreshold, qp->pmtu) &&
+		    (BIT(ps->opcode & OPMASK) & pio_opmask[ps->opcode >> 5]) &&
 		    iowait_sdma_pending(&priv->s_iowait) == 0 &&
 		    !sdma_txreq_built(&tx->txreq))
 			return dd->process_pio_send;
@@ -1576,7 +1355,7 @@ int hfi1_verbs_send(struct rvt_qp *qp, struct hfi1_pkt_state *ps)
 			hfi1_cdbg(PIO, "%s() Failed. Completing with err",
 				  __func__);
 			spin_lock_irqsave(&qp->s_lock, flags);
-			hfi1_send_complete(qp, qp->s_wqe, IB_WC_GENERAL_ERR);
+			rvt_send_complete(qp, qp->s_wqe, IB_WC_GENERAL_ERR);
 			spin_unlock_irqrestore(&qp->s_lock, flags);
 		}
 		return -EINVAL;
@@ -1621,7 +1400,7 @@ static void hfi1_fill_device_attr(struct hfi1_devdata *dd)
 	rdi->dparms.props.max_qp_wr =
 		(hfi1_max_qp_wrs >= HFI1_QP_WQE_INVALID ?
 		 HFI1_QP_WQE_INVALID - 1 : hfi1_max_qp_wrs);
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)) || defined (IFS_SLES15SP1)
+#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)) || defined (IFS_SLES15SP1) || defined(IFS_RH77) || defined(IFS_SLES12SP5)
 	rdi->dparms.props.max_send_sge = hfi1_max_sges;
 	rdi->dparms.props.max_recv_sge = hfi1_max_sges;
 #else
@@ -1713,7 +1492,7 @@ static int query_port(struct rvt_dev_info *rdi, u8 port_num,
 	props->active_mtu = !valid_ib_mtu(ppd->ibmtu) ? props->max_mtu :
 		mtu_to_enum(ppd->ibmtu, IB_MTU_4096);
 
-#if !defined (IFS_SLES15SP1)
+#if !defined(IFS_SLES12SP5) && !defined(IFS_SLES15SP1) && !defined(IFS_RH77) && !defined(IFS_RH81)
 	/*
 	 * sm_lid of 0xFFFF needs special handling so that it can
 	 * be differentiated from a permissve LID of 0xFFFF.
@@ -1821,6 +1600,7 @@ static int hfi1_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr)
 	sl = rdma_ah_get_sl(ah_attr);
 	if (sl >= ARRAY_SIZE(ibp->sl_to_sc))
 		return -EINVAL;
+	sl = array_index_nospec(sl, ARRAY_SIZE(ibp->sl_to_sc));
 
 	sc5 = ibp->sl_to_sc[sl];
 	if (sc_to_vlt(dd, sc5) > num_vls && sc_to_vlt(dd, sc5) != 0xf)
@@ -1898,7 +1678,7 @@ static void init_ibport(struct hfi1_pportdata *ppd)
 	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
 	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
 }
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#ifndef GET_DEV_FW_STR_HAS_LEN
 static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
 {
 	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
@@ -1908,7 +1688,7 @@ static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
 	snprintf(str, IB_FW_VERSION_NAME_MAX, "%u.%u.%u", dc8051_ver_maj(ver),
 		 dc8051_ver_min(ver), dc8051_ver_patch(ver));
 }
-#elif defined(IFS_RH74) || defined(IFS_SLES12SP3)
+#else
 static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str,
 				size_t str_len)
 {
@@ -2082,7 +1862,7 @@ static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats,
 }
 #endif
 
-#ifdef AIP
+#ifdef HAVE_ALLOC_RDMA_NETDEV
 static struct net_device *hfi1_alloc_rn(struct ib_device *device,
 					u8 port_num,
 					enum rdma_netdev_t type,
@@ -2122,6 +1902,21 @@ static struct net_device *hfi1_alloc_rn(struct ib_device *device,
 	return dev;
 }
 #endif
+
+static const struct ib_device_ops hfi1_dev_ops = {
+	.alloc_hw_stats = alloc_hw_stats,
+#ifdef HAVE_ALLOC_RDMA_NETDEV
+	.alloc_rdma_netdev = hfi1_alloc_rn,
+#endif
+	.get_dev_fw_str = hfi1_get_dev_fw_str,
+	.get_hw_stats = get_hw_stats,
+	.modify_device = modify_device,
+	/* keep process mad in the driver */
+	.process_mad = hfi1_process_mad,
+#ifdef HAVE_RDMA_NETDEV_GET_PARAMS
+	.rdma_netdev_get_params = hfi1_ipoib_rn_get_params,
+#endif
+};
 
 /**
  * hfi1_register_ib_device - register our device with the infiniband core
@@ -2170,21 +1965,9 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 #else
 	ibdev->dma_device = &dd->pcidev->dev;
 #endif
-	ibdev->modify_device = modify_device;
-#if !defined(IFS_SLES12SP2)
-	ibdev->alloc_hw_stats = alloc_hw_stats;
-	ibdev->get_hw_stats = get_hw_stats;
-#endif
+	ib_set_device_ops(ibdev, &hfi1_dev_ops);
 
-#ifdef AIP
-	ibdev->alloc_rdma_netdev = hfi1_alloc_rn; /* May not be in all distro kernels might need a guard */
-#endif
-	/* keep process mad in the driver */
-	ibdev->process_mad = hfi1_process_mad;
-#if !defined(IFS_RH73) && !defined(IFS_SLES12SP2)
-	ibdev->get_dev_fw_str = hfi1_get_dev_fw_str;
-#endif
-	strncpy(ibdev->node_desc, init_utsname()->nodename,
+	strlcpy(ibdev->node_desc, init_utsname()->nodename,
 		sizeof(ibdev->node_desc));
 
 	/*
@@ -2250,11 +2033,17 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	dd->verbs_dev.rdi.dparms.lkey_table_size = hfi1_lkey_table_size;
 	dd->verbs_dev.rdi.dparms.nports = dd->num_pports;
 	dd->verbs_dev.rdi.dparms.npkeys = hfi1_get_npkeys(dd);
+	dd->verbs_dev.rdi.dparms.sge_copy_mode = sge_copy_mode;
+	dd->verbs_dev.rdi.dparms.wss_threshold = wss_threshold;
+	dd->verbs_dev.rdi.dparms.wss_clean_period = wss_clean_period;
 	dd->verbs_dev.rdi.dparms.reserved_operations = 1;
 	dd->verbs_dev.rdi.dparms.extra_rdma_atomic = HFI1_TID_RDMA_WRITE_CNT;
 
 	/* post send table */
 	dd->verbs_dev.rdi.post_parms = hfi1_post_parms;
+
+	/* opcode translation table */
+	dd->verbs_dev.rdi.wc_opcode = ib_hfi1_wc_opcode;
 
 	ppd = dd->pport;
 	for (i = 0; i < dd->num_pports; i++, ppd++)
@@ -2262,15 +2051,11 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 			      &ppd->ibport_data.rvp,
 			      i,
 			      ppd->pkeys);
-#if !defined (IFS_SLES15SP1) && !defined (IFS_RH80)
-	ret = rvt_register_device(&dd->verbs_dev.rdi);
-#else
-	#if defined (IFS_SLES15SP1)
-		rdma_set_device_sysfs_group(&dd->verbs_dev.rdi.ibdev,
-					    &ib_hfi1_attr_group);
-	#endif
+
+	rdma_set_device_sysfs_group(&dd->verbs_dev.rdi.ibdev,
+				    &ib_hfi1_attr_group);
+
 	ret = rvt_register_device(&dd->verbs_dev.rdi, RDMA_DRIVER_HFI1);
-#endif
 	if (ret)
 		goto err_verbs_txreq;
 

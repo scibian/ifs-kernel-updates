@@ -6,7 +6,7 @@ Description: Remove upstream's ib_ipoib
  to add the standard ib_ipoib code.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2019-01-29>
+Last-Update: <2020-03-26>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/ib_ipoib/Makefile
@@ -105,6 +105,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -#include <linux/sched.h>
 -
 -#include "compat_common.h"
+-#undef alloc_netdev_mqs
 -
 -/* constants */
 -
@@ -309,7 +310,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -	struct list_head     list;
 -	struct net_device   *dev;
 -	struct ipoib_neigh  *neigh;
--	struct ipoib_path   *path;
 -	struct ipoib_tx_buf *tx_ring;
 -	unsigned	     tx_head;
 -	unsigned	     tx_tail;
@@ -899,7 +899,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -#endif /* _IPOIB_H */
 --- a/ib_ipoib/ipoib_cm.c
 +++ /dev/null
-@@ -1,1665 +0,0 @@
+@@ -1,1664 +0,0 @@
 -/*
 - * Copyright (c) 2006 Mellanox Technologies. All rights reserved
 - *
@@ -2213,7 +2213,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -
 -	neigh->cm = tx;
 -	tx->neigh = neigh;
--	tx->path = path;
 -	tx->dev = dev;
 -	list_add(&tx->list, &priv->cm.start_list);
 -	set_bit(IPOIB_FLAG_INITIALIZED, &tx->flags);
@@ -2272,7 +2271,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -				neigh->daddr + QPN_AND_OPTIONS_OFFSET);
 -			goto free_neigh;
 -		}
--		memcpy(&pathrec, &p->path->pathrec, sizeof pathrec);
+-		memcpy(&pathrec, &path->pathrec, sizeof pathrec);
 -
 -		spin_unlock_irqrestore(&priv->lock, flags);
 -		netif_tx_unlock_bh(dev);
@@ -3174,7 +3173,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -	ah->last_send = 0;
 -	kref_init(&ah->ref);
 -
--	vah = rdma_create_ah(pd, attr);
+-	vah = rdma_create_ah(pd, attr, RDMA_CREATE_AH_SLEEPABLE);
 -	if (IS_ERR(vah)) {
 -		kfree(ah);
 -		ah = (struct ipoib_ah *)vah;
@@ -3788,7 +3787,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -	list_for_each_entry_safe(ah, tah, &priv->dead_ahs, list)
 -		if ((int) priv->tx_tail - (int) ah->last_send >= 0) {
 -			list_del(&ah->list);
--			rdma_destroy_ah(ah->ah);
+-			rdma_destroy_ah(ah->ah, 0);
 -			kfree(ah);
 -		}
 -
@@ -8235,7 +8234,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -MODULE_ALIAS_RTNL_LINK("ipoib");
 --- a/ib_ipoib/ipoib_verbs.c
 +++ /dev/null
-@@ -1,299 +0,0 @@
+@@ -1,298 +0,0 @@
 -/*
 - * Copyright (c) 2004, 2005 Topspin Communications.  All rights reserved.
 - * Copyright (c) 2005 Mellanox Technologies. All rights reserved.
@@ -8521,8 +8520,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -	ipoib_dbg(priv, "Event %d on device %s port %d\n", record->event,
 -		  record->device->name, record->element.port_num);
 -
--	if (record->event == IB_EVENT_SM_CHANGE ||
--	    record->event == IB_EVENT_CLIENT_REREGISTER) {
+-	if (record->event == IB_EVENT_CLIENT_REREGISTER) {
 -		queue_work(ipoib_workqueue, &priv->flush_light);
 -	} else if (record->event == IB_EVENT_PORT_ERR ||
 -		   record->event == IB_EVENT_PORT_ACTIVE ||

@@ -3,7 +3,7 @@ Description: Add get_link_layer support to rdmavt
  for the get_link_layer verb.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2018-09-17>
+Last-Update: <2020-03-27>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/rdmavt/vt.c
@@ -29,16 +29,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	_VERB_IDX_MAX /* Must always be last! */
  };
  
-@@ -714,6 +721,12 @@
- 				      rvt_dealloc_pd);
- 		break;
- 
-+	case GET_LINK_LAYER:
-+		check_driver_override(rdi, offsetof(struct ib_device,
-+											get_link_layer),
-+							  rvt_get_link_layer);
-+		break;
-+
- 	default:
- 		return -EINVAL;
- 	}
+@@ -417,6 +424,7 @@
+ #ifdef CONFIG_RVT_GET_PORT_IMMUTABLE
+ 	.get_port_immutable = rvt_get_port_immutable,
+ #endif /* CONFIG_RVT_GET_PORT_IMMUTABLE */
++	.get_link_layer = rvt_get_link_layer,
+ #ifdef CONFIG_RVT_MAP_MR_SG
+ 	.map_mr_sg = rvt_map_mr_sg,
+ #endif /* CONFIG_RVT_MAP_MR_SG */

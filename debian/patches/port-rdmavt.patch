@@ -5,7 +5,7 @@ Description: Port rdmavt to debian kernel 3.16
  wait_for_completion_timeout in kernel 3.16.
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2019-01-30>
+Last-Update: <2020-03-27>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/rdmavt/cq.h
@@ -127,31 +127,15 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (rval) {
  		ret = ERR_PTR(rval);
  		goto bail;
-@@ -403,10 +390,11 @@
- 	mr->mr.user_base = start;
- 	mr->mr.iova = virt_addr;
- 	mr->mr.length = length;
--	mr->mr.offset = ib_umem_offset(umem);
-+	mr->mr.offset = umem->offset;
+@@ -407,7 +394,6 @@
+ 	mr->mr.offset = ib_umem_offset(umem);
  	mr->mr.access_flags = mr_access_flags;
  	mr->umem = umem;
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB8)
- 	mr->mr.page_shift = umem->page_shift;
- #else
- 	if (is_power_of_2(umem->page_size))
-@@ -423,7 +411,8 @@
- 			goto bail_inval;
- 		}
- 		mr->mr.map[m]->segs[n].vaddr = vaddr;
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB8)
- 		mr->mr.map[m]->segs[n].length = BIT(umem->page_shift);
- 		trace_rvt_mr_user_seg(&mr->mr, m, n, vaddr,
- 				      BIT(umem->page_shift));
-@@ -508,9 +497,9 @@
+-
+ 	mr->mr.page_shift = PAGE_SHIFT;
+ 	m = 0;
+ 	n = 0;
+@@ -497,9 +483,9 @@
  	timeout = wait_for_completion_timeout(&mr->comp, 5 * HZ);
  	if (!timeout) {
  		rvt_pr_err(rdi,
@@ -163,15 +147,51 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		rvt_get_mr(mr);
  		return -EBUSY;
  	}
-@@ -603,6 +592,7 @@
- 	return &mr->ibmr;
+@@ -568,6 +554,20 @@
+ 	return ret;
  }
  
++#ifdef HAVE_CREATE_MR
++struct ib_mr *rvt_create_mr(struct ib_pd *pd,
++               struct ib_mr_init_attr *mr_init_attr)
++{
++	struct rvt_mr *mr;
++	int max_num_sg = mr_init_attr->max_reg_descriptors;
++
++	mr = __rvt_alloc_mr(max_num_sg, pd);
++	if (IS_ERR(mr))
++		return (struct ib_mr *)mr;
++
++	return &mr->ibmr;
++}
++#else
+ /**
+  * rvt_alloc_mr - Allocate a memory region usable with the
+  * @pd: protection domain for this memory region
+@@ -591,7 +591,8 @@
+ 
+ 	return &mr->ibmr;
+ }
+-
++#endif /* HAVE_CREATE_MR */
 +#ifdef CONFIG_RVT_MAP_MR_SG
  /**
   * rvt_set_page - page assignment function called by ib_sg_to_pages
   * @ibmr: memory region
-@@ -674,6 +664,7 @@
+@@ -640,10 +641,12 @@
+ 	mr->mr.length = 0;
+ 	mr->mr.page_shift = PAGE_SHIFT;
+ 	ret = ib_sg_to_pages(ibmr, sg, sg_nents, sg_offset, rvt_set_page);
++#ifndef IFS_DEB8
+ 	mr->mr.user_base = ibmr->iova;
+ 	mr->mr.iova = ibmr->iova;
+ 	mr->mr.offset = ibmr->iova - (u64)mr->mr.map[0]->segs[0].vaddr;
+ 	mr->mr.length = (size_t)ibmr->length;
++#endif /* IFS_DEB8 */
+ 	return ret;
+ }
+ #else
+@@ -665,6 +668,7 @@
  	return ib_sg_to_pages(ibmr, sg, sg_nents, rvt_set_page);
  }
  #endif
@@ -179,7 +199,17 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /**
   * rvt_fast_reg_mr - fast register physical MR
   * @qp: the queue pair where the work request comes from
-@@ -762,8 +753,7 @@
+@@ -693,7 +697,9 @@
+ 	ibmr->rkey = key;
+ 	mr->mr.lkey = key;
+ 	mr->mr.access_flags = access;
++#ifndef IFS_DEB8
+ 	mr->mr.iova = ibmr->iova;
++#endif
+ 	atomic_set(&mr->mr.lkey_invalid, 0);
+ 
+ 	return 0;
+@@ -754,8 +760,7 @@
  	if (!fmr)
  		goto bail;
  
@@ -189,7 +219,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	if (rval)
  		goto bail;
  
-@@ -819,7 +809,7 @@
+@@ -811,7 +816,7 @@
  	u32 ps;
  	struct rvt_dev_info *rdi = ib_to_rvt(ibfmr->device);
  
@@ -219,7 +249,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  		goto bail;
 --- a/rdmavt/qp.c
 +++ b/rdmavt/qp.c
-@@ -1023,6 +1023,7 @@
+@@ -1199,6 +1199,7 @@
  	spin_lock(&rdi->n_qps_lock);
  	if (rdi->n_qps_allocated == rdi->dparms.props.max_qp) {
  		spin_unlock(&rdi->n_qps_lock);
@@ -271,44 +301,39 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  enum {
  	MISC,
-@@ -476,9 +475,11 @@
- 		break;
+@@ -393,7 +392,11 @@
  
- 	case GET_PORT_IMMUTABLE:
+ static const struct ib_device_ops rvt_dev_ops = {
+ 	.alloc_fmr = rvt_alloc_fmr,
++#ifdef HAVE_CREATE_MR
++	.create_mr = rvt_create_mr,
++#else
+ 	.alloc_mr = rvt_alloc_mr,
++#endif
+ 	.alloc_pd = rvt_alloc_pd,
+ 	.alloc_ucontext = rvt_alloc_ucontext,
+ 	.attach_mcast = rvt_attach_mcast,
+@@ -411,8 +414,12 @@
+ 	.destroy_srq = rvt_destroy_srq,
+ 	.detach_mcast = rvt_detach_mcast,
+ 	.get_dma_mr = rvt_get_dma_mr,
 +#ifdef CONFIG_RVT_GET_PORT_IMMUTABLE
- 		check_driver_override(rdi, offsetof(struct ib_device,
- 						    get_port_immutable),
- 				      rvt_get_port_immutable);
+ 	.get_port_immutable = rvt_get_port_immutable,
 +#endif /* CONFIG_RVT_GET_PORT_IMMUTABLE */
- 		break;
- 
- 	case CREATE_QP:
-@@ -635,14 +636,16 @@
- 
- 	case ALLOC_MR:
- 		check_driver_override(rdi, offsetof(struct ib_device,
--						    alloc_mr),
-+						    create_mr),
- 				      rvt_alloc_mr);
- 		break;
- 
- 	case MAP_MR_SG:
 +#ifdef CONFIG_RVT_MAP_MR_SG
- 		check_driver_override(rdi, offsetof(struct ib_device,
- 						    map_mr_sg),
- 				      rvt_map_mr_sg);
+ 	.map_mr_sg = rvt_map_mr_sg,
 +#endif /* CONFIG_RVT_MAP_MR_SG */
- 		break;
- 
- 	case MAP_PHYS_FMR:
-@@ -781,7 +784,7 @@
+ 	.map_phys_fmr = rvt_map_phys_fmr,
+ 	.mmap = rvt_mmap,
+ 	.modify_ah = rvt_modify_ah,
+@@ -625,7 +632,7 @@
  	spin_lock_init(&rdi->n_cqs_lock);
  
  	/* DMA Operations */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
+-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
++#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB8)
  	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
- #elif defined(IFS_RH75) || defined(IFS_RH76)
+ #elif defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_RH77)
  	rdi->ibdev.dev.device_rh->dma_ops =
 --- a/rdmavt/vt.h
 +++ b/rdmavt/vt.h
@@ -416,7 +441,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #normal makefile
 --- a/rdmavt/ah.c
 +++ b/rdmavt/ah.c
-@@ -114,6 +114,8 @@
+@@ -127,6 +127,8 @@
  	if (dev->n_ahs_allocated == dev->dparms.props.max_ah) {
  		spin_unlock_irqrestore(&dev->n_ahs_lock, flags);
  		kfree(ah);
@@ -427,7 +452,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
 --- a/rdmavt/Makefile
 +++ b/rdmavt/Makefile
-@@ -4,10 +4,11 @@
+@@ -4,10 +4,12 @@
  #
  # Called from the kernel module build system.
  #
@@ -436,13 +461,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #kbuild part of makefile
  
 -NOSTDINC_FLAGS += -I${M}/include -I${M}/compat
-+NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include -I${M}/compat
++NOSTDINC_FLAGS += -include ${M}/ifs-kernel-updates-conf.h -I${M}/include \
++	-I${M}/include/uapi -I${M}/compat
  
  obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
  
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -44,8 +44,10 @@
+@@ -44,33 +44,84 @@
   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   *
   */
@@ -450,28 +476,35 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -#define RH76_COMPAT_H
 +#if !defined(DEB8_COMPAT_H)
 +#define DEB8_COMPAT_H
+ 
+-#define CREATE_AH_HAS_UDATA
+-#define HAVE_ALLOC_RDMA_NETDEV
++#include <rdma/ib_umem.h>
 +
 +#define IB_MULTICAST_LID_BASE  cpu_to_be16(0xC000)
++
++#define NEED_IB_HELPER_FUNCTIONS
+ #define NEED_MM_HELPER_FUNCTIONS
+ #define HAVE_NOSPEC_H
++#define HAVE_CREATE_MR
  
  #include "compat_common.h"
  
-@@ -53,21 +55,187 @@
- 
- #define __GFP_RECLAIM	(__GFP_WAIT)
- 
--#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
 +#ifndef NULLS_MARKER
 +#define NULLS_MARKER(value) (1UL | (((long)value) << 1))
 +#endif
++
+ #define __GFP_RECLAIM	(__GFP_WAIT)
  
-+#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
+ #define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
  
- #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
+-
+-#define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
  #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
  
+-#define NET_NAME_UNKNOWN 0
 +#define IB_WR_REG_MR IB_WR_FAST_REG_MR
 +#define IB_WC_REG_MR IB_WC_FAST_REG_MR
-+
 +
 +/* Define bits for the various functionality this port needs to be supported by
 + * the core.
@@ -516,18 +549,103 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	(RDMA_CORE_PORT_IBA_IB												\
 +	 | RDMA_CORE_CAP_OPA_MAD)
 +
- #define NET_NAME_UNKNOWN 0
++struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
++int rdma_destroy_ah(struct ib_ah* ah);
+ 
+ #define rdma_create_ah(a, b, c) rdma_create_ah(a, b)
+ #define rdma_destroy_ah(a, b) rdma_destroy_ah(a)
+ 
+ #define ib_register_device(a, b, c)  ib_register_device((a), (c))
+ #define rdma_set_device_sysfs_group(a, b)
+-#define alloc_netdev_mqs(size, name, name_assign_type, setup, sdma, ctxts) \
+-	alloc_netdev_mqs((size), (name), (setup), (sdma), (ctxts))
+ #undef access_ok
+ #define access_ok(addr, size) \
+ 	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
+@@ -79,6 +130,18 @@
+ struct hfi1_msix_entry;
+ struct hfi1_devdata;
  
 +#define PCI_IRQ_LEGACY          BIT(0) /* allow legacy interrupts */
 +#define PCI_IRQ_MSI             BIT(1) /* allow MSI interrupts */
 +#define PCI_IRQ_MSIX            BIT(2) /* allow MSI-X interrupts */
 +#define PCI_IRQ_AFFINITY        BIT(3) /* auto-assign affinity */
 +#define PCI_IRQ_ALL_TYPES \
-+(PCI_IRQ_LEGACY | PCI_IRQ_MSI | PCI_IRQ_MSIX)
++	(PCI_IRQ_LEGACY | PCI_IRQ_MSI | PCI_IRQ_MSIX)
 +
- struct hfi1_msix_entry;
- struct hfi1_devdata;
++void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
++                struct hfi1_msix_entry *hfi1_msix_entry);
++int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
++                          unsigned int max_vecs, unsigned int flags);
++
+ void pcie_flr(struct pci_dev *dev);
  
+ int bitmap_print_to_pagebuf(bool list, char *buf,
+@@ -103,6 +166,14 @@
+ #define get_user_pages(start, nr_pages, gup_flags, pages, vmas) \
+ 	compat_get_user_pages(start, nr_pages, gup_flags, pages, vmas)
+ 
++static inline int ib_umem_offset(struct ib_umem* umem) {
++	return umem->offset;
++}
++
++static inline size_t ib_umem_num_pages(struct ib_umem* umem) {
++	return umem->nmap;
++}
++
+ static inline int simple_positive(struct dentry *dentry)
+ {
+ 	return !d_unhashed(dentry) && dentry->d_inode;
+@@ -123,5 +194,146 @@
+ 	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
+ #define for_each_msi_entry(desc, dev)   \
+ 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
++#ifdef CONFIG_PCI_MSI
++#define first_pci_msi_entry(dev)               \
++	first_msi_entry((dev))
++#define for_each_pci_msi_entry(desc, dev)      \
++	for_each_msi_entry((desc), (dev))
++/**
++ * pci_irq_vector - return Linux IRQ number of a device vector
++ * @dev: PCI device to operate on
++ * @nr: device-relative interrupt vector index (0-based).
++ */
++static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
++{
++        if (dev->msix_enabled) {
++                struct msi_desc *entry;
++                int i = 0;
++
++                for_each_pci_msi_entry(entry, dev) {
++                        if (i == nr)
++                                return entry->irq;
++                        i++;
++                }
++                WARN_ON_ONCE(1);
++                return -EINVAL;
++        }
++
++        if (dev->msi_enabled) {
++                struct msi_desc *entry = first_pci_msi_entry(dev);
++
++                if (WARN_ON_ONCE(nr >= entry->nvec_used))
++                        return -EINVAL;
++        } else {
++                if (WARN_ON_ONCE(nr > 0))
++                        return -EINVAL;
++        }
++
++        return dev->irq + nr;
++}
++#else
++static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
++{
++        if (WARN_ON_ONCE(nr > 0))
++                return -EINVAL;
++        return dev->irq;
++}
++#endif
++
 +struct ib_send_wr_hdr {
 +	struct ib_send_wr      *next;
 +	u64                     wr_id;
@@ -581,12 +699,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	u8      weight;
 +};
 +
-+enum ib_mr_type {
-+	IB_MR_TYPE_MEM_REG,
-+	IB_MR_TYPE_SIGNATURE,
-+	IB_MR_TYPE_SG_GAPS,
-+};
-+
 +static inline struct ib_rdma_wr *rdma_wr(struct ib_send_wr *wr)
 +{
 +	return container_of((struct ib_send_wr_hdr *)wr, struct ib_rdma_wr,
@@ -610,12 +722,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +}
 +
 +
- void pcie_flr(struct pci_dev *dev);
- 
- int bitmap_print_to_pagebuf(bool list, char *buf,
- 			    const unsigned long *maskp, int nmaskbits);
-+
-+struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
 +static inline bool rdma_core_cap_opa_port(struct ib_device *device,
 +					  u32 port_num)
 +{
@@ -635,71 +741,12 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	else
 +		return ib_mtu_enum_to_int((enum ib_mtu)mtu);
 +}
-+
-+void msix_setup(struct pci_dev *pcidev, int pos, u32 *msixcnt,
-+                struct hfi1_msix_entry *hfi1_msix_entry);
-+int pci_alloc_irq_vectors(struct pci_dev *dev, unsigned int min_vecs,
-+                          unsigned int max_vecs, unsigned int flags);
-+
- int debugfs_use_file_start(struct dentry *dentry, int *srcu_idx)
- __acquires(&debugfs_srcu);
- 
-@@ -108,5 +276,51 @@
- 	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
- #define for_each_msi_entry(desc, dev)   \
- 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
-+#ifdef CONFIG_PCI_MSI
-+#define first_pci_msi_entry(dev)               \
-+	first_msi_entry((dev))
-+#define for_each_pci_msi_entry(desc, dev)      \
-+	for_each_msi_entry((desc), (dev))
-+/**
-+ * pci_irq_vector - return Linux IRQ number of a device vector
-+ * @dev: PCI device to operate on
-+ * @nr: device-relative interrupt vector index (0-based).
-+ */
-+static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
-+{
-+        if (dev->msix_enabled) {
-+                struct msi_desc *entry;
-+                int i = 0;
-+
-+                for_each_pci_msi_entry(entry, dev) {
-+                        if (i == nr)
-+                                return entry->irq;
-+                        i++;
-+                }
-+                WARN_ON_ONCE(1);
-+                return -EINVAL;
-+        }
-+
-+        if (dev->msi_enabled) {
-+                struct msi_desc *entry = first_pci_msi_entry(dev);
-+
-+                if (WARN_ON_ONCE(nr >= entry->nvec_used))
-+                        return -EINVAL;
-+        } else {
-+                if (WARN_ON_ONCE(nr > 0))
-+                        return -EINVAL;
-+        }
-+
-+        return dev->irq + nr;
-+}
-+#else
-+static inline int pci_irq_vector(struct pci_dev *dev, unsigned int nr)
-+{
-+        if (WARN_ON_ONCE(nr > 0))
-+                return -EINVAL;
-+        return dev->irq;
-+}
-+#endif
-+
  
 -#endif //RH76_COMPAT
-+#endif //DEB8_COMPAT_H
++#endif /* DEB8_COMPAT_H */
 --- a/include/rdma/rdma_vt.h
 +++ b/include/rdma/rdma_vt.h
-@@ -200,7 +200,8 @@
+@@ -208,7 +208,8 @@
  	(defined(IFS_RH73) || \
  	defined(IFS_RH74) || \
  	defined(IFS_SLES12SP2) || \
@@ -707,20 +754,11 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	defined(IFS_SLES12SP3) || \
 +	defined(IFS_DEB8))
  
- struct rvt_dev_info;
- struct rvt_swqe;
+ /*
+  * This structure is used by rvt_mmap() to validate an offset
 --- a/compat/compat_common.h
 +++ b/compat/compat_common.h
-@@ -155,7 +155,7 @@
- }
- #endif
- 
--#define NEED_IB_HELPER_FUNCTIONS (defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3))
-+#define NEED_IB_HELPER_FUNCTIONS (defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)) || defined(IFS_DEB8)
- 
- #if NEED_IB_HELPER_FUNCTIONS
- struct opa_class_port_info {
-@@ -565,6 +565,8 @@
+@@ -549,6 +549,8 @@
  }
  #endif
  
@@ -729,7 +767,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static inline bool rdma_core_cap_opa_port(struct ib_device *device,
  					  u32 port_num)
  {
-@@ -574,6 +576,7 @@
+@@ -558,6 +560,7 @@
  	return (device->port_immutable[port_num].core_cap_flags & RDMA_CORE_PORT_INTEL_OPA)
  		== RDMA_CORE_PORT_INTEL_OPA;
  }
@@ -737,7 +775,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  static inline int opa_mtu_enum_to_int(int mtu)
  {
-@@ -587,6 +590,8 @@
+@@ -571,6 +574,8 @@
  	}
  }
  
@@ -746,7 +784,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static inline int rdma_mtu_enum_to_int(struct ib_device *device, u8 port,
  				       int mtu)
  {
-@@ -595,6 +600,7 @@
+@@ -579,6 +584,7 @@
  	else
  		return ib_mtu_enum_to_int((enum ib_mtu)mtu);
  }
@@ -754,6 +792,140 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  #ifndef timer_setup
  #define timer_setup(timer, callback, flags)				\
+@@ -645,15 +651,30 @@
+ 			     struct ib_recv_wr *recv_wr,
+ 			     struct ib_recv_wr **bad_recv_wr);
+ #endif
++#ifdef IFS_DEB8
++	int (*process_mad)(struct ib_device *device,
++			   int process_mad_flags,
++			   u8 port_num,
++			   struct ib_wc *in_wc,
++			   struct ib_grh *in_grh,
++			   struct ib_mad *in_mad,
++			   struct ib_mad *out_mad);
++#else
+ 	int (*process_mad)(struct ib_device *device, int process_mad_flags,
+ 			   u8 port_num, const struct ib_wc *in_wc,
+ 			   const struct ib_grh *in_grh,
+ 			   const struct ib_mad_hdr *in_mad, size_t in_mad_size,
+ 			   struct ib_mad_hdr *out_mad, size_t *out_mad_size,
+ 			   u16 *out_mad_pkey_index);
++#endif /* IFS_DEB8 */
++#ifdef QUERY_DEVICE_HAS_UDATA
+ 	int (*query_device)(struct ib_device *device,
+ 			    struct ib_device_attr *device_attr,
+ 			    struct ib_udata *udata);
++#else
++	int (*query_device)(struct ib_device *device,
++				struct ib_device_attr *device_attr);
++#endif
+ 	int (*modify_device)(struct ib_device *device, int device_modify_mask,
+ 			     struct ib_device_modify *device_modify);
+ #ifdef GET_DEV_FW_STR_HAS_LEN
+@@ -671,6 +692,7 @@
+ 	int (*modify_port)(struct ib_device *device, u8 port_num,
+ 			   int port_modify_mask,
+ 			   struct ib_port_modify *port_modify);
++#ifdef HAVE_PORT_IMMUTABLE
+ 	/**
+ 	 * The following mandatory functions are used only at device
+ 	 * registration.  Keep functions such as these at the end of this
+@@ -679,6 +701,7 @@
+ 	 */
+ 	int (*get_port_immutable)(struct ib_device *device, u8 port_num,
+ 				  struct ib_port_immutable *immutable);
++#endif /* HAVE_PORT_IMMUTABLE */
+ 	enum rdma_link_layer (*get_link_layer)(struct ib_device *device,
+ 					       u8 port_num);
+ 	/**
+@@ -739,7 +762,7 @@
+ #else
+ 	int (*add_gid)(struct ib_device *device, u8 port_num,
+ 		       unsigned int index, const union ib_gid *gid,
+-		       const struct ib_gid_attr *attr, void **context);
++			   void **context);
+ #endif
+ 	/**
+ 	 * When calling del_gid, the HW vendor's driver should delete the
+@@ -843,11 +866,17 @@
+ 	struct ib_cq *(*create_cq)(struct ib_device *device,
+ 				   const struct ib_cq_init_attr *attr,
+ 				   struct ib_udata *udata);
+-#else
++#elif defined(HAS_CQ_INIT_ATTR)
+ 	struct ib_cq *(*create_cq)(struct ib_device *device,
+ 				   const struct ib_cq_init_attr *attr,
+ 				   struct ib_ucontext *context,
+ 				   struct ib_udata *udata);
++#else
++	struct ib_cq *(*create_cq)(struct ib_device *device,
++				   int entries,
++				   int comp_vector,
++				   struct ib_ucontext *context,
++				   struct ib_udata *udata);
+ #endif
+ 	int (*modify_cq)(struct ib_cq *cq, u16 cq_count, u16 cq_period);
+ #ifdef DESTROY_CQ_HAS_UDATA
+@@ -868,6 +897,10 @@
+ #else
+ 	int (*dereg_mr)(struct ib_mr *mr);
+ #endif
++#ifdef HAVE_CREATE_MR
++	struct ib_mr *(*create_mr)(struct ib_pd *pd,
++				  struct ib_mr_init_attr *mr_init_attr);
++#else
+ #ifdef ALLOC_MR_HAS_UDATA
+ 	struct ib_mr *(*alloc_mr)(struct ib_pd *pd, enum ib_mr_type mr_type,
+ 				  u32 max_num_sg, struct ib_udata *udata);
+@@ -875,6 +908,7 @@
+ 	struct ib_mr *(*alloc_mr)(struct ib_pd *pd, enum ib_mr_type mr_type,
+ 				  u32 max_num_sg);
+ #endif
++#endif
+ 	int (*advise_mr)(struct ib_pd *pd,
+ 			 enum ib_uverbs_advise_mr_advice advice, u32 flags,
+ 			 struct ib_sge *sg_list, u32 num_sge,
+@@ -883,9 +917,13 @@
+ 			 unsigned int *sg_offset);
+ 	int (*check_mr_status)(struct ib_mr *mr, u32 check_mask,
+ 			       struct ib_mr_status *mr_status);
++#ifdef ALLOC_MW_HAS_UDATA
+ 	struct ib_mw *(*alloc_mw)(struct ib_pd *pd, enum ib_mw_type type,
+ 				  struct ib_udata *udata);
+-	int (*dealloc_mw)(struct ib_mw *mw);
++#else
++	struct ib_mw *(*alloc_mw)(struct ib_pd *pd, enum ib_mw_type type);
++#endif
++    int (*dealloc_mw)(struct ib_mw *mw);
+ 	struct ib_fmr *(*alloc_fmr)(struct ib_pd *pd, int mr_access_flags,
+ 				    struct ib_fmr_attr *fmr_attr);
+ 	int (*map_phys_fmr)(struct ib_fmr *fmr, u64 *page_list, int list_len,
+@@ -922,6 +960,7 @@
+ 		struct ib_flow_action *action,
+ 		const struct ib_flow_action_attrs_esp *attr,
+ 		struct uverbs_attr_bundle *attrs);
++#ifdef HAVE_VF
+ 	int (*set_vf_link_state)(struct ib_device *device, int vf, u8 port,
+ 				 int state);
+ 	int (*get_vf_config)(struct ib_device *device, int vf, u8 port,
+@@ -930,6 +969,8 @@
+ 			    struct ifla_vf_stats *stats);
+ 	int (*set_vf_guid)(struct ib_device *device, int vf, u8 port, u64 guid,
+ 			   int type);
++#endif /* HAVE_VF */
++#ifdef HAVE_IB_WQ
+ 	struct ib_wq *(*create_wq)(struct ib_pd *pd,
+ 				   struct ib_wq_init_attr *init_attr,
+ 				   struct ib_udata *udata);
+@@ -945,6 +986,7 @@
+ 		struct ib_rwq_ind_table_init_attr *init_attr,
+ 		struct ib_udata *udata);
+ 	int (*destroy_rwq_ind_table)(struct ib_rwq_ind_table *wq_ind_table);
++#endif /* HAVE_IB_WQ */
+ 	struct ib_dm *(*alloc_dm)(struct ib_device *device,
+ 				  struct ib_ucontext *context,
+ 				  struct ib_dm_alloc_attr *attr,
 --- /dev/null
 +++ b/include/linux/rhashtable.h
 @@ -0,0 +1,908 @@
@@ -1706,10 +1878,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  "[%s] idx %u wr_id %llx status %u opcode %u,%s length %u qpn %x"
 --- a/rdmavt/compat.c
 +++ b/rdmavt/compat.c
-@@ -58,6 +58,98 @@
+@@ -58,6 +58,115 @@
  #include "../hfi1/hfi.h"
  #include "compat.h"
  
++#undef rdma_create_ah
++#undef rdma_destroy_ah
++
 +struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr)
 +{
 +        struct ib_ah *ah;
@@ -1726,6 +1901,20 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +        return ah;
 +}
 +EXPORT_SYMBOL(rdma_create_ah);
++
++int rdma_destroy_ah(struct ib_ah *ah)
++{
++        struct ib_pd *pd;
++        int ret;
++
++        pd = ah->pd;
++        ret = ah->device->destroy_ah(ah);
++        if (!ret)
++                atomic_dec(&pd->usecnt);
++
++        return ret;
++}
++EXPORT_SYMBOL(rdma_destroy_ah);
 +
 +int pci_alloc_irq_vectors(struct pci_dev *pcidev, unsigned int min_vecs,
 +                          unsigned int max_vecs, unsigned int flags)
@@ -1805,7 +1994,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  /**
   * debugfs_use_file_start - mark the beginning of file data access
   * @dentry: the dentry object whose data is being accessed.
-@@ -104,3 +196,171 @@
+@@ -104,3 +213,171 @@
  	srcu_read_unlock(&debugfs_srcu, srcu_idx);
  }
  EXPORT_SYMBOL(debugfs_use_file_finish);
@@ -1979,15 +2168,23 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +};
 --- a/rdmavt/mr.h
 +++ b/rdmavt/mr.h
-@@ -82,6 +82,7 @@
+@@ -79,9 +79,15 @@
+ 			      u64 virt_addr, int mr_access_flags,
+ 			      struct ib_udata *udata);
+ int rvt_dereg_mr(struct ib_mr *ibmr);
++#ifdef HAVE_CREATE_MR
++struct ib_mr *rvt_create_mr(struct ib_pd *pd,
++			   struct ib_mr_init_attr *mr_init_attr);
++#else
  struct ib_mr *rvt_alloc_mr(struct ib_pd *pd,
  			   enum ib_mr_type mr_type,
  			   u32 max_num_sg);
++#endif
 +#ifdef CONFIG_RVT_MAP_MR_SG
  #if !defined(IFS_SLES12SP2)
  int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
  		  int sg_nents, unsigned int *sg_offset);
-@@ -89,6 +90,7 @@
+@@ -89,6 +95,7 @@
  int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
  		  int sg_nents);
  #endif
@@ -2032,7 +2229,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  static inline void rvt_put_ss(struct rvt_sge_state *ss)
 --- a/hfi1/hfi.h
 +++ b/hfi1/hfi.h
-@@ -709,7 +709,7 @@
+@@ -739,7 +739,7 @@
  #define MAX_NAME_SIZE 64
  struct hfi1_msix_entry {
  	enum irq_type type;
@@ -2041,3 +2238,180 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	struct msix_entry msix;
  #endif
  	int irq;
+--- a/include/uapi/rdma/rdma_user_ioctl.h
++++ b/include/uapi/rdma/rdma_user_ioctl.h
+@@ -38,9 +38,10 @@
+ #include <rdma/hfi/hfi1_ioctl.h>
+ #include <rdma/rdma_user_ioctl_cmds.h>
+ 
++#ifndef IB_IOCTL_MAGIC
+ /* Legacy name, for user space application which already use it */
+ #define IB_IOCTL_MAGIC		RDMA_IOCTL_MAGIC
+-
++#endif
+ /*
+  * General blocks assignments
+  * It is closed on purpose do not expose it it user space
+@@ -49,10 +50,18 @@
+  */
+ 
+ /* MAD specific section */
++#ifndef IB_USER_MAD_REGISTER_AGENT
+ #define IB_USER_MAD_REGISTER_AGENT	_IOWR(RDMA_IOCTL_MAGIC, 0x01, struct ib_user_mad_reg_req)
++#endif
++#ifndef IB_USER_MAD_UNREGISTER_AGENT
+ #define IB_USER_MAD_UNREGISTER_AGENT	_IOW(RDMA_IOCTL_MAGIC,  0x02, __u32)
++#endif
++#ifndef IB_USER_MAD_ENABLE_PKEY
+ #define IB_USER_MAD_ENABLE_PKEY		_IO(RDMA_IOCTL_MAGIC,   0x03)
++#endif
++#ifndef IB_USER_MAD_REGISTER_AGENT2
+ #define IB_USER_MAD_REGISTER_AGENT2	_IOWR(RDMA_IOCTL_MAGIC, 0x04, struct ib_user_mad_reg_req2)
++#endif
+ 
+ /* HFI specific section */
+ /* allocate HFI and context */
+--- a/rdmavt/compat_common.c
++++ b/rdmavt/compat_common.c
+@@ -187,8 +187,9 @@
+ 	} while (0)
+ 
+ #define SET_OBJ_SIZE(ptr, name) SET_DEVICE_OP(ptr, size_##name)
+-
++#ifndef IFS_DEB8
+ 	SET_DEVICE_OP(dev_ops, add_gid);
++#endif /* IFS_DEB8 */
+ #ifdef HAVE_ADVICE_MR
+ 	SET_DEVICE_OP(dev_ops, advise_mr);
+ #endif
+@@ -196,8 +197,14 @@
+ 	SET_DEVICE_OP(dev_ops, alloc_dm);
+ #endif
+ 	SET_DEVICE_OP(dev_ops, alloc_fmr);
++#ifdef HAVE_HW_STATS
+ 	SET_DEVICE_OP(dev_ops, alloc_hw_stats);
++#endif
++#ifdef HAVE_CREATE_MR
++	SET_DEVICE_OP(dev_ops, create_mr);
++#else
+ 	SET_DEVICE_OP(dev_ops, alloc_mr);
++#endif
+ 	SET_DEVICE_OP(dev_ops, alloc_mw);
+ 	SET_DEVICE_OP(dev_ops, alloc_pd);
+ #ifdef HAVE_ALLOC_RDMA_NETDEV
+@@ -219,9 +226,13 @@
+ 	SET_DEVICE_OP(dev_ops, create_flow_action_esp);
+ #endif
+ 	SET_DEVICE_OP(dev_ops, create_qp);
++#ifdef HAVE_IB_WQ
+ 	SET_DEVICE_OP(dev_ops, create_rwq_ind_table);
++#endif
+ 	SET_DEVICE_OP(dev_ops, create_srq);
++#ifdef HAVE_IB_WQ
+ 	SET_DEVICE_OP(dev_ops, create_wq);
++#endif /* HAVE_IB_WQ */
+ #ifdef HAVE_ALLOC_DM
+ 	SET_DEVICE_OP(dev_ops, dealloc_dm);
+ #endif
+@@ -235,7 +246,9 @@
+ #ifdef HAVE_ALLOC_XRCD
+ 	SET_DEVICE_OP(dev_ops, dealloc_xrcd);
+ #endif
++#ifdef HAVE_DEL_GID
+ 	SET_DEVICE_OP(dev_ops, del_gid);
++#endif
+ 	SET_DEVICE_OP(dev_ops, dereg_mr);
+ 	SET_DEVICE_OP(dev_ops, destroy_ah);
+ #ifdef HAVE_CREATE_COUNTERS
+@@ -247,30 +260,48 @@
+ 	SET_DEVICE_OP(dev_ops, destroy_flow_action);
+ #endif
+ 	SET_DEVICE_OP(dev_ops, destroy_qp);
++#ifdef HAVE_IB_WQ
+ 	SET_DEVICE_OP(dev_ops, destroy_rwq_ind_table);
++#endif /* HAVE_IB_WQ */
+ 	SET_DEVICE_OP(dev_ops, destroy_srq);
++#ifdef HAVE_IB_WQ
+ 	SET_DEVICE_OP(dev_ops, destroy_wq);
++#endif /* HAVE_IB_WQ */
+ 	SET_DEVICE_OP(dev_ops, detach_mcast);
++#ifdef HAVE_DISASSOCIATE_UCONTEXT
+ 	SET_DEVICE_OP(dev_ops, disassociate_ucontext);
++#endif /* HAVE_DISASSOCIATE_UCONTEXT */
++#ifdef HAVE_DRAIN
+ 	SET_DEVICE_OP(dev_ops, drain_rq);
+ 	SET_DEVICE_OP(dev_ops, drain_sq);
++#endif /* HAVE_DRAIN */
+ #ifdef HAVE_ENABLE_DRIVER
+ 	SET_DEVICE_OP(dev_ops, enable_driver);
+ #endif
+ #ifdef HAVE_FILL_RES_ENTRY
+ 	SET_DEVICE_OP(dev_ops, fill_res_entry);
+ #endif
++#ifdef HAVE_GET_DEV_FW_STR
+ 	SET_DEVICE_OP(dev_ops, get_dev_fw_str);
++#endif /* HAVE_GET_DEV_FW_STR */
+ 	SET_DEVICE_OP(dev_ops, get_dma_mr);
++#ifdef HAVE_HW_STATS
+ 	SET_DEVICE_OP(dev_ops, get_hw_stats);
++#endif /* HAVE_HW_STATS */
+ 	SET_DEVICE_OP(dev_ops, get_link_layer);
++#ifdef HAVE_RDMA_NETDEV
+ 	SET_DEVICE_OP(dev_ops, get_netdev);
++#endif /* HAVE_RDMA_NETDEV */
++#ifdef HAVE_PORT_IMMUTABLE
+ 	SET_DEVICE_OP(dev_ops, get_port_immutable);
++#endif /* HAVE_PORT_IMMUTABLE */
+ #ifdef HAVE_GET_VECTOR_AFFINITY
+ 	SET_DEVICE_OP(dev_ops, get_vector_affinity);
+ #endif
++#ifdef HAVE_VF
+ 	SET_DEVICE_OP(dev_ops, get_vf_config);
+ 	SET_DEVICE_OP(dev_ops, get_vf_stats);
++#endif /* HAVE_VF */
+ #ifdef HAVE_INIT_PORT
+ 	SET_DEVICE_OP(dev_ops, init_port);
+ #endif
+@@ -284,7 +315,9 @@
+ 	SET_DEVICE_OP(dev_ops, iw_reject);
+ 	SET_DEVICE_OP(dev_ops, iw_rem_ref);
+ #endif
++#ifdef HAVE_MAP_MR_SG
+ 	SET_DEVICE_OP(dev_ops, map_mr_sg);
++#endif /* HAVE_MAP_MR_SG */
+ 	SET_DEVICE_OP(dev_ops, map_phys_fmr);
+ 	SET_DEVICE_OP(dev_ops, mmap);
+ 	SET_DEVICE_OP(dev_ops, modify_ah);
+@@ -296,7 +329,9 @@
+ 	SET_DEVICE_OP(dev_ops, modify_port);
+ 	SET_DEVICE_OP(dev_ops, modify_qp);
+ 	SET_DEVICE_OP(dev_ops, modify_srq);
++#ifdef HAVE_IB_WQ
+ 	SET_DEVICE_OP(dev_ops, modify_wq);
++#endif /* HAVE_IB_WQ */
+ 	SET_DEVICE_OP(dev_ops, peek_cq);
+ 	SET_DEVICE_OP(dev_ops, poll_cq);
+ 	SET_DEVICE_OP(dev_ops, post_recv);
+@@ -322,17 +357,21 @@
+ 	SET_DEVICE_OP(dev_ops, reg_user_mr);
+ 	SET_DEVICE_OP(dev_ops, req_ncomp_notif);
+ 	SET_DEVICE_OP(dev_ops, req_notify_cq);
++#ifdef HAVE_REREG_USER_MR
+ 	SET_DEVICE_OP(dev_ops, rereg_user_mr);
++#endif /* HAVE_REREG_USER_MR */
+ 	SET_DEVICE_OP(dev_ops, resize_cq);
++#ifdef HAVE_VF
+ 	SET_DEVICE_OP(dev_ops, set_vf_guid);
+ 	SET_DEVICE_OP(dev_ops, set_vf_link_state);
++#endif /* HAVE_VF */
+ 	SET_DEVICE_OP(dev_ops, unmap_fmr);
+ 
+ #if 0
+ 	SET_OBJ_SIZE(dev_ops, ib_ah);
+ 	SET_OBJ_SIZE(dev_ops, ib_pd);
+ 	SET_OBJ_SIZE(dev_ops, ib_srq);
+-	SET_OBJ_SIZE(dev_ops, ib_ucontext);
++	Set_OBJ_SIZE(dev_ops, ib_ucontext);
+ #endif
+ }
+ EXPORT_SYMBOL(ib_set_device_ops);

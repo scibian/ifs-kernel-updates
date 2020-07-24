@@ -1,9 +1,11 @@
 Source: ifs-kernel-updates
-Maintainer: Brian T. Smith <bsmith@systemfabricworks.com>
+Maintainer: Scibian Project <packaging@scibian.org>
 Section: kernel
 Priority: extra
 Standards-Version: 3.9.8
 Homepage: http://www.intel.com
+Vcs-Git: https://github.com/scibian/ifs-kernel-updates.git
+Vcs-Browser: https://github.com/scibian/ifs-kernel-updates
 Build-Depends: debhelper (>= 10),
                linux-headers-@KERNEL_VER@,
                unifdef

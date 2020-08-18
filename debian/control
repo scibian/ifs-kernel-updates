@@ -29,3 +29,12 @@ Description: Updated kernel modules for Omni-Path
  4.9.0-12-amd64.
  Includes the hfi1 driver for Omni-Path hardware and updated
  rdmavt.
+
+Package: kmod-ifs-kernel-updates
+Architecture: amd64
+Depends: ${misc:Depends}, kmod-ifs-kernel-updates-4.9.0-12-amd64
+Description: Updated kernel modules for Omni-Path
+ This is a metapackage that will depend on the latest version of the
+ kernel modules for Omni-Path.
+ Install this package to automatically install the latest OPA module
+ when new versions of the kernel are released.

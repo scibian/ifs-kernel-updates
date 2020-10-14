@@ -49,6 +49,10 @@
 #include <linux/vmalloc.h>
 #include <linux/mm.h>
 #include <asm/pgtable.h>
+#include "compat.h"
+#ifdef NO_IB_UCONTEXT
+#include <rdma/uverbs_ioctl.h>
+#endif
 #include "mmap.h"
 
 /**
@@ -150,17 +154,24 @@ done:
  * rvt_create_mmap_info - allocate information for hfi1_mmap
  * @rdi: rvt dev struct
  * @size: size in bytes to map
- * @context: user context
+ * @udata: user data (must be valid!)
  * @obj: opaque pointer to a cq, wq etc
  *
  * Return: rvt_mmap struct on success
  */
-struct rvt_mmap_info *rvt_create_mmap_info(struct rvt_dev_info *rdi,
-					   u32 size,
-					   struct ib_ucontext *context,
-					   void *obj)
+struct rvt_mmap_info *rvt_create_mmap_info(struct rvt_dev_info *rdi, u32 size,
+#ifndef NO_IB_UCONTEXT
+					   struct ib_ucontext *context, void *obj)
+#else
+					   struct ib_udata *udata, void *obj)
+#endif
 {
 	struct rvt_mmap_info *ip;
+
+#ifdef NO_IB_UCONTEXT
+	if (!udata)
+		return ERR_PTR(-EINVAL);
+#endif
 
 	ip = kmalloc_node(sizeof(*ip), GFP_KERNEL, rdi->dparms.node);
 	if (!ip)
@@ -177,7 +188,13 @@ struct rvt_mmap_info *rvt_create_mmap_info(struct rvt_dev_info *rdi,
 
 	INIT_LIST_HEAD(&ip->pending_mmaps);
 	ip->size = size;
+#ifndef NO_IB_UCONTEXT
 	ip->context = context;
+#else
+	ip->context =
+		container_of(udata, struct uverbs_attr_bundle, driver_udata)
+			->context;
+#endif
 	ip->obj = obj;
 	kref_init(&ip->ref);
 

@@ -339,8 +339,10 @@ void qib_ib_rcv(struct qib_ctxtdata *rcd, void *rhdr, void *data, u32 tlen)
 		if (mcast == NULL)
 			goto drop;
 		this_cpu_inc(ibp->pmastats->n_multicast_rcv);
+		rcu_read_lock();
 		list_for_each_entry_rcu(p, &mcast->qp_list, list)
 			qib_qp_rcv(rcd, hdr, 1, data, tlen, p->qp);
+		rcu_read_unlock();
 		/*
 		 * Notify rvt_multicast_detach() if it is waiting for us
 		 * to finish.
@@ -1356,13 +1358,13 @@ struct ib_ah *qib_create_qp0_ah(struct qib_ibport *ibp, u16 dlid)
 	struct ib_ah *ah = ERR_PTR(-EINVAL);
 	struct rvt_qp *qp0;
 	struct qib_pportdata *ppd = ppd_from_ibp(ibp);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP3)
 	struct qib_devdata *dd = dd_from_ppd(ppd);
 #endif
 	u8 port_num = ppd->port;
 
 	memset(&attr, 0, sizeof(attr));
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP3)
 	attr.type = rdma_ah_find_type(&dd->verbs_dev.rdi.ibdev, port_num);
 #endif
 	rdma_ah_set_dlid(&attr, dlid);
@@ -1473,18 +1475,16 @@ static void qib_fill_device_attr(struct qib_devdata *dd)
 	rdi->dparms.props.max_mr_size = ~0ULL;
 	rdi->dparms.props.max_qp = ib_qib_max_qps;
 	rdi->dparms.props.max_qp_wr = ib_qib_max_qp_wrs;
-#if !defined(IFS_SLES12SP5) && !defined(IFS_SLES15SP1) && !defined(IFS_RH77)
-	rdi->dparms.props.max_sge = ib_qib_max_sges;
-#else
+#ifdef HAVE_MAX_SEND_SGE
 	rdi->dparms.props.max_send_sge = ib_qib_max_sges;
 	rdi->dparms.props.max_recv_sge = ib_qib_max_sges;
+#else
+	rdi->dparms.props.max_sge = ib_qib_max_sges;
 #endif
 	rdi->dparms.props.max_sge_rd = ib_qib_max_sges;
 	rdi->dparms.props.max_cq = ib_qib_max_cqs;
 	rdi->dparms.props.max_cqe = ib_qib_max_cqes;
 	rdi->dparms.props.max_ah = ib_qib_max_ahs;
-	rdi->dparms.props.max_mr = rdi->lkey_table.max;
-	rdi->dparms.props.max_fmr = rdi->lkey_table.max;
 	rdi->dparms.props.max_map_per_fmr = 32767;
 	rdi->dparms.props.max_qp_rd_atom = QIB_MAX_RDMA_ATOMIC;
 	rdi->dparms.props.max_qp_init_rd_atom = 255;
@@ -1506,8 +1506,21 @@ static void qib_fill_device_attr(struct qib_devdata *dd)
 }
 
 static const struct ib_device_ops qib_dev_ops = {
+#ifdef IB_DEVICE_OPS_DRIVER_ID
+	.driver_id = RDMA_DRIVER_QIB,
+#endif
+#ifdef IB_DEVICE_OPS_OWNER
+	.owner = THIS_MODULE,
+#endif
+#ifdef HAVE_IBDEV_INIT_PORT
+	.init_port = qib_create_port_files,
+#endif
 	.modify_device = qib_modify_device,
+#ifndef HAVE_NEW_PROCESS_MAD_FUNCTION
+	.process_mad = compat_qib_process_mad,
+#else
 	.process_mad = qib_process_mad,
+#endif
 };
 
 /**
@@ -1568,10 +1581,12 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	if (!ib_qib_sys_image_guid)
 		ib_qib_sys_image_guid = ppd->guid;
 
+#ifndef IB_DEVICE_OPS_OWNER
 	ibdev->owner = THIS_MODULE;
+#endif
 	ibdev->node_guid = ppd->guid;
 	ibdev->phys_port_cnt = dd->num_pports;
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_SLES12SP3)
 	ibdev->dev.parent = &dd->pcidev->dev;
 #else
 	ibdev->dma_device = &dd->pcidev->dev;
@@ -1583,7 +1598,9 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	/*
 	 * Fill in rvt info object.
 	 */
+#ifndef HAVE_IBDEV_INIT_PORT
 	dd->verbs_dev.rdi.driver_f.port_callback = qib_create_port_files;
+#endif
 	dd->verbs_dev.rdi.driver_f.get_pci_dev = qib_get_pci_dev;
 	dd->verbs_dev.rdi.driver_f.check_ah = qib_check_ah;
 	dd->verbs_dev.rdi.driver_f.setup_wqe = qib_check_send_wqe;
@@ -1644,16 +1661,16 @@ int qib_register_ib_device(struct qib_devdata *dd)
 	rdma_set_device_sysfs_group(&dd->verbs_dev.rdi.ibdev, &qib_attr_group);
 
 	ib_set_device_ops(ibdev, &qib_dev_ops);
-	ret = rvt_register_device(&dd->verbs_dev.rdi, RDMA_DRIVER_QIB);
+	ret = rvt_register_device(&dd->verbs_dev.rdi);
 	if (ret)
 		goto err_tx;
-#if !defined(IFS_SLES15SP1)
+#ifndef HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
 	ret = qib_verbs_register_sysfs(dd);
 	if (ret)
 		goto err_class;
 #endif
 	return ret;
-#if !defined(IFS_SLES15SP1)
+#ifndef HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
 err_class:
 	rvt_unregister_device(&dd->verbs_dev.rdi);
 #endif

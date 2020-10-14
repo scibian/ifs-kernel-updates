@@ -434,6 +434,7 @@ static int check_mkey(struct qib_ibport *ibp, struct ib_smp *smp, int mad_flags)
 			/* Bad mkey not a violation below level 2 */
 			if (ibp->rvp.mkeyprot < 2)
 				break;
+			/* fall through */
 		case IB_MGMT_METHOD_SET:
 		case IB_MGMT_METHOD_TRAP_REPRESS:
 			if (ibp->rvp.mkey_violations != 0xFFFF)
@@ -2405,28 +2406,21 @@ bail:
  */
 int qib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
 		    const struct ib_wc *in_wc, const struct ib_grh *in_grh,
-		    const struct ib_mad_hdr *in, size_t in_mad_size,
-		    struct ib_mad_hdr *out, size_t *out_mad_size,
-		    u16 *out_mad_pkey_index)
+		    const struct ib_mad *in, struct ib_mad *out,
+		    size_t *out_mad_size, u16 *out_mad_pkey_index)
 {
 	int ret;
 	struct qib_ibport *ibp = to_iport(ibdev, port);
 	struct qib_pportdata *ppd = ppd_from_ibp(ibp);
-	const struct ib_mad *in_mad = (const struct ib_mad *)in;
-	struct ib_mad *out_mad = (struct ib_mad *)out;
 
-	if (WARN_ON_ONCE(in_mad_size != sizeof(*in_mad) ||
-			 *out_mad_size != sizeof(*out_mad)))
-		return IB_MAD_RESULT_FAILURE;
-
-	switch (in_mad->mad_hdr.mgmt_class) {
+	switch (in->mad_hdr.mgmt_class) {
 	case IB_MGMT_CLASS_SUBN_DIRECTED_ROUTE:
 	case IB_MGMT_CLASS_SUBN_LID_ROUTED:
-		ret = process_subn(ibdev, mad_flags, port, in_mad, out_mad);
+		ret = process_subn(ibdev, mad_flags, port, in, out);
 		goto bail;
 
 	case IB_MGMT_CLASS_PERF_MGMT:
-		ret = process_perf(ibdev, port, in_mad, out_mad);
+		ret = process_perf(ibdev, port, in, out);
 		goto bail;
 
 	case IB_MGMT_CLASS_CONG_MGMT:
@@ -2435,7 +2429,7 @@ int qib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
 			ret = IB_MAD_RESULT_SUCCESS;
 			goto bail;
 		}
-		ret = process_cc(ibdev, mad_flags, port, in_mad, out_mad);
+		ret = process_cc(ibdev, mad_flags, port, in, out);
 		goto bail;
 
 	default:
@@ -2445,6 +2439,26 @@ int qib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
 bail:
 	return ret;
 }
+
+#ifndef HAVE_NEW_PROCESS_MAD_FUNCTION
+int compat_qib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
+			   const struct ib_wc *in_wc,
+			   const struct ib_grh *in_grh,
+			   const struct ib_mad_hdr *in, size_t in_mad_size,
+			   struct ib_mad_hdr *out, size_t *out_mad_size,
+			   u16 *out_mad_pkey_index)
+{
+	const struct ib_mad *in_mad = (const struct ib_mad *)in;
+	struct ib_mad *out_mad = (struct ib_mad *)out;
+
+	if (WARN_ON_ONCE(in_mad_size != sizeof(*in_mad) ||
+			 *out_mad_size != sizeof(*out_mad)))
+		return IB_MAD_RESULT_FAILURE;
+
+	return qib_process_mad(ibdev, mad_flags, port, in_wc, in_grh, in_mad,
+			       out_mad, out_mad_size, out_mad_pkey_index);
+}
+#endif
 
 static void xmit_wait_timer_func(struct timer_list *t)
 {

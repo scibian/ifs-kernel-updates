@@ -96,6 +96,8 @@ int rvt_driver_mr_init(struct rvt_dev_info *rdi)
 	for (i = 0; i < rdi->lkey_table.max; i++)
 		RCU_INIT_POINTER(rdi->lkey_table.table[i], NULL);
 
+	rdi->dparms.props.max_mr = rdi->lkey_table.max;
+	rdi->dparms.props.max_fmr = rdi->lkey_table.max;
 	return 0;
 }
 
@@ -283,7 +285,7 @@ static struct rvt_mr *__rvt_alloc_mr(int count, struct ib_pd *pd)
 
 	/* Allocate struct plus pointers to first level page tables. */
 	m = (count + RVT_SEGSZ - 1) / RVT_SEGSZ;
-	mr = kzalloc(sizeof(*mr) + m * sizeof(mr->mr.map[0]), GFP_KERNEL);
+	mr = kzalloc(struct_size(mr, mr.map, m), GFP_KERNEL);
 	if (!mr)
 		goto bail;
 
@@ -388,8 +390,12 @@ struct ib_mr *rvt_reg_user_mr(struct ib_pd *pd, u64 start, u64 length,
 	if (length == 0)
 		return ERR_PTR(-EINVAL);
 
+#ifndef NO_IB_UCONTEXT
 	umem = ib_umem_get(pd->uobject->context, start, length,
 			   mr_access_flags, 0);
+#else
+	umem = ib_umem_get(udata, start, length, mr_access_flags, 0);
+#endif
 	if (IS_ERR(umem))
 		return (void *)umem;
 
@@ -549,7 +555,7 @@ bool rvt_ss_has_lkey(struct rvt_sge_state *ss, u32 lkey)
  *
  * Returns 0 on success.
  */
-int rvt_dereg_mr(struct ib_mr *ibmr)
+int rvt_dereg_mr(struct ib_mr *ibmr, struct ib_udata *udata)
 {
 	struct rvt_mr *mr = to_imr(ibmr);
 	int ret;
@@ -561,8 +567,7 @@ int rvt_dereg_mr(struct ib_mr *ibmr)
 	if (ret)
 		goto out;
 	rvt_deinit_mregion(&mr->mr);
-	if (mr->umem)
-		ib_umem_release(mr->umem);
+	ib_umem_release(mr->umem);
 	kfree(mr);
 out:
 	return ret;
@@ -576,9 +581,8 @@ out:
  *
  * Return: the memory region on success, otherwise return an errno.
  */
-struct ib_mr *rvt_alloc_mr(struct ib_pd *pd,
-			   enum ib_mr_type mr_type,
-			   u32 max_num_sg)
+struct ib_mr *rvt_alloc_mr(struct ib_pd *pd, enum ib_mr_type mr_type,
+			   u32 max_num_sg, struct ib_udata *udata)
 {
 	struct rvt_mr *mr;
 
@@ -613,13 +617,12 @@ static int rvt_set_page(struct ib_mr *ibmr, u64 addr)
 	n = mapped_segs % RVT_SEGSZ;
 	mr->mr.map[m]->segs[n].vaddr = (void *)addr;
 	mr->mr.map[m]->segs[n].length = ps;
-	trace_rvt_mr_page_seg(&mr->mr, m, n, (void *)addr, ps);
 	mr->mr.length += ps;
+	trace_rvt_mr_page_seg(&mr->mr, m, n, (void *)addr, ps);
 
 	return 0;
 }
 
-#if !defined(IFS_SLES12SP2)
 /**
  * rvt_map_mr_sg - map sg list and set it the memory region
  * @ibmr: memory region
@@ -644,27 +647,10 @@ int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
 	mr->mr.iova = ibmr->iova;
 	mr->mr.offset = ibmr->iova - (u64)mr->mr.map[0]->segs[0].vaddr;
 	mr->mr.length = (size_t)ibmr->length;
+	trace_rvt_map_mr_sg(ibmr, sg_nents, sg_offset);
 	return ret;
 }
-#else
-/**
- * rvt_map_mr_sg - map sg list and set it the memory region
- * @ibmr: memory region
- * @sg: dma mapped scatterlist
- * @sg_nents: number of entries in sg
- *
- * Return: number of sg elements mapped to the memory region
- */
-int rvt_map_mr_sg(struct ib_mr *ibmr, struct scatterlist *sg,
-		  int sg_nents)
-{
-	struct rvt_mr *mr = to_imr(ibmr);
 
-	mr->mr.length = 0;
-	mr->mr.page_shift = PAGE_SHIFT;
-	return ib_sg_to_pages(ibmr, sg, sg_nents, rvt_set_page);
-}
-#endif
 /**
  * rvt_fast_reg_mr - fast register physical MR
  * @qp: the queue pair where the work request comes from
@@ -750,7 +736,7 @@ struct ib_fmr *rvt_alloc_fmr(struct ib_pd *pd, int mr_access_flags,
 
 	/* Allocate struct plus pointers to first level page tables. */
 	m = (fmr_attr->max_pages + RVT_SEGSZ - 1) / RVT_SEGSZ;
-	fmr = kzalloc(sizeof(*fmr) + m * sizeof(fmr->mr.map[0]), GFP_KERNEL);
+	fmr = kzalloc(struct_size(fmr, mr.map, m), GFP_KERNEL);
 	if (!fmr)
 		goto bail;
 
@@ -790,7 +776,7 @@ bail:
 
 /**
  * rvt_map_phys_fmr - set up a fast memory region
- * @ibmfr: the fast memory region to set up
+ * @ibfmr: the fast memory region to set up
  * @page_list: the list of pages to associate with the fast memory region
  * @list_len: the number of pages to associate with the fast memory region
  * @iova: the virtual address of the start of the fast memory region

@@ -82,14 +82,6 @@
 
 static u8 snoop_flags;
 
-/*
- * Extract packet length from LRH header.
- * This is in Dwords so multiply by 4 to get size in bytes
- */
-//#define HFI1_GET_PKT_LEN(x)      (((be16_to_cpu((x)->lrh[2]) & 0xFFF)) << 2)
-#define HFI1_GET_PKT_LEN(x)      (((be16_to_cpu((x)->ibh.lrh[2]) & 0xFFF)) << 2)
-
-
 enum hfi1_filter_status {
 	HFI1_FILTER_HIT,
 	HFI1_FILTER_ERR,
@@ -1294,8 +1286,24 @@ static long hfi1_ioctl(struct file *fp, unsigned int cmd, unsigned long arg)
 		if (value & SNOOP_USE_METADATA)
 			snoop_flags |= SNOOP_USE_METADATA;
 		if (value & (SNOOP_SET_VL0TOVL15)) {
+			int i;
+
 			ppd = &dd->pport[0];  /* first port will do */
 			ret = hfi1_assign_snoop_link_credits(ppd, value);
+			if (ret) {
+				dd_dev_err(dd, "set_link_credits failed %ld\n",
+					   ret);
+				break;
+			}
+			/* mtu must be set for all VLs with send credits.
+			 * Make it at least vl15 mtu size
+			 */
+			for (i = 0; i < ppd->vls_supported; i++)
+				if (!dd->vld[i].mtu)
+					dd->vld[i].mtu = dd->vld[15].mtu;
+			ret = set_mtu(ppd);
+			if (ret)
+				dd_dev_err(dd, "set_mtu failed %ld\n", ret);
 		}
 		break;
 	default:
@@ -1738,26 +1746,29 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			   u64 pbc)
 {
 	u32 hdrwords = ps->s_txreq->hdr_dwords;
-	struct rvt_sge_state *ss = ps->s_txreq->ss;
 	u32 len = ps->s_txreq->s_cur_size;
-	u32 dwords = (len + 3) >> 2;
-	u32 plen = hdrwords + dwords + 2; /* includes pbc */
+	u32 dwords;
+	u32 plen;
 	struct hfi1_pportdata *ppd = ps->ppd;
-	struct snoop_packet *s_packet = NULL;
-	u32 *hdr = (u32 *)&ps->s_txreq->phdr.hdr;
-	u32 length = 0;
-	struct rvt_sge_state temp_ss;
-	void *data = NULL;
-	void *data_start = NULL;
+	struct snoop_packet *s_packet;
 	int ret;
 	int snoop_mode = 0;
 	int md_len = 0;
-	struct capture_md md;
-	u32 vl;
 	u32 hdr_len = hdrwords << 2;
-	u32 tlen = HFI1_GET_PKT_LEN(&ps->s_txreq->phdr.hdr);
+	u16 tlen;
 
-	md.u.pbc = 0;
+	if (ps->s_txreq->phdr.hdr.hdr_type) {
+		u8 pad_size = hfi1_get_16b_padding((hdrwords << 2), len);
+		u8 extra_bytes = pad_size + (SIZE_OF_CRC << 2) + SIZE_OF_LT;
+
+		dwords = (len + extra_bytes) >> 2;
+		/* 16B length is in flits */
+		tlen = hfi1_16B_get_len(&ps->s_txreq->phdr.hdr.opah) << 3;
+	} else {
+		dwords = (len + 3) >> 2;
+		tlen = ib_get_len(&ps->s_txreq->phdr.hdr.ibh) << 2;
+	}
+	plen = hdrwords + dwords + sizeof(pbc) / 4;
 
 	snoop_dbg("PACKET OUT: hdrword %u len %u plen %u dwords %u tlen %u",
 		  hdrwords, len, plen, dwords, tlen);
@@ -1778,47 +1789,42 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	s_packet->total_len = tlen + md_len;
 
 	if (md_len > 0) {
-		memset(&md, 0, sizeof(struct capture_md));
-		md.port = 1;
-		md.dir = PKT_DIR_EGRESS;
+		struct capture_md md = { .port = 1, .dir = PKT_DIR_EGRESS };
+
 		if (likely(pbc == 0)) {
 			u8 sc5 = ((struct hfi1_qp_priv *)qp->priv)->s_sc;
+			u8 vl = sc_to_vlt(dd_from_ibdev(qp->ibqp.device), sc5);
 
-			vl = be16_to_cpu(ps->s_txreq->phdr.hdr.ibh.lrh[0]) >> 12;
-			/* set PBC_DC_INFO bit (aka SC[4]) in pbc_flags */
-			md.u.pbc |= (!!(sc5 & 0x10)) << PBC_DC_INFO_SHIFT;
+			/* set PBC_DC_INFO bit (aka SC[4]) in pbc */
+			if (ps->s_txreq->phdr.hdr.hdr_type)
+				pbc |= PBC_PACKET_BYPASS |
+					PBC_INSERT_BYPASS_ICRC;
+			else
+				pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
 
-			md.u.pbc = create_pbc(ppd, md.u.pbc, qp->s_srate, vl,
-					      plen);
+			pbc = create_pbc(ppd, pbc, qp->srate_mbps, vl, plen);
 
 			/* Update HCRC based on packet opcode */
 			if ((ps->opcode & IB_OPCODE_TID_RDMA) ==
 			    IB_OPCODE_TID_RDMA) {
-				md.u.pbc &= ~PBC_INSERT_HCRC_SMASK;
-				md.u.pbc |= (u64)PBC_IHCRC_LKDETH <<
+				pbc &= ~PBC_INSERT_HCRC_SMASK;
+				pbc |= (u64)PBC_IHCRC_LKDETH <<
 					PBC_INSERT_HCRC_SHIFT;
 			}
-		} else {
-			md.u.pbc = 0;
 		}
-		memcpy(s_packet->data, &md, md_len);
-	} else {
 		md.u.pbc = pbc;
+		memcpy(s_packet->data, &md, md_len);
 	}
 
 	/* Copy header */
-	if (likely(hdr)) {
-		memcpy(s_packet->data + md_len, hdr, hdr_len);
-	} else {
-		dd_dev_err(ppd->dd,
-			   "Unable to copy header to snoop/capture packet\n");
-		kfree(s_packet);
-		goto out;
-	}
+	memcpy(s_packet->data + md_len, &ps->s_txreq->phdr.hdr, hdr_len);
 
-	if (ss) {
+	if (ps->s_txreq->ss) {
+		struct rvt_sge_state temp_ss;
+		void *data;
+		u32 length;
+
 		data = s_packet->data + hdr_len + md_len;
-		data_start = data;
 
 		/*
 		 * Copy SGE State
@@ -1827,7 +1833,7 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		 * and operate on that. So we only need to copy this instance
 		 * and it won't impact PIO.
 		 */
-		temp_ss = *ss;
+		temp_ss = *ps->s_txreq->ss;
 		length = len;
 
 		snoop_dbg("Need to copy %d bytes", length);
@@ -1835,10 +1841,7 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			void *addr = temp_ss.sge.vaddr;
 			u32 slen = temp_ss.sge.length;
 
-			if (slen > length) {
-				slen = length;
-				snoop_dbg("slen %d > len %d", slen, length);
-			}
+			slen = rvt_get_sge_length(&temp_ss.sge, length);
 			snoop_dbg("copy %d to %p", slen, addr);
 			memcpy(data, addr, slen);
 			rvt_update_sge(&temp_ss, slen, false);
@@ -1908,7 +1911,7 @@ int snoop_send_pio_handler(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		break;
 	}
 out:
-	return hfi1_verbs_send_pio(qp, ps, md.u.pbc);
+	return hfi1_verbs_send_pio(qp, ps, pbc);
 }
 
 /*

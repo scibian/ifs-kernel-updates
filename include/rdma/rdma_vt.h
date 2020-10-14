@@ -2,7 +2,7 @@
 #define DEF_RDMA_VT_H
 
 /*
- * Copyright(c) 2016 - 2018 Intel Corporation.
+ * Copyright(c) 2016 - 2019 Intel Corporation.
  *
  * This file is provided under a dual BSD/GPLv2 license.  When using or
  * redistributing this file, you may do so under either license.
@@ -188,6 +188,11 @@ struct rvt_driver_params {
 	u8 reserved_operations;
 };
 
+/* User context */
+struct rvt_ucontext {
+	struct ib_ucontext ibucontext;
+};
+
 /* Protection domain */
 struct rvt_pd {
 	struct ib_pd ibpd;
@@ -198,17 +203,9 @@ struct rvt_pd {
 struct rvt_ah {
 	struct ib_ah ibah;
 	struct rdma_ah_attr attr;
-	atomic_t refcount;
 	u8 vl;
 	u8 log_pmtu;
 };
-
-
-#define HAVE_IB_QP_CREATE_USE_GFP_NOIO \
-	(defined(IFS_RH73) || \
-	defined(IFS_RH74) || \
-	defined(IFS_SLES12SP2) || \
-	defined(IFS_SLES12SP3))
 
 /*
  * This structure is used by rvt_mmap() to validate an offset
@@ -279,9 +276,11 @@ struct rvt_driver_provided {
 	void (*do_send)(struct rvt_qp *qp);
 
 	/* end of hot path calldowns */
+#ifndef HAVE_IBDEV_INIT_PORT
 
 	/* Passed to ib core registration. Callback to create syfs files */
 	int (*port_callback)(struct ib_device *, u8, struct kobject *);
+#endif
 
 	/*
 	 * Returns a pointer to the undelying hardware's PCI device. This is
@@ -296,7 +295,7 @@ struct rvt_driver_provided {
 	 * ERR_PTR(err).  The driver is free to return NULL or a valid
 	 * pointer.
 	 */
-#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifdef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 	void * (*qp_priv_alloc)(struct rvt_dev_info *rdi, struct rvt_qp *qp,
 				gfp_t gfp);
 #else
@@ -396,7 +395,7 @@ struct rvt_driver_provided {
 
 	/* Let the driver pick the next queue pair number*/
 	int (*alloc_qpn)(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
-#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifdef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 			 enum ib_qp_type type, u8 port_num, gfp_t qfp);
 #else
 			 enum ib_qp_type type, u8 port_num);
@@ -575,7 +574,11 @@ static inline u16 rvt_get_pkey(struct rvt_dev_info *rdi,
 
 struct rvt_dev_info *rvt_alloc_device(size_t size, int nports);
 void rvt_dealloc_device(struct rvt_dev_info *rdi);
-int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id);
+#ifdef IB_DEVICE_OPS_DRIVER_ID
+int rvt_register_device(struct rvt_dev_info *rvd);
+#else
+int compat_rvt_register_device(struct rvt_dev_info *rvd, u32 driver_id);
+#endif
 void rvt_unregister_device(struct rvt_dev_info *rvd);
 int rvt_check_ah(struct ib_device *ibdev, struct rdma_ah_attr *ah_attr);
 int rvt_init_port(struct rvt_dev_info *rdi, struct rvt_ibport *port,

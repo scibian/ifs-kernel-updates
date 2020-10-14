@@ -50,13 +50,22 @@
 
 #include <rdma/rdma_vt.h>
 void rvt_driver_srq_init(struct rvt_dev_info *rdi);
-struct ib_srq *rvt_create_srq(struct ib_pd *ibpd,
-			      struct ib_srq_init_attr *srq_init_attr,
-			      struct ib_udata *udata);
+#ifndef HAVE_CORE_ALLOC_SRQ
+struct ib_srq *compat_rvt_create_srq(struct ib_pd *ibpd,
+				     struct ib_srq_init_attr *srq_init_attr,
+				     struct ib_udata *udata);
+#else
+int rvt_create_srq(struct ib_srq *ibsrq, struct ib_srq_init_attr *srq_init_attr,
+		   struct ib_udata *udata);
+#endif
 int rvt_modify_srq(struct ib_srq *ibsrq, struct ib_srq_attr *attr,
 		   enum ib_srq_attr_mask attr_mask,
 		   struct ib_udata *udata);
 int rvt_query_srq(struct ib_srq *ibsrq, struct ib_srq_attr *attr);
-int rvt_destroy_srq(struct ib_srq *ibsrq);
+#ifndef HAVE_CORE_ALLOC_SRQ
+int compat_rvt_destroy_srq(struct ib_srq *ibsrq, struct ib_udata *udata);
+#else
+void rvt_destroy_srq(struct ib_srq *ibsrq, struct ib_udata *udata);
+#endif
 
 #endif          /* DEF_RVTSRQ_H */

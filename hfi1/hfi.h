@@ -71,7 +71,6 @@
 #include <linux/rhashtable.h>
 #include <linux/netdevice.h>
 #include <rdma/rdma_vt.h>
-#include <rdma/opa_addr.h>
 
 #include "chip_registers.h"
 #include "common.h"
@@ -739,7 +738,7 @@ static inline void incr_cntr32(u32 *cntr)
 #define MAX_NAME_SIZE 64
 struct hfi1_msix_entry {
 	enum irq_type type;
-#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)
+#ifdef NEED_MSIX_ENTRY
 	struct msix_entry msix;
 #endif
 	int irq;
@@ -2251,9 +2250,7 @@ static inline bool hfi1_packet_present(struct hfi1_ctxtdata *rcd)
  */
 
 extern const char ib_hfi1_version[];
-#if defined (IFS_SLES15SP1)
 extern const struct attribute_group ib_hfi1_attr_group;
-#endif
 
 int hfi1_device_create(struct hfi1_devdata *dd);
 void hfi1_device_remove(struct hfi1_devdata *dd);
@@ -2628,7 +2625,6 @@ static inline bool hfi1_is_16B_mcast(u32 lid)
 
 static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
 {
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
 	const struct ib_global_route *grh = rdma_ah_read_grh(attr);
 	u32 dlid = rdma_ah_get_dlid(attr);
 
@@ -2651,7 +2647,6 @@ static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
 		dlid = be32_to_cpu(OPA_LID_PERMISSIVE);
 
 	rdma_ah_set_dlid(attr, dlid);
-#endif
 }
 
 static inline u8 hfi1_get_packet_type(u32 lid)

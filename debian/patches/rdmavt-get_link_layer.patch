@@ -7,7 +7,7 @@ Last-Update: <2018-10-27>
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/rdmavt/vt.c
 +++ b/rdmavt/vt.c
-@@ -343,6 +343,12 @@
+@@ -339,6 +339,12 @@
  	return 0;
  }
  
@@ -20,7 +20,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  enum {
  	MISC,
  	QUERY_DEVICE,
-@@ -388,6 +394,7 @@
+@@ -384,6 +390,7 @@
  	RESIZE_CQ,
  	ALLOC_PD,
  	DEALLOC_PD,
@@ -28,7 +28,7 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	_VERB_IDX_MAX /* Must always be last! */
  };
  
-@@ -412,6 +419,7 @@
+@@ -452,6 +459,7 @@
  	.detach_mcast = rvt_detach_mcast,
  	.get_dma_mr = rvt_get_dma_mr,
  	.get_port_immutable = rvt_get_port_immutable,

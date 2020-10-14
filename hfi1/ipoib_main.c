@@ -140,7 +140,7 @@ static int hfi1_ipoib_dev_stop(struct net_device *dev)
 
 	return priv->netdev_ops->ndo_stop(dev);
 }
-#if !defined(IFS_RH74) && !defined(IFS_SLES12SP2)
+
 static void hfi1_ipoib_dev_get_stats64(struct net_device *dev,
 				       struct rtnl_link_stats64 *storage)
 {
@@ -181,25 +181,14 @@ static void hfi1_ipoib_dev_get_stats64(struct net_device *dev,
 	storage->tx_packets += tx_packets;
 	storage->tx_bytes += tx_bytes;
 }
-#endif
 
 static const struct net_device_ops hfi1_ipoib_netdev_ops = {
 	.ndo_init         = hfi1_ipoib_dev_init,
 	.ndo_uninit       = hfi1_ipoib_dev_uninit,
 	.ndo_open         = hfi1_ipoib_dev_open,
 	.ndo_stop         = hfi1_ipoib_dev_stop,
-#if !defined(IFS_RH74) && !defined(IFS_SLES12SP2)
 	.ndo_get_stats64  = hfi1_ipoib_dev_get_stats64,
-#endif
 };
-
-static int hfi1_ipoib_send(struct net_device *dev,
-			   struct sk_buff *skb,
-			   struct ib_ah *address,
-			   u32 dqpn)
-{
-	return hfi1_ipoib_send_dma(dev, skb, address, dqpn);
-}
 
 static int hfi1_ipoib_mcast_attach(struct net_device *dev,
 				   struct ib_device *device,

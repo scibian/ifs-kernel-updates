@@ -1,7 +1,7 @@
 Description: Port hfi1 to kernel 4.9.0
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2019-01-30>
+Last-Update: <2020-07-30>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
@@ -16,130 +16,72 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  else
  #normal makefile
---- a/hfi1/file_ops.c
-+++ b/hfi1/file_ops.c
-@@ -48,7 +48,8 @@
- #include <linux/cdev.h>
- #include <linux/vmalloc.h>
- #include <linux/io.h>
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- #include <linux/sched/mm.h>
- #else
- #include <linux/aio.h>
-@@ -142,7 +143,7 @@
- static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
- static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
- 		       unsigned long arg);
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB9)
- static int vma_fault(struct vm_fault *vmf);
- #else
- static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
-@@ -693,7 +694,7 @@
-  * Local (non-chip) user memory is not mapped right away but as it is
-  * accessed by the user-level code.
-  */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB9)
- static int vma_fault(struct vm_fault *vmf)
- #else
- static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
---- a/hfi1/mad.c
-+++ b/hfi1/mad.c
-@@ -280,7 +280,8 @@
- 	int ret = -EINVAL;
- 
- 	memset(&attr, 0, sizeof(attr));
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- 	attr.type = ah->ibah.type;
- #endif
- 	hfi1_update_sm_ah_attr(ibp, &attr, dlid);
-@@ -297,7 +298,8 @@
- 	struct rdma_ah_attr attr;
- 	struct ib_ah *ah = ERR_PTR(-EINVAL);
- 	struct rvt_qp *qp0;
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
- 	struct hfi1_devdata *dd = dd_from_ppd(ppd);
- 	u8 port_num = ppd->port;
---- a/hfi1/user_pages.c
-+++ b/hfi1/user_pages.c
-@@ -46,7 +46,8 @@
-  */
- 
- #include <linux/mm.h>
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- #include <linux/sched/signal.h>
- #else
- #include <linux/sched.h>
---- a/hfi1/verbs.c
-+++ b/hfi1/verbs.c
-@@ -1678,6 +1678,7 @@
- 	RCU_INIT_POINTER(ibp->rvp.qp[0], NULL);
- 	RCU_INIT_POINTER(ibp->rvp.qp[1], NULL);
- }
-+
- #ifndef GET_DEV_FW_STR_HAS_LEN
- static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str)
- {
-@@ -1960,7 +1961,8 @@
- 		ib_hfi1_sys_image_guid = ibdev->node_guid;
- 	ibdev->owner = THIS_MODULE;
- 	ibdev->phys_port_cnt = dd->num_pports;
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
- 	ibdev->dev.parent = &dd->pcidev->dev;
- #else
- 	ibdev->dma_device = &dd->pcidev->dev;
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -51,10 +51,12 @@
- #define NEED_MM_HELPER_FUNCTIONS
- #define NEED_IB_HELPER_FUNCTIONS
- #define HAVE_NOSPEC_H
-+#define GET_DEV_FW_STR_HAS_LEN
+@@ -61,12 +61,12 @@
+ #undef HAVE_KMALLOC_ARRAY_NODE
+ #undef HAVE_IBDEV_DRIVER_ID
+ #undef HAVE_IB_GET_CACHED_SUBNET_PREFIX
+-#define HAVE_SECURITY_H
+-#define HAVE_AIO_WRITE
++#undef HAVE_SECURITY_H
++#undef HAVE_AIO_WRITE
+ #undef HAVE_DEVICE_RH
+ #undef NEED_KTHREAD_HELPER_FUNCTIONS
+ #undef NEED_CURRENT_TIME
+-#define HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
++#undef HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
+ #define NEED_POLL_T
+ #undef HAVE_RDMA_COPY_AH_ATTR
+ #define NEED_FILE_FINISH
+@@ -79,19 +79,34 @@
+ #define NEED_MSIX_ENTRY
+ #undef HAVE_IB_QP_CREATE_USE_GFP_NOIO /* causes qp create from IPoIB to fail */
+ #define NO_RDMA_AH_ATTR_TYPE
++#define NEED_MM_HELPER_FUNCTIONS
++#define NEED_PCI_REQUEST_IRQ
++#define NEED_SCHED_H
++#define NEED_EMBEDDED_DEV
++#define DEV_GET_STATS64_RETURNS_STRUCT
++#define EXPORT_HFI1_RDMA_NETDEV
  
  #include "compat_common.h"
  
  #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
-+#define OPA_SM_CLASS_VERSION               	  0x80
++#define OPA_SM_CLASS_VERSION                      0x80
++
++struct rdma_netdev_alloc_params {
++	size_t sizeof_priv;
++	unsigned int txqs;
++	unsigned int rxqs;
++	void *param;
++
++	int (*initialize_rdma_netdev)(struct ib_device *device, u8 port_num,
++				      struct net_device *netdev, void *param);
++};
++
  
  struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
  int rdma_destroy_ah(struct ib_ah *ah);
-@@ -64,8 +66,6 @@
- 
- #define ib_register_device(a, b, c)  ib_register_device((a), (c))
- #define rdma_set_device_sysfs_group(a, b)
+-
++#define rdma_set_device_sysfs_group(a, b)
+ #define ib_register_device(a, b)  \
+ 	ib_register_device((a), (rdi->driver_f.port_callback))
 -#define alloc_netdev_mqs(size, name, name_assign_type, setup, sdma, ctxts) \
 -	alloc_netdev_mqs((size), (name), (setup), (sdma), (ctxts))
+-
+ #define rdma_create_ah(a, b, c) rdma_create_ah(a, b)
+ #define rdma_destroy_ah(a, b) rdma_destroy_ah(a)
  #undef access_ok
- #define access_ok(addr, size) \
- 	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
-@@ -73,6 +73,4 @@
- 
- void pcie_flr(struct pci_dev *dev);
- 
--
--
- #endif //DEB9_COMPAT
 --- a/hfi1/ipoib_main.c
 +++ b/hfi1/ipoib_main.c
 @@ -141,8 +141,13 @@
  	return priv->netdev_ops->ndo_stop(dev);
  }
- #if !defined(IFS_RH74) && !defined(IFS_SLES12SP2)
+ 
 -static void hfi1_ipoib_dev_get_stats64(struct net_device *dev,
 -				       struct rtnl_link_stats64 *storage)
-+#if defined(IFS_DEB9)
++#ifdef DEV_GET_STATS64_RETURNS_STRUCT
 +static struct rtnl_link_stats64*
 +#else
 +static void
@@ -153,12 +95,47 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  	storage->rx_bytes += rx_bytes;
  	storage->tx_packets += tx_packets;
  	storage->tx_bytes += tx_bytes;
-+#if defined(IFS_DEB9)
++#ifdef DEV_GET_STATS64_RETURNS_STRUCT
 +	return storage;
 +#endif
  }
- #endif
  
+ static const struct net_device_ops hfi1_ipoib_netdev_ops = {
+@@ -255,6 +263,15 @@
+ 	hfi1_ipoib_rxq_deinit(priv->netdev);
+ 
+ 	free_percpu(priv->netstats);
++#ifdef IFS_DEB9
++	if (priv->destructor) {
++		dev->destructor = priv->destructor;
++		priv->destructor = NULL;
++		dev->destructor(dev);
++	} else {
++		dev->destructor = NULL;
++	}
++#endif
+ }
+ 
+ static void hfi1_ipoib_free_rdma_netdev(struct net_device *dev)
+@@ -351,7 +368,7 @@
+ 	return dev;
+ }
+ 
+-#ifdef HAVE_RDMA_NETDEV_GET_PARAMS
++#if defined(HAVE_RDMA_NETDEV_GET_PARAMS) || defined(EXPORT_HFI1_RDMA_NETDEV)
+ static int hfi1_ipoib_setup_rn(struct ib_device *device,
+ 			       u8 port_num,
+ 			       struct net_device *netdev,
+@@ -398,6 +415,9 @@
+ #ifdef HAVE_NET_DEVICE_EXTENDED
+ 	netdev->extended->priv_destructor = hfi1_ipoib_netdev_dtor;
+ 	netdev->extended->needs_free_netdev = true;
++#elif defined(IFS_DEB9)
++	priv->destructor = netdev->destructor;
++	netdev->destructor = hfi1_ipoib_netdev_dtor;
+ #else
+ 	netdev->priv_destructor = hfi1_ipoib_netdev_dtor;
+ 	netdev->needs_free_netdev = true;
 --- a/hfi1/ipoib_tx.c
 +++ b/hfi1/ipoib_tx.c
 @@ -52,6 +52,7 @@
@@ -171,13 +148,14 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  #include "verbs.h"
 --- a/hfi1/sdma.c
 +++ b/hfi1/sdma.c
-@@ -1482,9 +1482,20 @@
- 		);
+@@ -1478,10 +1478,20 @@
+ 						&sde->descq_phys, GFP_KERNEL);
  		if (!sde->descq)
  			goto bail;
 +#if defined(KVZALLOC_NODE)
  		sde->tx_ring =
- 			kvzalloc_node(sizeof(struct sdma_txreq *) * descq_cnt,
+ 			kvzalloc_node(array_size(descq_cnt,
+ 						 sizeof(struct sdma_txreq *)),
  				      GFP_KERNEL, dd->node);
 +#else
 +		sde->tx_ring =
@@ -185,10 +163,75 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +				GFP_KERNEL);
 +		if (!sde->tx_ring)
 +			sde->tx_ring =
-+				vzalloc(
-+					sizeof(struct sdma_txreq *) *
-+					descq_cnt);
++				vzalloc(sizeof(struct sdma_txreq *)
++					* descq_cnt);
 +#endif
  		if (!sde->tx_ring)
  			goto bail;
  	}
+--- a/hfi1/hfi.h
++++ b/hfi1/hfi.h
+@@ -85,7 +85,8 @@
+ #include "msix.h"
+ 
+ 
+-#if defined(HAVE_ALLOC_RDMA_NETDEV) || defined(HAVE_RDMA_NETDEV_GET_PARAMS)
++#if defined(HAVE_ALLOC_RDMA_NETDEV) || defined(HAVE_RDMA_NETDEV_GET_PARAMS) \
++	|| defined(EXPORT_HFI1_RDMA_NETDEV)
+ #define AIP 1
+ #endif
+ 
+--- a/hfi1/verbs.c
++++ b/hfi1/verbs.c
+@@ -1850,7 +1850,7 @@
+ 	return count;
+ }
+ 
+-#ifdef HAVE_ALLOC_RDMA_NETDEV
++#if defined(HAVE_ALLOC_RDMA_NETDEV) || defined(EXPORT_HFI1_RDMA_NETDEV)
+ static struct net_device *hfi1_alloc_rn(struct ib_device *device,
+ 					u8 port_num,
+ 					enum rdma_netdev_t type,
+--- a/hfi1/ipoib.h
++++ b/hfi1/ipoib.h
+@@ -152,6 +152,9 @@
+ 	const struct net_device_ops *netdev_ops;
+ 	struct rvt_qp *qp;
+ 	struct pcpu_sw_netstats __percpu *netstats;
++#ifdef IFS_DEB9
++	void (*destructor)(struct net_device* dev);
++#endif
+ };
+ 
+ /* hfi1 ipoib rdma netdev's private data structure */
+@@ -217,7 +220,7 @@
+ struct sk_buff *hfi1_ipoib_prepare_skb(struct hfi1_netdev_rxq *rxq,
+ 				       int size, void *data);
+ 
+-#ifdef HAVE_RDMA_NETDEV_GET_PARAMS
++#if defined(HAVE_RDMA_NETDEV_GET_PARAMS) || defined(EXPORT_HFI1_RDMA_NETDEV)
+ int hfi1_ipoib_rn_get_params(struct ib_device *device,
+ 			     u8 port_num,
+ 			     enum rdma_netdev_t type,
+--- a/hfi1/aspm.c
++++ b/hfi1/aspm.c
+@@ -5,7 +5,7 @@
+  */
+ 
+ #include <linux/module.h>
+-#include "compat_common.h"
++#include "compat.h"
+ #include "aspm.h"
+ 
+ /* Time after which the timer interrupt will re-enable ASPM */
+--- a/hfi1/pcie.c
++++ b/hfi1/pcie.c
+@@ -51,7 +51,7 @@
+ #include <linux/vmalloc.h>
+ #include <linux/aer.h>
+ #include <linux/module.h>
+-#include "compat_common.h"
++#include "compat.h"
+ 
+ #include "hfi.h"
+ #include "chip_registers.h"

@@ -50,9 +50,17 @@
 
 #include <rdma/rdma_vt.h>
 
-struct ib_pd *rvt_alloc_pd(struct ib_device *ibdev,
-			   struct ib_ucontext *context,
-			   struct ib_udata *udata);
-int rvt_dealloc_pd(struct ib_pd *ibpd);
+#ifndef HAVE_CORE_ALLOC_PD
+struct ib_pd *compat_rvt_alloc_pd(struct ib_device *ibdev,
+				  struct ib_ucontext *context,
+				  struct ib_udata *udata);
+int compat_rvt_dealloc_pd(struct ib_pd *ibpd);
+#elif defined(NO_IB_UCONTEXT)
+int rvt_alloc_pd(struct ib_pd *pd, struct ib_udata *udata);
+#else
+int rvt_alloc_pd(struct ib_pd *pd, struct ib_ucontext *context,
+		 struct ib_udata *udata);
+#endif
+void rvt_dealloc_pd(struct ib_pd *ibpd, struct ib_udata *udata);
 
 #endif          /* DEF_RDMAVTPD_H */

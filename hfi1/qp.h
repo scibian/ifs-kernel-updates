@@ -166,7 +166,7 @@ void hfi1_migrate_qp(struct rvt_qp *qp);
 /*
  * Functions provided by hfi1 driver for rdmavt to use
  */
-#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifdef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp);
 #else
 void *qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp);

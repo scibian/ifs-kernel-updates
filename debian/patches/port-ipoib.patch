@@ -1,0 +1,395 @@
+--- a/ib_ipoib/ipoib.h
++++ b/ib_ipoib/ipoib.h
+@@ -53,7 +53,7 @@
+ #include <rdma/ib_sa.h>
+ #include <linux/sched.h>
+ 
+-#include "compat_common.h"
++#include "compat.h"
+ 
+ /* constants */
+ 
+@@ -425,6 +425,16 @@
+ 	int  		   valid;
+ };
+ 
++#if defined(IFS_DEB9)
++#define sa_path_rec ib_sa_path_rec
++static inline __be32 sa_path_get_dlid(const struct sa_path_rec* rec) {
++        if (ib_is_opa_gid(&rec->dgid))
++                return cpu_to_be32(opa_get_lid_from_gid(&rec->dgid));
++        else
++                return htonl(ntohs(rec->dlid));
++}
++#endif
++
+ struct ipoib_path {
+ 	struct net_device    *dev;
+ 	struct sa_path_rec pathrec;
+--- a/ib_ipoib/ipoib_multicast.c
++++ b/ib_ipoib/ipoib_multicast.c
+@@ -46,7 +46,7 @@
+ #include <net/dst.h>
+ 
+ #include "ipoib.h"
+-#include "compat_common.h"
++#include "compat.h"
+ 
+ #ifdef CONFIG_INFINIBAND_IPOIB_DEBUG
+ static int mcast_debug_level;
+@@ -289,7 +289,9 @@
+ 	}
+ 
+ 	memset(&av, 0, sizeof(av));
++#ifndef IFS_DEB9
+ 	av.type = rdma_ah_find_type(priv->ca, priv->port);
++#endif
+ 	rdma_ah_set_dlid(&av, be16_to_cpu(mcast->mcmember.mlid)),
+ 	rdma_ah_set_port_num(&av, priv->port);
+ 	rdma_ah_set_sl(&av, mcast->mcmember.sl);
+--- a/ib_ipoib/ipoib_verbs.c
++++ b/ib_ipoib/ipoib_verbs.c
+@@ -34,7 +34,7 @@
+ #include <linux/slab.h>
+ 
+ #include "ipoib.h"
+-#include "compat_common.h"
++#include "compat.h"
+ 
+ int ipoib_mcast_attach(struct net_device *dev, struct ib_device *hca,
+ 		       union ib_gid *mgid, u16 mlid, int set_qkey, u32 qkey)
+--- a/ib_ipoib/ipoib_main.c
++++ b/ib_ipoib/ipoib_main.c
+@@ -51,6 +51,9 @@
+ #include <net/addrconf.h>
+ #include <linux/inetdevice.h>
+ #include <rdma/ib_cache.h>
++#if defined(IFS_DEB9)
++#include "../hfi1/hfi1_netdev.h"
++#endif
+ 
+ #define DRV_VERSION "1.0.0"
+ 
+@@ -278,7 +281,12 @@
+ 	return ret;
+ }
+ 
+-static void ipoib_get_stats(struct net_device *dev,
++#ifdef IFS_DEB9
++static struct rtnl_link_stats64*
++#else
++static void
++#endif /* IFS_DEB9 */
++ipoib_get_stats(struct net_device *dev,
+ 			    struct rtnl_link_stats64 *stats)
+ {
+ 	struct ipoib_dev_priv *priv = ipoib_priv(dev);
+@@ -287,6 +295,9 @@
+ 		priv->rn_ops->ndo_get_stats64(dev, stats);
+ 	else
+ 		netdev_stats_to_stats64(stats, &dev->stats);
++#ifdef IFS_DEB9
++	return stats;
++#endif /* IFS_DEB9 */
+ }
+ 
+ /* Called with an RCU read lock taken */
+@@ -712,7 +723,7 @@
+ {
+ 	struct ipoib_pseudo_header *phdr;
+ 
+-	phdr = skb_push(skb, sizeof(*phdr));
++	phdr = (struct ipoib_pseudo_header*) skb_push(skb, sizeof(*phdr));
+ 	memcpy(phdr->hwaddr, daddr, INFINIBAND_ALEN);
+ }
+ 
+@@ -879,10 +890,12 @@
+ 
+ 	INIT_LIST_HEAD(&path->neigh_list);
+ 
++#ifndef IFS_DEB9
+ 	if (rdma_cap_opa_ah(priv->ca, priv->port))
+ 		path->pathrec.rec_type = SA_PATH_REC_TYPE_OPA;
+ 	else
+ 		path->pathrec.rec_type = SA_PATH_REC_TYPE_IB;
++#endif
+ 	memcpy(path->pathrec.dgid.raw, gid, sizeof (union ib_gid));
+ 	path->pathrec.sgid	    = priv->local_gid;
+ 	path->pathrec.pkey	    = cpu_to_be16(priv->pkey);
+@@ -1207,7 +1220,7 @@
+ {
+ 	struct ipoib_header *header;
+ 
+-	header = skb_push(skb, sizeof *header);
++	header = (struct ipoib_header*) skb_push(skb, sizeof *header);
+ 
+ 	header->proto = htons(type);
+ 	header->reserved = 0;
+@@ -2012,18 +2025,33 @@
+ static struct net_device *ipoib_get_netdev(struct ib_device *hca, u8 port,
+ 					   const char *name)
+ {
+-	struct net_device *dev;
++	struct net_device *dev = NULL;
++	struct net_device* (*netdev_alloc)(struct ib_device *device,
++					   u8 port_num,
++					   enum rdma_netdev_t type,
++					   const char *name,
++					   unsigned char name_assign_type,
++					   void (*setup)(struct net_device *));
++
++#if defined(IFS_DEB9)
++	if (rdma_core_cap_opa_port(hca, port))
++		netdev_alloc = hfi1_alloc_rn;
++	else
++		netdev_alloc = NULL;
++#else
++	netdev_alloc = hca->alloc_rdma_netdev;
++#endif
+ 
+-	if (hca->alloc_rdma_netdev) {
+-		dev = hca->alloc_rdma_netdev(hca, port,
+-					     RDMA_NETDEV_IPOIB, name,
+-					     NET_NAME_UNKNOWN,
+-					     ipoib_setup_common);
++	if (netdev_alloc && ipoib_accel) {
++		dev = netdev_alloc(hca, port,
++				   RDMA_NETDEV_IPOIB, name,
++				   NET_NAME_UNKNOWN,
++				   ipoib_setup_common);
+ 		if (IS_ERR_OR_NULL(dev) && PTR_ERR(dev) != -EOPNOTSUPP)
+ 			return NULL;
+ 	}
+ 
+-	if (!hca->alloc_rdma_netdev || PTR_ERR(dev) == -EOPNOTSUPP)
++	if (!netdev_alloc || PTR_ERR(dev) == -EOPNOTSUPP || !ipoib_accel)
+ 		dev = ipoib_create_netdev_default(hca, name, NET_NAME_UNKNOWN,
+ 						  ipoib_setup_common);
+ 
+@@ -2272,7 +2300,9 @@
+ 	priv->dev->mtu  = IPOIB_UD_MTU(priv->max_ib_mtu);
+ 	priv->mcast_mtu  = priv->admin_mtu = priv->dev->mtu;
+ 	rn->mtu = priv->mcast_mtu;
++#ifndef IFS_DEB9
+ 	priv->dev->max_mtu = IPOIB_CM_MTU;
++#endif
+ 	rn->mtu = priv->mcast_mtu;
+ 	priv->dev->neigh_priv_len = sizeof(struct ipoib_neigh);
+ 
+@@ -2468,7 +2498,11 @@
+ 	 */
+ 	BUILD_BUG_ON(IPOIB_CM_COPYBREAK > IPOIB_CM_HEAD_SIZE);
+ 
++#ifdef IFS_DEB9
++	pr_notice("Intel Accelerated IPoIB for Debian loaded.\n");
++#else
+ 	pr_notice("Intel Accelerated IPoIB for SLES loaded.\n");
++#endif
+ 
+ 	ret = ipoib_register_debugfs();
+ 	if (ret)
+--- a/ib_ipoib/ipoib_vlan.c
++++ b/ib_ipoib/ipoib_vlan.c
+@@ -31,7 +31,9 @@
+  */
+ 
+ #include <linux/module.h>
++#ifndef IFS_DEB9
+ #include <linux/sched/signal.h>
++#endif
+ 
+ #include <linux/init.h>
+ #include <linux/seq_file.h>
+--- a/ib_ipoib/ipoib_ethtool.c
++++ b/ib_ipoib/ipoib_ethtool.c
+@@ -63,7 +63,11 @@
+ {
+ 	struct ipoib_dev_priv *priv = ipoib_priv(netdev);
+ 
+-	ib_get_device_fw_str(priv->ca, drvinfo->fw_version);
++	ib_get_device_fw_str(priv->ca, drvinfo->fw_version
++#ifdef IFS_DEB9
++                             , IB_FW_VERSION_NAME_MAX
++#endif
++			     );
+ 
+ 	strlcpy(drvinfo->bus_info, dev_name(priv->ca->dev.parent),
+ 		sizeof(drvinfo->bus_info));
+--- a/ib_ipoib/ipoib_netlink.c
++++ b/ib_ipoib/ipoib_netlink.c
+@@ -65,8 +65,11 @@
+ }
+ 
+ static int ipoib_changelink(struct net_device *dev, struct nlattr *tb[],
+-			    struct nlattr *data[],
+-			    struct netlink_ext_ack *extack)
++			    struct nlattr *data[]
++#ifndef IFS_DEB9
++			    , struct netlink_ext_ack *extack
++#endif
++			    )
+ {
+ 	u16 mode, umcast;
+ 	int ret = 0;
+@@ -94,8 +97,11 @@
+ }
+ 
+ static int ipoib_new_child_link(struct net *src_net, struct net_device *dev,
+-				struct nlattr *tb[], struct nlattr *data[],
+-				struct netlink_ext_ack *extack)
++				struct nlattr *tb[], struct nlattr *data[]
++#ifndef IFS_DEB9
++				, struct netlink_ext_ack *extack
++#endif
++				)
+ {
+ 	struct net_device *pdev;
+ 	struct ipoib_dev_priv *ppriv;
+@@ -135,7 +141,11 @@
+ 			       child_pkey, IPOIB_RTNL_CHILD);
+ 
+ 	if (!err && data)
+-		err = ipoib_changelink(dev, tb, data, extack);
++		err = ipoib_changelink(dev, tb, data
++#ifndef IFS_DEB9
++				       , extack
++#endif
++				       );
+ 	return err;
+ }
+ 
+--- a/ib_ipoib/ipoib_cm.c
++++ b/ib_ipoib/ipoib_cm.c
+@@ -38,8 +38,10 @@
+ #include <linux/slab.h>
+ #include <linux/vmalloc.h>
+ #include <linux/moduleparam.h>
++#ifndef IFS_DEB9
+ #include <linux/sched/signal.h>
+ #include <linux/sched/mm.h>
++#endif
+ 
+ #include "ipoib.h"
+ 
+--- a/Makefile
++++ b/Makefile
+@@ -9,7 +9,8 @@
+ 
+ CFLAGS_MODULE += -DUSE_PI_LED_ENABLE=1 -DIFS_DEB9
+ obj-y := rdmavt/ \
+-	hfi1/
++	hfi1/ \
++	ib_ipoib/
+ 
+ else
+ #normal makefile
+--- a/compat/compat.h
++++ b/compat/compat.h
+@@ -114,6 +114,37 @@
+ 	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
+ #define _ib_alloc_device ib_alloc_device
+ 
++#define SPEED_14000          14000
++
+ void pcie_flr(struct pci_dev *dev);
+ 
++static inline void rdma_ah_set_grh(struct rdma_ah_attr *attr,
++				   union ib_gid *dgid, u32 flow_label,
++				   u8 sgid_index, u8 hop_limit,
++				   u8 traffic_class)
++{
++	struct ib_global_route *grh = rdma_ah_retrieve_grh(attr);
++
++	attr->ah_flags = IB_AH_GRH;
++	if (dgid)
++		grh->dgid = *dgid;
++	grh->flow_label = flow_label;
++	grh->sgid_index = sgid_index;
++	grh->hop_limit = hop_limit;
++	grh->traffic_class = traffic_class;
++}
++
++struct net_device;
++int netdev_walk_all_upper_dev_rcu(struct net_device *dev,
++				  int (*fn)(struct net_device *upper_dev,
++					    void *data),
++				  void *data);
++
++struct ib_sa_client;
++static inline bool ib_sa_sendonly_fullmem_support(struct ib_sa_client *client,
++						  struct ib_device *device,
++						  u8 port_num)
++{
++	return false;
++}
+ #endif //DEB9_COMPAT
+--- a/rdmavt/compat.c
++++ b/rdmavt/compat.c
+@@ -261,6 +261,67 @@
+ }
+ EXPORT_SYMBOL(rdma_destroy_ah);
+ 
++struct netdev_adjacent {
++	struct net_device *dev;
++
++	/* upper master flag, there can only be one master device per list */
++	bool master;
++
++	/* counter for the number of times this device was added to us */
++	u16 ref_nr;
++
++	/* private field for the users */
++	void *private;
++
++	struct list_head list;
++	struct rcu_head rcu;
++};
++
++static struct net_device *netdev_next_upper_dev_rcu(struct net_device *dev,
++						    struct list_head **iter)
++{
++	struct netdev_adjacent *upper;
++
++	WARN_ON_ONCE(!rcu_read_lock_held() && !lockdep_rtnl_is_held());
++
++	upper = list_entry_rcu((*iter)->next, struct netdev_adjacent, list);
++
++	if (&upper->list == &dev->adj_list.upper)
++		return NULL;
++
++	*iter = &upper->list;
++
++	return upper->dev;
++}
++
++int netdev_walk_all_upper_dev_rcu(struct net_device *dev,
++				  int (*fn)(struct net_device *dev,
++					    void *data),
++				  void *data)
++{
++	struct net_device *udev;
++	struct list_head *iter;
++	int ret;
++
++	for (iter = &dev->adj_list.upper,
++	     udev = netdev_next_upper_dev_rcu(dev, &iter);
++	     udev;
++	     udev = netdev_next_upper_dev_rcu(dev, &iter)) {
++		/* first is the upper device itself */
++		ret = fn(udev, data);
++		if (ret)
++			return ret;
++
++		/* then look at all of its upper devices */
++		ret = netdev_walk_all_upper_dev_rcu(udev, fn, data);
++		if (ret)
++			return ret;
++	}
++
++	return 0;
++}
++EXPORT_SYMBOL_GPL(netdev_walk_all_upper_dev_rcu);
++
+ struct ib_dma_mapping_ops rvt_default_dma_mapping_ops = {
+ 	.mapping_error = rvt_mapping_error,
+ 	.map_single = rvt_dma_map_single,

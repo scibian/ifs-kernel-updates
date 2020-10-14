@@ -32,7 +32,7 @@
  */
 
 #include <linux/mm.h>
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP3)
 #include <linux/sched/signal.h>
 #else
 #include <linux/sched.h>
@@ -44,13 +44,7 @@
 static void __qib_release_user_pages(struct page **p, size_t num_pages,
 				     int dirty)
 {
-	size_t i;
-
-	for (i = 0; i < num_pages; i++) {
-		if (dirty)
-			set_page_dirty_lock(p[i]);
-		put_page(p[i]);
-	}
+	put_user_pages_dirty_lock(p, num_pages, dirty);
 }
 
 /*
@@ -79,7 +73,11 @@ static int __qib_get_user_pages(unsigned long start_page, size_t num_pages,
 			goto bail_release;
 	}
 
+#ifndef HAVE_ATOMIC64_PINNED_VM
 	current->mm->pinned_vm += num_pages;
+#else
+	atomic64_add(num_pages, &current->mm->pinned_vm);
+#endif
 
 	ret = 0;
 	goto bail;
@@ -160,7 +158,11 @@ void qib_release_user_pages(struct page **p, size_t num_pages)
 	__qib_release_user_pages(p, num_pages, 1);
 
 	if (current->mm) {
+#ifndef HAVE_ATOMIC64_PINNED_VM
 		current->mm->pinned_vm -= num_pages;
+#else
+		atomic64_sub(num_pages, &current->mm->pinned_vm);
+#endif
 		up_write(&current->mm->mmap_sem);
 	}
 }

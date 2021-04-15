@@ -246,11 +246,19 @@ void qib_bad_pkey(struct qib_ibport *ibp, u32 key, u32 sl,
 void qib_cap_mask_chg(struct rvt_dev_info *rdi, u8 port_num);
 void qib_sys_guid_chg(struct qib_ibport *ibp);
 void qib_node_desc_chg(struct qib_ibport *ibp);
+#ifndef HAVE_NEW_PROCESS_MAD_FUNCTION
+int compat_qib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port_num,
+			   const struct ib_wc *in_wc,
+			   const struct ib_grh *in_grh,
+			   const struct ib_mad_hdr *in, size_t in_mad_size,
+			   struct ib_mad_hdr *out, size_t *out_mad_size,
+			   u16 *out_mad_pkey_index);
+#else
 int qib_process_mad(struct ib_device *ibdev, int mad_flags, u8 port_num,
 		    const struct ib_wc *in_wc, const struct ib_grh *in_grh,
-		    const struct ib_mad_hdr *in, size_t in_mad_size,
-		    struct ib_mad_hdr *out, size_t *out_mad_size,
-		    u16 *out_mad_pkey_index);
+		    const struct ib_mad *in, struct ib_mad *out,
+		    size_t *out_mad_size, u16 *out_mad_pkey_index);
+#endif
 void qib_notify_create_mad_agent(struct rvt_dev_info *rdi, int port_idx);
 void qib_notify_free_mad_agent(struct rvt_dev_info *rdi, int port_idx);
 
@@ -274,7 +282,7 @@ int qib_get_counters(struct qib_pportdata *ppd,
  * Functions provided by qib driver for rdmavt to use
  */
 unsigned qib_free_all_qps(struct rvt_dev_info *rdi);
-#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifdef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp);
 #else
 void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp);
@@ -282,7 +290,7 @@ void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp);
 void qib_qp_priv_free(struct rvt_dev_info *rdi, struct rvt_qp *qp);
 void qib_notify_qp_reset(struct rvt_qp *qp);
 int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
-#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifdef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 		  enum ib_qp_type type, u8 port, gfp_t gfp);
 #else
 		  enum ib_qp_type type, u8 port);

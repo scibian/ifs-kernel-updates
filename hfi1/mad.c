@@ -280,7 +280,7 @@ static int hfi1_modify_qp0_ah(struct hfi1_ibport *ibp,
 	int ret = -EINVAL;
 
 	memset(&attr, 0, sizeof(attr));
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#ifndef NO_RDMA_AH_ATTR_TYPE
 	attr.type = ah->ibah.type;
 #endif
 	hfi1_update_sm_ah_attr(ibp, &attr, dlid);
@@ -297,7 +297,7 @@ static struct ib_ah *hfi1_create_qp0_ah(struct hfi1_ibport *ibp, u32 dlid)
 	struct rdma_ah_attr attr;
 	struct ib_ah *ah = ERR_PTR(-EINVAL);
 	struct rvt_qp *qp0;
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
+#ifndef NO_RDMA_AH_ATTR_TYPE
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 	struct hfi1_devdata *dd = dd_from_ppd(ppd);
 	u8 port_num = ppd->port;
@@ -727,6 +727,7 @@ static int check_mkey(struct hfi1_ibport *ibp, struct ib_mad_hdr *mad,
 			/* Bad mkey not a violation below level 2 */
 			if (ibp->rvp.mkeyprot < 2)
 				break;
+			/* fall through */
 		case IB_MGMT_METHOD_SET:
 		case IB_MGMT_METHOD_TRAP_REPRESS:
 			if (ibp->rvp.mkey_violations != 0xFFFF)
@@ -2748,8 +2749,7 @@ static int pma_get_opa_portstatus(struct opa_pma_mad *pmp,
 	u16 link_width;
 	u16 link_speed;
 
-	response_data_size = sizeof(struct opa_port_status_rsp) +
-				num_vls * sizeof(struct _vls_pctrs);
+	response_data_size = struct_size(rsp, vls, num_vls);
 	if (response_data_size > sizeof(pmp->data)) {
 		pmp->mad_hdr.status |= OPA_PM_STATUS_REQUEST_TOO_LARGE;
 		return reply((struct ib_mad_hdr *)pmp);
@@ -2991,7 +2991,6 @@ static int pma_get_opa_datacounters(struct opa_pma_mad *pmp,
 	struct _vls_dctrs *vlinfo;
 	size_t response_data_size;
 	u32 num_ports;
-	u8 num_pslm;
 	u8 lq, num_vls;
 	u8 res_lli, res_ler;
 	u64 port_mask;
@@ -3003,7 +3002,6 @@ static int pma_get_opa_datacounters(struct opa_pma_mad *pmp,
 	u16 link_speed;
 
 	num_ports = be32_to_cpu(pmp->mad_hdr.attr_mod) >> 24;
-	num_pslm = hweight64(be64_to_cpu(req->port_select_mask[3]));
 	num_vls = hweight32(be32_to_cpu(req->vl_select_mask));
 	vl_select_mask = be32_to_cpu(req->vl_select_mask);
 	res_lli = (u8)(be32_to_cpu(req->resolution) & MSK_LLI) >> MSK_LLI_SFT;
@@ -3017,8 +3015,7 @@ static int pma_get_opa_datacounters(struct opa_pma_mad *pmp,
 	}
 
 	/* Sanity check */
-	response_data_size = sizeof(struct opa_port_data_counters_msg) +
-				num_vls * sizeof(struct _vls_dctrs);
+	response_data_size = struct_size(req, port[0].vls, num_vls);
 
 	if (response_data_size > sizeof(pmp->data)) {
 		pmp->mad_hdr.status |= IB_SMP_INVALID_FIELD;
@@ -3234,8 +3231,7 @@ static int pma_get_opa_porterrors(struct opa_pma_mad *pmp,
 		return reply((struct ib_mad_hdr *)pmp);
 	}
 
-	response_data_size = sizeof(struct opa_port_error_counters64_msg) +
-				num_vls * sizeof(struct _vls_ectrs);
+	response_data_size = struct_size(req, port[0].vls, num_vls);
 
 	if (response_data_size > sizeof(pmp->data)) {
 		pmp->mad_hdr.status |= IB_SMP_INVALID_FIELD;
@@ -4925,16 +4921,11 @@ static int hfi1_process_ib_mad(struct ib_device *ibdev, int mad_flags, u8 port,
  */
 int hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
 		     const struct ib_wc *in_wc, const struct ib_grh *in_grh,
-		     const struct ib_mad_hdr *in_mad, size_t in_mad_size,
-		     struct ib_mad_hdr *out_mad, size_t *out_mad_size,
-		     u16 *out_mad_pkey_index)
+		     const struct ib_mad *in_mad, struct ib_mad *out_mad,
+		     size_t *out_mad_size, u16 *out_mad_pkey_index)
 {
-	switch (in_mad->base_version) {
+	switch (in_mad->mad_hdr.base_version) {
 	case OPA_MGMT_BASE_VERSION:
-		if (unlikely(in_mad_size != sizeof(struct opa_mad))) {
-			dev_err(ibdev->dev.parent, "invalid in_mad_size\n");
-			return IB_MAD_RESULT_FAILURE;
-		}
 		return hfi1_process_opa_mad(ibdev, mad_flags, port,
 					    in_wc, in_grh,
 					    (struct opa_mad *)in_mad,
@@ -4942,13 +4933,32 @@ int hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
 					    out_mad_size,
 					    out_mad_pkey_index);
 	case IB_MGMT_BASE_VERSION:
-		return hfi1_process_ib_mad(ibdev, mad_flags, port,
-					  in_wc, in_grh,
-					  (const struct ib_mad *)in_mad,
-					  (struct ib_mad *)out_mad);
+		return hfi1_process_ib_mad(ibdev, mad_flags, port, in_wc,
+					   in_grh, in_mad, out_mad);
 	default:
 		break;
 	}
 
 	return IB_MAD_RESULT_FAILURE;
 }
+
+#ifndef HAVE_NEW_PROCESS_MAD_FUNCTION
+int compat_hfi1_process_mad(struct ib_device *ibdev, int mad_flags, u8 port,
+			    const struct ib_wc *in_wc,
+			    const struct ib_grh *in_grh,
+			    const struct ib_mad_hdr *in_mad,
+			    size_t in_mad_size, struct ib_mad_hdr *out_mad,
+			    size_t *out_mad_size, u16 *out_mad_pkey_index)
+{
+	if (in_mad->base_version == OPA_MGMT_BASE_VERSION &&
+	    unlikely(in_mad_size != sizeof(struct opa_mad))) {
+		dev_err(ibdev->dev.parent, "invalid in_mad_size\n");
+		return IB_MAD_RESULT_FAILURE;
+	}
+
+	return hfi1_process_mad(ibdev, mad_flags, port, in_wc, in_grh,
+				(const struct ib_mad *)in_mad,
+				(struct ib_mad *)out_mad, out_mad_size,
+				out_mad_pkey_index);
+}
+#endif

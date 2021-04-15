@@ -65,62 +65,61 @@
 static struct dentry *hfi1_dbg_root;
 
 /* wrappers to enforce srcu in seq file */
-#if defined(IFS_SLES15SP1) || defined(IFS_SLES12SP5) || (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0))
+#ifdef NEED_FILE_FINISH
 ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
 		      loff_t *ppos)
 {
 	struct dentry *d = file->f_path.dentry;
+	int srcu_idx;
 	ssize_t r;
 
-	r = debugfs_file_get(d);
-
+	r = debugfs_use_file_start(d, &srcu_idx);
 	if (likely(!r))
 		r = seq_read(file, buf, size, ppos);
-	debugfs_file_put(d);
+
+	debugfs_use_file_finish(srcu_idx);
 	return r;
 }
 
 loff_t hfi1_seq_lseek(struct file *file, loff_t offset, int whence)
 {
 	struct dentry *d = file->f_path.dentry;
+	int srcu_idx;
 	loff_t r;
 
-	r = debugfs_file_get(d);
-
+	r = debugfs_use_file_start(d, &srcu_idx);
 	if (likely(!r))
 		r = seq_lseek(file, offset, whence);
-	debugfs_file_put(d);
+
+	debugfs_use_file_finish(srcu_idx);
 	return r;
 }
 
 #else
-
 ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
 		      loff_t *ppos)
 {
 	struct dentry *d = file->f_path.dentry;
-	int srcu_idx;
 	ssize_t r;
 
-	r = debugfs_use_file_start(d, &srcu_idx);
+	r = debugfs_file_get(d);
+
 	if (likely(!r))
 		r = seq_read(file, buf, size, ppos);
-
-	debugfs_use_file_finish(srcu_idx);
+	debugfs_file_put(d);
 	return r;
 }
 
 loff_t hfi1_seq_lseek(struct file *file, loff_t offset, int whence)
 {
 	struct dentry *d = file->f_path.dentry;
-	int srcu_idx;
 	loff_t r;
 
-	r = debugfs_use_file_start(d, &srcu_idx);
+	r = debugfs_file_get(d);
+
 	if (likely(!r))
 		r = seq_lseek(file, offset, whence);
-
-	debugfs_use_file_finish(srcu_idx);
+	debugfs_file_put(d);
 	return r;
 }
 #endif
@@ -439,6 +438,54 @@ static int _rcds_seq_show(struct seq_file *s, void *v)
 DEBUGFS_SEQ_FILE_OPS(rcds);
 DEBUGFS_SEQ_FILE_OPEN(rcds)
 DEBUGFS_FILE_OPS(rcds);
+
+static void *_pios_seq_start(struct seq_file *s, loff_t *pos)
+{
+	struct hfi1_ibdev *ibd;
+	struct hfi1_devdata *dd;
+
+	ibd = (struct hfi1_ibdev *)s->private;
+	dd = dd_from_dev(ibd);
+	if (!dd->send_contexts || *pos >= dd->num_send_contexts)
+		return NULL;
+	return pos;
+}
+
+static void *_pios_seq_next(struct seq_file *s, void *v, loff_t *pos)
+{
+	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
+	struct hfi1_devdata *dd = dd_from_dev(ibd);
+
+	++*pos;
+	if (!dd->send_contexts || *pos >= dd->num_send_contexts)
+		return NULL;
+	return pos;
+}
+
+static void _pios_seq_stop(struct seq_file *s, void *v)
+{
+}
+
+static int _pios_seq_show(struct seq_file *s, void *v)
+{
+	struct hfi1_ibdev *ibd = (struct hfi1_ibdev *)s->private;
+	struct hfi1_devdata *dd = dd_from_dev(ibd);
+	struct send_context_info *sci;
+	loff_t *spos = v;
+	loff_t i = *spos;
+	unsigned long flags;
+
+	spin_lock_irqsave(&dd->sc_lock, flags);
+	sci = &dd->send_contexts[i];
+	if (sci && sci->type != SC_USER && sci->allocated && sci->sc)
+		seqfile_dump_sci(s, i, sci);
+	spin_unlock_irqrestore(&dd->sc_lock, flags);
+	return 0;
+}
+
+DEBUGFS_SEQ_FILE_OPS(pios);
+DEBUGFS_SEQ_FILE_OPEN(pios)
+DEBUGFS_FILE_OPS(pios);
 
 /* read the per-device counters */
 static ssize_t dev_counters_read(struct file *file, char __user *buf,
@@ -1067,7 +1114,7 @@ static int qsfp2_debugfs_release(struct inode *in, struct file *fp)
 
 #define EXPROM_WRITE_ENABLE BIT_ULL(14)
 
-static int exprom_wp_disabled;
+static bool exprom_wp_disabled;
 
 static int exprom_wp_set(struct hfi1_devdata *dd, bool disable)
 {
@@ -1075,10 +1122,10 @@ static int exprom_wp_set(struct hfi1_devdata *dd, bool disable)
 
 	if (disable) {
 		gpio_val = EXPROM_WRITE_ENABLE;
-		exprom_wp_disabled = 1;
+		exprom_wp_disabled = true;
 		dd_dev_info(dd, "Disable Expansion ROM Write Protection\n");
 	} else {
-		exprom_wp_disabled = 0;
+		exprom_wp_disabled = false;
 		dd_dev_info(dd, "Enable Expansion ROM Write Protection\n");
 	}
 
@@ -1115,22 +1162,13 @@ static ssize_t exprom_wp_debugfs_write(struct file *file,
 	return 1;
 }
 
-static atomic_t exprom_refcnt = ATOMIC_INIT(0);
+static unsigned long exprom_in_use;
 
 static int exprom_wp_debugfs_open(struct inode *in, struct file *fp)
 {
-	int ret;
-
-#ifdef atomic_fetch_inc
-	ret = atomic_fetch_inc(&exprom_refcnt);
-#else
-	ret = atomic_inc_return(&exprom_refcnt) - 1;
-#endif
-	if (ret) {
-		atomic_dec(&exprom_refcnt);
+	if (test_and_set_bit(0, &exprom_in_use))
 		return -EBUSY;
-	}
-	exprom_wp_disabled = 0;
+
 	return 0;
 }
 
@@ -1140,7 +1178,7 @@ static int exprom_wp_debugfs_release(struct inode *in, struct file *fp)
 
 	if (exprom_wp_disabled)
 		exprom_wp_set(ppd->dd, false);
-	atomic_dec(&exprom_refcnt);
+	clear_bit(0, &exprom_in_use);
 
 	return 0;
 }
@@ -1248,6 +1286,7 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 	char link[10];
 	struct hfi1_devdata *dd = dd_from_dev(ibd);
 	struct hfi1_pportdata *ppd;
+	struct dentry *root;
 	int unit = dd->unit;
 	int i, j;
 
@@ -1255,30 +1294,29 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 		return;
 	snprintf(name, sizeof(name), "%s_%d", class_name(), unit);
 	snprintf(link, sizeof(link), "%d", unit);
-	ibd->hfi1_ibdev_dbg = debugfs_create_dir(name, hfi1_dbg_root);
-	if (!ibd->hfi1_ibdev_dbg) {
-		pr_warn("create of %s failed\n", name);
-		return;
-	}
+	root = debugfs_create_dir(name, hfi1_dbg_root);
+	ibd->hfi1_ibdev_dbg = root;
+
 	ibd->hfi1_ibdev_link =
 		debugfs_create_symlink(link, hfi1_dbg_root, name);
-	if (!ibd->hfi1_ibdev_link) {
-		pr_warn("create of %s symlink failed\n", name);
-		return;
-	}
-	DEBUGFS_SEQ_FILE_CREATE(opcode_stats, ibd->hfi1_ibdev_dbg, ibd);
-	DEBUGFS_SEQ_FILE_CREATE(tx_opcode_stats, ibd->hfi1_ibdev_dbg, ibd);
-	DEBUGFS_SEQ_FILE_CREATE(ctx_stats, ibd->hfi1_ibdev_dbg, ibd);
-	DEBUGFS_SEQ_FILE_CREATE(qp_stats, ibd->hfi1_ibdev_dbg, ibd);
-	DEBUGFS_SEQ_FILE_CREATE(sdes, ibd->hfi1_ibdev_dbg, ibd);
-	DEBUGFS_SEQ_FILE_CREATE(rcds, ibd->hfi1_ibdev_dbg, ibd);
-	DEBUGFS_SEQ_FILE_CREATE(sdma_cpu_list, ibd->hfi1_ibdev_dbg, ibd);
+
+	debugfs_create_file("opcode_stats", 0444, root, ibd,
+			    &_opcode_stats_file_ops);
+	debugfs_create_file("tx_opcode_stats", 0444, root, ibd,
+			    &_tx_opcode_stats_file_ops);
+	debugfs_create_file("ctx_stats", 0444, root, ibd, &_ctx_stats_file_ops);
+	debugfs_create_file("qp_stats", 0444, root, ibd, &_qp_stats_file_ops);
+	debugfs_create_file("sdes", 0444, root, ibd, &_sdes_file_ops);
+	debugfs_create_file("rcds", 0444, root, ibd, &_rcds_file_ops);
+	debugfs_create_file("pios", 0444, root, ibd, &_pios_file_ops);
+	debugfs_create_file("sdma_cpu_list", 0444, root, ibd,
+			    &_sdma_cpu_list_file_ops);
+
 	/* dev counter files */
 	for (i = 0; i < ARRAY_SIZE(cntr_ops); i++)
-		DEBUGFS_FILE_CREATE(cntr_ops[i].name,
-				    ibd->hfi1_ibdev_dbg,
-				    dd,
-				    &cntr_ops[i].ops, S_IRUGO);
+		debugfs_create_file(cntr_ops[i].name, 0444, root, dd,
+				    &cntr_ops[i].ops);
+
 	/* per port files */
 	for (ppd = dd->pport, j = 0; j < dd->num_pports; j++, ppd++)
 		for (i = 0; i < ARRAY_SIZE(port_cntr_ops); i++) {
@@ -1286,12 +1324,11 @@ void hfi1_dbg_ibdev_init(struct hfi1_ibdev *ibd)
 				 sizeof(name),
 				 port_cntr_ops[i].name,
 				 j + 1);
-			DEBUGFS_FILE_CREATE(name,
-					    ibd->hfi1_ibdev_dbg,
-					    ppd,
-					    &port_cntr_ops[i].ops,
+			debugfs_create_file(name,
 					    !port_cntr_ops[i].ops.write ?
-					    S_IRUGO : S_IRUGO | S_IWUSR);
+						    S_IRUGO :
+						    S_IRUGO | S_IWUSR,
+					    root, ppd, &port_cntr_ops[i].ops);
 		}
 
 	hfi1_fault_init_debugfs(ibd);
@@ -1421,10 +1458,10 @@ DEBUGFS_FILE_OPS(driver_stats);
 void hfi1_dbg_init(void)
 {
 	hfi1_dbg_root  = debugfs_create_dir(DRIVER_NAME, NULL);
-	if (!hfi1_dbg_root)
-		pr_warn("init of debugfs failed\n");
-	DEBUGFS_SEQ_FILE_CREATE(driver_stats_names, hfi1_dbg_root, NULL);
-	DEBUGFS_SEQ_FILE_CREATE(driver_stats, hfi1_dbg_root, NULL);
+	debugfs_create_file("driver_stats_names", 0444, hfi1_dbg_root, NULL,
+			    &_driver_stats_names_file_ops);
+	debugfs_create_file("driver_stats", 0444, hfi1_dbg_root, NULL,
+			    &_driver_stats_file_ops);
 }
 
 void hfi1_dbg_exit(void)

@@ -1,7 +1,7 @@
 Description: Port rdmavt to kernel 4.9.0
 Author: Brian T. Smith <bsmith@systemfabricworks.com>
 Forwarded: not-needed
-Last-Update: <2019-01-31>
+Last-Update: <2020-05-21>
 ---
 This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- a/Makefile
@@ -15,80 +15,69 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  else
  #normal makefile
---- a/compat/compat_common.h
-+++ b/compat/compat_common.h
-@@ -227,6 +227,12 @@
- 	u8			src_path_bits;
- };
- 
-+/*
-+ * NOTE: The rdma_ah_attr and associated functions are workarounds for kernels
-+ * that lack rdma_ah_attr, which contains type and opa_ah_attr members. This
-+ * uses ib_ah_attr as a standin, along with logic to handle the missing data
-+ * structures. See also hfi1_make_opa_lid.
-+ */
- #define rdma_ah_attr ib_ah_attr
- 
- static inline void rdma_ah_set_sl(struct rdma_ah_attr *attr, u8 sl)
-@@ -402,7 +408,7 @@
- }
- 
- #endif /* NEED_IB_HELPER_FUNCTIONS */
--#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH80) && !defined(IFS_RH81))
-+#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH80) && !defined(IFS_RH81) && !defined(IFS_DEB9))
- 
- #if NEED_KTHREAD_HELPER_FUNCTIONS
- static inline bool kthread_queue_work(struct kthread_worker *worker,
---- a/hfi1/hfi.h
-+++ b/hfi1/hfi.h
-@@ -739,7 +739,8 @@
- #define MAX_NAME_SIZE 64
- struct hfi1_msix_entry {
- 	enum irq_type type;
--#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3)
-+#if defined(IFS_RH73) || defined(IFS_RH74) || defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_SLES12SP2) || defined(IFS_SLES12SP3) \
-+	|| defined(IFS_DEB9)
- 	struct msix_entry msix;
- #endif
- 	int irq;
-@@ -2628,7 +2629,13 @@
- 
- static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
- {
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) \
-+	&& !defined(IFS_DEB9)
-+	/*
-+	 * Note: this code is only used when there is an rdma_ah_attr structure defined
-+	 * in ib_verbs.h. It should not be used when rdma_ah_attr is defined as ib_ah_attr.
-+	 * See compat_common.h.
-+	 */
- 	const struct ib_global_route *grh = rdma_ah_read_grh(attr);
- 	u32 dlid = rdma_ah_get_dlid(attr);
- 
 --- a/compat/compat.h
 +++ b/compat/compat.h
-@@ -44,25 +44,20 @@
+@@ -44,46 +44,51 @@
   * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
   *
   */
--#if !defined(RH76_COMPAT_H)
--#define RH76_COMPAT_H
+-#if !defined(RH77_COMPAT_H)
+-#define RH77_COMPAT_H
 +#if !defined(DEB9_COMPAT_H)
 +#define DEB9_COMPAT_H
  
+-#define HAVE_IB_GID_ATTR
+-#define POST_HAS_CONST
+-#define CREATE_FLOW_HAS_UDATA
 -#define CREATE_AH_HAS_UDATA
- #define HAVE_ALLOC_RDMA_NETDEV
- #define NEED_MM_HELPER_FUNCTIONS
-+#define NEED_IB_HELPER_FUNCTIONS
+-#define HAVE_ALLOC_RDMA_NETDEV
+-#define HAVE_RDMA_NETDEV_GET_PARAMS
+-#define HAVE_NET_DEVICE_EXTENDED
+-#define HAVE_ARRAY_SIZE
++#undef HAVE_IB_GID_ATTR
++#undef POST_HAS_CONST
++#undef CREATE_FLOW_HAS_UDATA
++#undef CREATE_AH_HAS_UDATA
++#undef HAVE_ALLOC_RDMA_NETDEV
++#undef HAVE_RDMA_NETDEV_GET_PARAMS
++#undef HAVE_NET_DEVICE_EXTENDED
++#undef HAVE_ARRAY_SIZE
  #define HAVE_NOSPEC_H
+ #define VM_OPS_FAULT_HAVE_VMA
+-#define HAVE_MAX_SEND_SGE
+-#define HAVE_KMALLOC_ARRAY_NODE
+-#define HAVE_IBDEV_DRIVER_ID
+-#define HAVE_IB_GET_CACHED_SUBNET_PREFIX
++#undef HAVE_MAX_SEND_SGE
++#undef HAVE_KMALLOC_ARRAY_NODE
++#undef HAVE_IBDEV_DRIVER_ID
++#undef HAVE_IB_GET_CACHED_SUBNET_PREFIX
+ #define HAVE_SECURITY_H
+ #define HAVE_AIO_WRITE
+-#define HAVE_DEVICE_RH
+-#define NEED_KTHREAD_HELPER_FUNCTIONS
+-#define NEED_CURRENT_TIME
++#undef HAVE_DEVICE_RH
++#undef NEED_KTHREAD_HELPER_FUNCTIONS
++#undef NEED_CURRENT_TIME
+ #define HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
+ #define NEED_POLL_T
+-#define HAVE_RDMA_COPY_AH_ATTR
++#undef HAVE_RDMA_COPY_AH_ATTR
+ #define NEED_FILE_FINISH
+ #define NEED_PCI_BRIDGE_SECONDARY_BUS_RESET
+ #define HAS_PORT_IMMUTABLE
++#define NEED_IB_HELPER_FUNCTIONS
++#define NEED_RVT_DMA_MAPPINGS
++#define IB_MODIFY_QP_IS_OK_HAS_LINK
++#define GET_DEV_FW_STR_HAS_LEN
++#define NEED_MSIX_ENTRY
++#undef HAVE_IB_QP_CREATE_USE_GFP_NOIO /* causes qp create from IPoIB to fail */
++#define NO_RDMA_AH_ATTR_TYPE
  
  #include "compat_common.h"
  
 -#define __GFP_RECLAIM	(__GFP_WAIT)
--
--#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
--
 -
  #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
 -#define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
@@ -97,9 +86,13 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +struct ib_ah *rdma_create_ah(struct ib_pd *pd, struct rdma_ah_attr *ah_attr);
 +int rdma_destroy_ah(struct ib_ah *ah);
  
- #define rdma_create_ah(a, b, c) rdma_create_ah(a, b)
- #define rdma_destroy_ah(a, b) rdma_destroy_ah(a)
-@@ -76,52 +71,8 @@
+ #define ib_register_device(a, b)  \
+-	ib_register_device((a), (b), (rdi->driver_f.port_callback))
++	ib_register_device((a), (rdi->driver_f.port_callback))
+ #define alloc_netdev_mqs(size, name, name_assign_type, setup, sdma, ctxts) \
+ 	alloc_netdev_mqs((size), (name), (setup), (sdma), (ctxts))
+ 
+@@ -94,52 +99,6 @@
  	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
  #define _ib_alloc_device ib_alloc_device
  
@@ -150,9 +143,8 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 -	list_first_entry(dev_to_msi_list((dev)), struct msi_desc, list)
 -#define for_each_msi_entry(desc, dev)   \
 -	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
- 
--#endif //RH76_COMPAT
-+
+-
+-#endif //RH77_COMPAT
 +#endif //DEB9_COMPAT
 --- a/rdmavt/compat.c
 +++ b/rdmavt/compat.c
@@ -414,33 +406,9 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 +	.alloc_coherent = rvt_dma_alloc_coherent,
 +	.free_coherent = rvt_dma_free_coherent
 +};
---- a/include/rdma/rdma_vt.h
-+++ b/include/rdma/rdma_vt.h
-@@ -204,6 +204,10 @@
- };
- 
- 
-+/*
-+ * NOTE: do not define HAVE_IB_QP_CREATE_USE_GFP_NOIO for IFS_DEB9. Doing so
-+ * causes qp creation from IPoIB to fail.
-+ */
- #define HAVE_IB_QP_CREATE_USE_GFP_NOIO \
- 	(defined(IFS_RH73) || \
- 	defined(IFS_RH74) || \
---- a/rdmavt/vt.c
-+++ b/rdmavt/vt.c
-@@ -625,7 +625,7 @@
- 	spin_lock_init(&rdi->n_cqs_lock);
- 
- 	/* DMA Operations */
--#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-+#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3) && !defined(IFS_DEB9)
- 	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
- #elif defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_RH77)
- 	rdi->ibdev.dev.device_rh->dma_ops =
 --- a/rdmavt/Makefile
 +++ b/rdmavt/Makefile
-@@ -7,7 +7,7 @@
+@@ -8,7 +8,7 @@
  ifneq ($(KERNELRELEASE),)
  #kbuild part of makefile
  
@@ -449,22 +417,6 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  obj-$(CONFIG_INFINIBAND_RDMAVT) += rdmavt.o
  
---- a/rdmavt/compat_common.c
-+++ b/rdmavt/compat_common.c
-@@ -200,7 +200,7 @@
- 	SET_DEVICE_OP(dev_ops, alloc_mr);
- 	SET_DEVICE_OP(dev_ops, alloc_mw);
- 	SET_DEVICE_OP(dev_ops, alloc_pd);
--#ifdef HAVE_ALLOC_RDMA_NETDEV
-+#if defined(HAVE_ALLOC_RDMA_NETDEV) && !defined(IFS_DEB9)
- 	SET_DEVICE_OP(dev_ops, alloc_rdma_netdev);
- #endif
- 	SET_DEVICE_OP(dev_ops, alloc_ucontext);
-@@ -337,3 +337,4 @@
- }
- EXPORT_SYMBOL(ib_set_device_ops);
- #endif
-+
 --- a/include/uapi/rdma/rdma_user_ioctl.h
 +++ b/include/uapi/rdma/rdma_user_ioctl.h
 @@ -38,9 +38,10 @@
@@ -498,3 +450,31 @@ This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
  
  /* HFI specific section */
  /* allocate HFI and context */
+--- a/hfi1/hfi.h
++++ b/hfi1/hfi.h
+@@ -2625,6 +2625,7 @@
+ 
+ static inline void hfi1_make_opa_lid(struct rdma_ah_attr *attr)
+ {
++#ifndef NO_RDMA_AH_ATTR_TYPE
+ 	const struct ib_global_route *grh = rdma_ah_read_grh(attr);
+ 	u32 dlid = rdma_ah_get_dlid(attr);
+ 
+@@ -2647,6 +2648,7 @@
+ 		dlid = be32_to_cpu(OPA_LID_PERMISSIVE);
+ 
+ 	rdma_ah_set_dlid(attr, dlid);
++#endif /* NO_RDMA_AH_ATTR_TYPE */
+ }
+ 
+ static inline u8 hfi1_get_packet_type(u32 lid)
+--- a/include/rdma/rdmavt_qp.h
++++ b/include/rdma/rdmavt_qp.h
+@@ -48,6 +48,7 @@
+  *
+  */
+ 
++#include <linux/vmalloc.h>
+ #include <rdma/rdma_vt.h>
+ #include <rdma/ib_pack.h>
+ #include <rdma/ib_verbs.h>

@@ -49,16 +49,6 @@
 
 struct hfi1_ibdev;
 
-#define DEBUGFS_FILE_CREATE(name, parent, data, ops, mode)	\
-do { \
-	struct dentry *ent; \
-	const char *__name = name; \
-	ent = debugfs_create_file(__name, mode, parent, \
-		data, ops); \
-	if (!ent) \
-		pr_warn("create of %s failed\n", __name); \
-} while (0)
-
 #define DEBUGFS_SEQ_FILE_OPS(name) \
 static const struct seq_operations _##name##_seq_ops = { \
 	.start = _##name##_seq_start, \
@@ -89,8 +79,6 @@ static const struct file_operations _##name##_file_ops = { \
 	.release = seq_release \
 }
 
-#define DEBUGFS_SEQ_FILE_CREATE(name, parent, data) \
-	DEBUGFS_FILE_CREATE(#name, parent, data, &_##name##_file_ops, 0444)
 
 ssize_t hfi1_seq_read(struct file *file, char __user *buf, size_t size,
 		      loff_t *ppos);
@@ -117,21 +105,6 @@ static inline void hfi1_dbg_init(void)
 
 static inline void hfi1_dbg_exit(void)
 {
-}
-
-static inline bool hfi1_dbg_should_fault_rx(struct hfi1_packet *packet)
-{
-	return false;
-}
-
-static inline bool hfi1_dbg_should_fault_tx(struct rvt_qp *qp, u32 opcode)
-{
-	return false;
-}
-
-static inline bool hfi1_dbg_fault_suppress_err(struct hfi1_ibdev *ibd)
-{
-	return false;
 }
 #endif
 

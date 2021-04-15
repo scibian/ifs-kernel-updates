@@ -155,9 +155,6 @@ static int pio_wait(struct rvt_qp *qp,
 /* Length of buffer to create verbs txreq cache name */
 #define TXREQ_NAME_LEN 24
 
-/* 16B trailing buffer */
-static const u8 trail_buf[MAX_16B_PADDING];
-
 static uint wss_threshold = 80;
 module_param(wss_threshold, uint, S_IRUGO);
 MODULE_PARM_DESC(wss_threshold, "Percentage (1-100) of LLC to use as a threshold for a cacheless copy");
@@ -530,10 +527,11 @@ static inline void hfi1_handle_packet(struct hfi1_packet *packet,
 				       opa_get_lid(packet->dlid, 9B));
 		if (!mcast)
 			goto drop;
+		rcu_read_lock();
 		list_for_each_entry_rcu(p, &mcast->qp_list, list) {
 			packet->qp = p->qp;
 			if (hfi1_do_pkey_check(packet))
-				goto drop;
+				goto unlock_drop;
 			spin_lock_irqsave(&packet->qp->r_lock, flags);
 			packet_handler = qp_ok(packet);
 			if (likely(packet_handler))
@@ -542,6 +540,7 @@ static inline void hfi1_handle_packet(struct hfi1_packet *packet,
 				ibp->rvp.n_pkt_drops++;
 			spin_unlock_irqrestore(&packet->qp->r_lock, flags);
 		}
+		rcu_read_unlock();
 		/*
 		 * Notify rvt_multicast_detach() if it is waiting for us
 		 * to finish.
@@ -791,7 +790,6 @@ static int build_verbs_tx_desc(
 	int ret = 0;
 	struct hfi1_sdma_header *phdr = &tx->phdr;
 	u16 hdrbytes = (tx->hdr_dwords + sizeof(pbc) / 4) << 2;
-	u32 *hdr;
 	u8 extra_bytes = 0;
 
 	if (tx->phdr.hdr.hdr_type) {
@@ -801,9 +799,6 @@ static int build_verbs_tx_desc(
 		 */
 		extra_bytes = hfi1_get_16b_padding(hdrbytes - 8, length) +
 			      (SIZE_OF_CRC << 2) + SIZE_OF_LT;
-		hdr = (u32 *)&phdr->hdr.opah;
-	} else {
-		hdr = (u32 *)&phdr->hdr.ibh;
 	}
 	if (!ahg_info->ahgcount) {
 		ret = sdma_txinit_ahg(
@@ -848,11 +843,20 @@ static int build_verbs_tx_desc(
 
 	/* add icrc, lt byte, and padding to flit */
 	if (extra_bytes)
-		ret = sdma_txadd_kvaddr(sde->dd, &tx->txreq,
-					(void *)trail_buf, extra_bytes);
+		ret = sdma_txadd_daddr(sde->dd, &tx->txreq,
+				       sde->dd->sdma_pad_phys, extra_bytes);
 
 bail_txadd:
 	return ret;
+}
+
+static u64 update_hcrc(u8 opcode, u64 pbc)
+{
+	if ((opcode & IB_OPCODE_TID_RDMA) == IB_OPCODE_TID_RDMA) {
+		pbc &= ~PBC_INSERT_HCRC_SMASK;
+		pbc |= (u64)PBC_IHCRC_LKDETH << PBC_INSERT_HCRC_SHIFT;
+	}
+	return pbc;
 }
 
 int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
@@ -869,14 +873,12 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	u8 sc5 = priv->s_sc;
 	int ret;
 	u32 dwords;
-	bool bypass = false;
 
 	if (ps->s_txreq->phdr.hdr.hdr_type) {
 		u8 extra_bytes = hfi1_get_16b_padding((hdrwords << 2), len);
 
 		dwords = (len + extra_bytes + (SIZE_OF_CRC << 2) +
 			  SIZE_OF_LT) >> 2;
-		bypass = true;
 	} else {
 		dwords = (len + 3) >> 2;
 	}
@@ -895,21 +897,17 @@ int hfi1_verbs_send_dma(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 			else
 				pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
 
-			if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
-				pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
 			pbc = create_pbc(ppd,
 					 pbc,
 					 qp->srate_mbps,
 					 vl,
 					 plen);
 
-			/* Update HCRC based on packet opcode */
-			if ((ps->opcode & IB_OPCODE_TID_RDMA) ==
-			    IB_OPCODE_TID_RDMA) {
-				pbc &= ~PBC_INSERT_HCRC_SMASK;
-				pbc |= (u64)PBC_IHCRC_LKDETH <<
-					PBC_INSERT_HCRC_SHIFT;
-			}
+			if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
+				pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
+			else
+				/* Update HCRC based on packet opcode */
+				pbc = update_hcrc(ps->opcode, pbc);
 		}
 		tx->wqe = qp->s_wqe;
 		ret = build_verbs_tx_desc(tx->sde, len, tx, ahg_info, pbc);
@@ -1021,8 +1019,6 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 	int wc_status = IB_WC_SUCCESS;
 	int ret = 0;
 	pio_release_cb cb = NULL;
-	u32 lrh0_16b;
-	bool bypass = false;
 	u8 extra_bytes = 0;
 
 	if (ps->s_txreq->phdr.hdr.hdr_type) {
@@ -1031,8 +1027,6 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		extra_bytes = pad_size + (SIZE_OF_CRC << 2) + SIZE_OF_LT;
 		dwords = (len + extra_bytes) >> 2;
 		hdr = (u32 *)&ps->s_txreq->phdr.hdr.opah;
-		lrh0_16b = ps->s_txreq->phdr.hdr.opah.lrh[0];
-		bypass = true;
 	} else {
 		dwords = (len + 3) >> 2;
 		hdr = (u32 *)&ps->s_txreq->phdr.hdr.ibh;
@@ -1062,20 +1056,17 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		else
 			pbc |= (ib_is_sc5(sc5) << PBC_DC_INFO_SHIFT);
 
+		pbc = create_pbc(ppd, pbc, qp->srate_mbps, vl, plen);
 		if (unlikely(hfi1_dbg_should_fault_tx(qp, ps->opcode)))
 			pbc = hfi1_fault_tx(qp, ps->opcode, pbc);
-		pbc = create_pbc(ppd, pbc, qp->srate_mbps, vl, plen);
-
-		/* Update HCRC based on packet opcode */
-		if ((ps->opcode & IB_OPCODE_TID_RDMA) == IB_OPCODE_TID_RDMA) {
-			pbc &= ~PBC_INSERT_HCRC_SMASK;
-			pbc |= (u64)PBC_IHCRC_LKDETH << PBC_INSERT_HCRC_SHIFT;
-		}
+		else
+			/* Update HCRC based on packet opcode */
+			pbc = update_hcrc(ps->opcode, pbc);
 	}
 	if (cb)
 		iowait_pio_inc(&priv->s_iowait);
 	pbuf = sc_buffer_alloc(sc, plen, cb, qp);
-	if (unlikely(IS_ERR_OR_NULL(pbuf))) {
+	if (IS_ERR_OR_NULL(pbuf)) {
 		if (cb)
 			verbs_pio_complete(qp, 0);
 		if (IS_ERR(pbuf)) {
@@ -1127,7 +1118,8 @@ int hfi1_verbs_send_pio(struct rvt_qp *qp, struct hfi1_pkt_state *ps,
 		}
 		/* add icrc, lt byte, and padding to flit */
 		if (extra_bytes)
-			seg_pio_copy_mid(pbuf, trail_buf, extra_bytes);
+			seg_pio_copy_mid(pbuf, ppd->dd->sdma_pad_dma,
+					 extra_bytes);
 
 		seg_pio_copy_end(pbuf);
 	}
@@ -1400,7 +1392,7 @@ static void hfi1_fill_device_attr(struct hfi1_devdata *dd)
 	rdi->dparms.props.max_qp_wr =
 		(hfi1_max_qp_wrs >= HFI1_QP_WQE_INVALID ?
 		 HFI1_QP_WQE_INVALID - 1 : hfi1_max_qp_wrs);
-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4,18,0)) || defined (IFS_SLES15SP1) || defined(IFS_RH77) || defined(IFS_SLES12SP5)
+#ifdef HAVE_MAX_SEND_SGE
 	rdi->dparms.props.max_send_sge = hfi1_max_sges;
 	rdi->dparms.props.max_recv_sge = hfi1_max_sges;
 #else
@@ -1410,8 +1402,6 @@ static void hfi1_fill_device_attr(struct hfi1_devdata *dd)
 	rdi->dparms.props.max_cq = hfi1_max_cqs;
 	rdi->dparms.props.max_ah = hfi1_max_ahs;
 	rdi->dparms.props.max_cqe = hfi1_max_cqes;
-	rdi->dparms.props.max_mr = rdi->lkey_table.max;
-	rdi->dparms.props.max_fmr = rdi->lkey_table.max;
 	rdi->dparms.props.max_map_per_fmr = 32767;
 	rdi->dparms.props.max_pd = hfi1_max_pds;
 	rdi->dparms.props.max_qp_rd_atom = HFI1_MAX_RDMA_ATOMIC;
@@ -1492,7 +1482,7 @@ static int query_port(struct rvt_dev_info *rdi, u8 port_num,
 	props->active_mtu = !valid_ib_mtu(ppd->ibmtu) ? props->max_mtu :
 		mtu_to_enum(ppd->ibmtu, IB_MTU_4096);
 
-#if !defined(IFS_SLES12SP5) && !defined(IFS_SLES15SP1) && !defined(IFS_RH77) && !defined(IFS_RH81)
+#ifdef IB_PORT_ATTR_HAS_GRH_REQUIRED
 	/*
 	 * sm_lid of 0xFFFF needs special handling so that it can
 	 * be differentiated from a permissve LID of 0xFFFF.
@@ -1701,7 +1691,6 @@ static void hfi1_get_dev_fw_str(struct ib_device *ibdev, char *str,
 }
 #endif
 
-#if !defined(IFS_SLES12SP2)
 static const char * const driver_cntr_names[] = {
 	/* must be element 0*/
 	"DRIVER_KernIntr",
@@ -1860,7 +1849,6 @@ static int get_hw_stats(struct ib_device *ibdev, struct rdma_hw_stats *stats,
 	memcpy(stats->value, values, count * sizeof(u64));
 	return count;
 }
-#endif
 
 #ifdef HAVE_ALLOC_RDMA_NETDEV
 static struct net_device *hfi1_alloc_rn(struct ib_device *device,
@@ -1904,15 +1892,28 @@ static struct net_device *hfi1_alloc_rn(struct ib_device *device,
 #endif
 
 static const struct ib_device_ops hfi1_dev_ops = {
+#ifdef IB_DEVICE_OPS_DRIVER_ID
+	.driver_id = RDMA_DRIVER_HFI1,
+#endif
+#ifdef IB_DEVICE_OPS_OWNER
+	.owner = THIS_MODULE,
+#endif
 	.alloc_hw_stats = alloc_hw_stats,
 #ifdef HAVE_ALLOC_RDMA_NETDEV
 	.alloc_rdma_netdev = hfi1_alloc_rn,
 #endif
 	.get_dev_fw_str = hfi1_get_dev_fw_str,
 	.get_hw_stats = get_hw_stats,
+#ifdef HAVE_IBDEV_INIT_PORT
+	.init_port = hfi1_create_port_files,
+#endif
 	.modify_device = modify_device,
 	/* keep process mad in the driver */
+#ifndef HAVE_NEW_PROCESS_MAD_FUNCTION
+	.process_mad = compat_hfi1_process_mad,
+#else
 	.process_mad = hfi1_process_mad,
+#endif
 #ifdef HAVE_RDMA_NETDEV_GET_PARAMS
 	.rdma_netdev_get_params = hfi1_ipoib_rn_get_params,
 #endif
@@ -1958,12 +1959,14 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	 */
 	if (!ib_hfi1_sys_image_guid)
 		ib_hfi1_sys_image_guid = ibdev->node_guid;
+#ifndef IB_DEVICE_OPS_OWNER
 	ibdev->owner = THIS_MODULE;
+#endif
 	ibdev->phys_port_cnt = dd->num_pports;
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-	ibdev->dev.parent = &dd->pcidev->dev;
-#else
+#ifdef NEED_EMBEDDED_DEV
 	ibdev->dma_device = &dd->pcidev->dev;
+#else
+	ibdev->dev.parent = &dd->pcidev->dev;
 #endif
 	ib_set_device_ops(ibdev, &hfi1_dev_ops);
 
@@ -1973,7 +1976,9 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	/*
 	 * Fill in rvt info object.
 	 */
+#ifndef HAVE_IBDEV_INIT_PORT
 	dd->verbs_dev.rdi.driver_f.port_callback = hfi1_create_port_files;
+#endif
 	dd->verbs_dev.rdi.driver_f.get_pci_dev = get_pci_dev;
 	dd->verbs_dev.rdi.driver_f.check_ah = hfi1_check_ah;
 	dd->verbs_dev.rdi.driver_f.notify_new_ah = hfi1_notify_new_ah;
@@ -2055,7 +2060,7 @@ int hfi1_register_ib_device(struct hfi1_devdata *dd)
 	rdma_set_device_sysfs_group(&dd->verbs_dev.rdi.ibdev,
 				    &ib_hfi1_attr_group);
 
-	ret = rvt_register_device(&dd->verbs_dev.rdi, RDMA_DRIVER_HFI1);
+	ret = rvt_register_device(&dd->verbs_dev.rdi);
 	if (ret)
 		goto err_verbs_txreq;
 
@@ -2088,7 +2093,6 @@ void hfi1_unregister_ib_device(struct hfi1_devdata *dd)
 
 	del_timer_sync(&dev->mem_timer);
 	verbs_txreq_exit(dev);
-#if !defined(IFS_SLES12SP2)
 	mutex_lock(&cntr_names_lock);
 	kfree(dev_cntr_names);
 	kfree(port_cntr_names);
@@ -2096,7 +2100,6 @@ void hfi1_unregister_ib_device(struct hfi1_devdata *dd)
 	port_cntr_names = NULL;
 	cntr_names_initialized = 0;
 	mutex_unlock(&cntr_names_lock);
-#endif
 }
 
 void hfi1_cnp_rcv(struct hfi1_packet *packet)

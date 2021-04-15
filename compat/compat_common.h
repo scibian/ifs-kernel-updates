@@ -60,6 +60,7 @@
 #include <linux/kthread.h>
 #include <rdma/opa_port_info.h>
 #include <linux/timer.h>
+#include <rdma/ib_umem.h>
 
 #define IB_QPN_MASK     0xFFFFFF
 #include <rdma/ib_hdrs.h>
@@ -81,7 +82,7 @@
 
 #define  IB_PORT_OPA_MASK_CHG			  BIT(4)
 
-#if !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5)
+#ifdef NEED_CURRENT_TIME
 #define  current_time(inode)			  CURRENT_TIME
 #endif
 
@@ -116,16 +117,16 @@ extern struct srcu_struct debugfs_srcu;
 extern struct ib_dma_mapping_ops rvt_default_dma_mapping_ops;
 
 const char *get_unit_name(int unit);
-#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_RH80) && !defined(IFS_RH81) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5)
+#ifdef NEED_CDEV_SET_PARENT
 void cdev_set_parent(struct cdev *p, struct kobject *kobj);
 #endif
-#if !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_RH80) && !defined(IFS_RH81)
+#ifdef NEED_PCI_REQUEST_IRQ
 int pci_request_irq(struct pci_dev *dev, unsigned int nr,
 		    irq_handler_t handler, irq_handler_t thread_fn,
 		    void *dev_id, const char *fmt, ...);
 void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id);
 #endif
-#if !defined(IFS_RH80) && !defined(IFS_RH81)
+#ifdef NEED_PCI_BRIDGE_SECONDARY_BUS_RESET
 static inline int pci_bridge_secondary_bus_reset(struct pci_dev *dev)
 {
 	pci_reset_bridge_secondary_bus(dev);
@@ -402,9 +403,8 @@ static inline enum rdma_ah_attr_type rdma_ah_find_type(struct ib_device *dev,
 }
 
 #endif /* NEED_IB_HELPER_FUNCTIONS */
-#define NEED_KTHREAD_HELPER_FUNCTIONS (!defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH80) && !defined(IFS_RH81))
 
-#if NEED_KTHREAD_HELPER_FUNCTIONS
+#ifdef NEED_KTHREAD_HELPER_FUNCTIONS
 static inline bool kthread_queue_work(struct kthread_worker *worker,
 				      struct kthread_work *work)
 {
@@ -467,13 +467,13 @@ static inline void kthread_destroy_worker(struct kthread_worker *worker)
  *  For SELinux until our patches are accepted by the distro
  */
 
-#if defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_RH77) || defined(IFS_RH80) || defined(IFS_RH81) || defined(IFS_SLES15) || defined(IFS_SLES15SP1)
+#ifdef HAVE_IB_GET_CACHED_SUBNET_PREFIX
 int ib_get_cached_subnet_prefix(struct ib_device *device,
 				u8                port_num,
 				u64              *sn_pfx);
 #endif
 
-#if !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_RH80) && !defined(IFS_RH81) && !defined(IFS_SLES12SP5) && !defined(IFS_SLES15SP1)
+#ifndef HAVE_KMALLOC_ARRAY_NODE
 static inline void *kmalloc_array_node(size_t n, size_t size, gfp_t flags, int node)
 {
 	if (size != 0 && n > SIZE_MAX / size)
@@ -518,7 +518,7 @@ struct ifs_aip_rdma_netdev {
 };
 
 #define IB_DEVICE_RDMA_NETDEV IB_DEVICE_RDMA_NETDEV_OPA_VNIC
-#define IB_QP_CREATE_NETDEV_USE (1 << 7)
+#define IB_QP_CREATE_NETDEV_USE IB_QP_CREATE_RESERVED_START
 
 #ifndef atomic_try_cmpxchg
 #define __atomic_try_cmpxchg(type, _p, _po, _n)                         \
@@ -555,8 +555,11 @@ static inline bool rdma_core_cap_opa_port(struct ib_device *device,
 	if (!device)
 		return false;
 
-	return (device->port_immutable[port_num].core_cap_flags & RDMA_CORE_PORT_INTEL_OPA)
-		== RDMA_CORE_PORT_INTEL_OPA;
+#ifdef HAS_PORT_IMMUTABLE
+	return !!(device->port_immutable[port_num].core_cap_flags & RDMA_CORE_PORT_INTEL_OPA);
+#else
+	return !!(device->port_data[port_num].immutable.core_cap_flags & RDMA_CORE_PORT_INTEL_OPA);
+#endif
 }
 
 static inline int opa_mtu_enum_to_int(int mtu)
@@ -784,7 +787,7 @@ struct ib_device_ops {
 #else
 	int (*dealloc_pd)(struct ib_pd *pd);
 #endif
-#ifdef CREATE_AH_RETURNS_INT
+#ifdef HAVE_CORE_ALLOC_AH
 	int (*create_ah)(struct ib_ah *ah, struct rdma_ah_attr *ah_attr,
 			 u32 flags, struct ib_udata *udata);
 #elif defined(CREATE_AH_HAS_FLAGS)
@@ -802,14 +805,14 @@ struct ib_device_ops {
 #endif
 	int (*modify_ah)(struct ib_ah *ah, struct rdma_ah_attr *ah_attr);
 	int (*query_ah)(struct ib_ah *ah, struct rdma_ah_attr *ah_attr);
-#ifdef DESTROY_AH_RETURNS_VOID
+#ifdef HAVE_CORE_ALLOC_AH
 	void (*destroy_ah)(struct ib_ah *ah, u32 flags);
 #elif defined(DESTROY_AH_HAS_FLAGS)
 	int (*destroy_ah)(struct ib_ah *ah, u32 flags);
 #else
 	int (*destroy_ah)(struct ib_ah *ah);
 #endif
-#ifdef CREATE_SRQ_RETURNS_INT
+#ifdef HAVE_CORE_ALLOC_SRQ
 	int (*create_srq)(struct ib_srq *srq,
 			  struct ib_srq_init_attr *srq_init_attr,
 			  struct ib_udata *udata);
@@ -822,7 +825,7 @@ struct ib_device_ops {
 			  enum ib_srq_attr_mask srq_attr_mask,
 			  struct ib_udata *udata);
 	int (*query_srq)(struct ib_srq *srq, struct ib_srq_attr *srq_attr);
-#ifdef DESTROY_SRQ_HAS_UDATA
+#ifdef HAVE_CORE_ALLOC_SRQ
 	void (*destroy_srq)(struct ib_srq *srq, struct ib_udata *udata);
 #else
 	int (*destroy_srq)(struct ib_srq *srq);
@@ -839,7 +842,11 @@ struct ib_device_ops {
 #else
 	int (*destroy_qp)(struct ib_qp *qp);
 #endif
-#ifdef CREATE_CQ_LACKS_CONTEXT
+#ifdef HAVE_CORE_ALLOC_CQ
+	int *(*create_cq)(struct ib_device *device,
+			  const struct ib_cq_init_attr *attr,
+			  struct ib_udata *udata);
+#elif defined(NO_IB_UCONTEXT)
 	struct ib_cq *(*create_cq)(struct ib_device *device,
 				   const struct ib_cq_init_attr *attr,
 				   struct ib_udata *udata);
@@ -850,7 +857,9 @@ struct ib_device_ops {
 				   struct ib_udata *udata);
 #endif
 	int (*modify_cq)(struct ib_cq *cq, u16 cq_count, u16 cq_period);
-#ifdef DESTROY_CQ_HAS_UDATA
+#ifdef HAVE_CORE_ALLOC_CQ
+	 void (*destroy_cq)(struct ib_cq *cq, struct ib_udata *udata);
+#elif defined(DESTROY_CQ_HAS_UDATA)
 	int (*destroy_cq)(struct ib_cq *cq, struct ib_udata *udata);
 #else
 	int (*destroy_cq)(struct ib_cq *cq);
@@ -1024,7 +1033,7 @@ struct ib_device_ops {
 void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops);
 #endif
 
-#ifndef HAVE_ARRAY_SIZE
+#if !defined(HAVE_ARRAY_SIZE) && !defined(check_mul_overflow)
 #define is_signed_type(type)       (((type)(-1)) < (type)1)
 #define __type_half_max(type) ((type)1 << (8*sizeof(type) - 1 - is_signed_type(type)))
 #define type_max(T) ((T)((__type_half_max(T) - 1) + __type_half_max(T)))
@@ -1042,7 +1051,19 @@ void ib_set_device_ops(struct ib_device *dev, const struct ib_device_ops *ops);
 	  __a > 0 && __b > type_max(typeof(__b)) / __a;	 \
 })
 
+/* Checking for unsigned overflow is relatively easy without causing UB. */
+#define __unsigned_add_overflow(a, b, d) ({     \
+	typeof(a) __a = (a);                    \
+	typeof(b) __b = (b);                    \
+	typeof(d) __d = (d);                    \
+	(void) (&__a == &__b);                  \
+	(void) (&__a == __d);                   \
+	*__d = __a + __b;                       \
+	*__d < __a;                             \
+})
+
 #define check_mul_overflow(a, b, d) __unsigned_mul_overflow(a, b, d)
+#define check_add_overflow(a, b, d) __unsigned_add_overflow(a, b, d)
 
 static inline size_t array_size(size_t a, size_t b)
 {
@@ -1053,6 +1074,72 @@ static inline size_t array_size(size_t a, size_t b)
 
 	return bytes;
 }
+
+#ifndef __must_be_array
+#define __must_be_array(a)      BUILD_BUG_ON_ZERO(__same_type((a), &(a)[0]))
+#endif
+
+/*
+ * Compute a*b+c, returning SIZE_MAX on overflow. Internal helper for
+ * struct_size() below.
+ */
+static inline __must_check size_t __ab_c_size(size_t a, size_t b, size_t c)
+{
+	size_t bytes;
+
+	if (check_mul_overflow(a, b, &bytes))
+		return SIZE_MAX;
+	if (check_add_overflow(bytes, c, &bytes))
+		return SIZE_MAX;
+
+	return bytes;
+}
+
+/**
+ * struct_size() - Calculate size of structure with trailing array.
+ * @p: Pointer to the structure.
+ * @member: Name of the array member.
+ * @n: Number of elements in the array.
+ *
+ * Calculates size of memory needed for structure @p followed by an
+ * array of @n @member elements.
+ *
+ * Return: number of bytes needed or SIZE_MAX on overflow.
+ */
+#define struct_size(p, member, n)					\
+	__ab_c_size(n,							\
+		    sizeof(*(p)->member) + __must_be_array((p)->member),\
+		    sizeof(*(p)))
+
+#endif
+
+#ifndef PCI_EXP_LNKCAP_SLS_8_0GB
+#define PCI_EXP_LNKCAP_SLS_8_0GB 0x00000003
+#endif
+#ifndef PCI_EXP_LNKCTL2_TLS_8_0GT
+#define  PCI_EXP_LNKCTL2_TLS_8_0GT      0x0003 /* Supported Speed 8GT/s */
+#endif
+#ifndef PCI_EXP_LNKCTL2_TLS_2_5GT
+#define PCI_EXP_LNKCTL2_TLS_2_5GT      0x0001 /* Supported Speed 2.5GT/s */
+#endif
+#ifndef PCI_EXP_LNKCTL2_TLS_5_0GT
+#define PCI_EXP_LNKCTL2_TLS_5_0GT 0x0002
+#endif
+#ifndef PCI_EXP_LNKCTL2_TLS
+#define PCI_EXP_LNKCTL2_TLS 0x000f
+#endif
+
+#ifndef u64_to_user_ptr
+#define u64_to_user_ptr(x) (            \
+{                                       \
+	typecheck(u64, (x));            \
+	(void __user *)(uintptr_t)(x);  \
+}                                       \
+)
+#endif
+
+#ifndef HAVE_VM_FAULT_T
+typedef int vm_fault_t;
 #endif
 
 #ifndef CREATE_AH_HAS_FLAGS
@@ -1067,6 +1154,170 @@ enum rdma_destroy_ah_flags {
 	/* In a sleepable context */
 	RDMA_DESTROY_AH_SLEEPABLE = BIT(0),
 };
+#endif
+
+#ifdef IB_MODIFY_QP_IS_OK_HAS_LINK
+#define ib_modify_qp_is_ok(a,b,c,d) ib_modify_qp_is_ok(a,b,c,d,IB_LINK_LAYER_INFINIBAND)
+#endif
+
+#ifndef HAVE_RDMA_DEVICE_TO_IBDEV
+/**
+ * rdma_device_to_ibdev - Get ib_device pointer from device pointer
+ *
+ * @device:	device pointer for which ib_device pointer to retrieve
+ *
+ * rdma_device_to_ibdev() retrieves ib_device pointer from device.
+ *
+ */
+static inline struct ib_device *rdma_device_to_ibdev(struct device *device)
+{
+	return container_of(device, struct ib_device, dev);
+}
+
+/**
+ * rdma_device_to_drv_device - Helper macro to reach back to driver's
+ *			       ib_device holder structure from device pointer.
+ *
+ * NOTE: New drivers should not make use of this API; This API is only for
+ * existing drivers who have exposed sysfs entries using
+ * rdma_set_device_sysfs_group().
+ */
+#define rdma_device_to_drv_device(dev, drv_dev_struct, ibdev_member)           \
+	container_of(rdma_device_to_ibdev(dev), drv_dev_struct, ibdev_member)
+#endif
+
+#ifdef NEED_POLL_T
+typedef unsigned __bitwise __poll_t;
+#endif
+
+#ifndef EPOLLERR
+#define EPOLLERR POLLERR
+#endif
+
+#ifndef EPOLLRDNORM
+#define EPOLLRDNORM POLLRDNORM
+#endif
+
+#ifndef EPOLLIN
+#define EPOLLIN POLLIN
+#endif
+
+#ifndef HAVE_RDMA_COPY_AH_ATTR
+static inline
+void rdma_destroy_ah_attr(struct rdma_ah_attr *ah)
+{
+}
+
+static inline
+void rdma_copy_ah_attr(struct rdma_ah_attr *dest,
+		       const struct rdma_ah_attr *src)
+{
+	*dest = *src;
+}
+
+static inline
+void rdma_replace_ah_attr(struct rdma_ah_attr *old,
+                          const struct rdma_ah_attr *new)
+{
+	*old = *new;
+}
+
+static inline
+void rdma_move_ah_attr(struct rdma_ah_attr *dest, struct rdma_ah_attr *src)
+{
+	*dest = *src;
+}
+#endif
+
+#ifndef HAVE_MMU_NOTIFIER_RANGE
+struct mmu_notifier_range {
+	struct mm_struct *mm;
+	unsigned long start;
+	unsigned long end;
+};
+#endif
+
+#ifndef HAVE_PUT_USER_PAGES
+static inline void put_user_page(struct page *p)
+{
+	put_page(p);
+}
+
+static inline void put_user_pages(struct page **p, unsigned long n)
+{
+	unsigned long i;
+
+	for (i = 0; i < n; i++)
+		put_user_page(p[i]);
+}
+
+static inline void put_user_pages_dirty_lock(struct page **p, unsigned long n)
+{
+	unsigned long i;
+
+	for (i = 0; i < n; i++) {
+		set_page_dirty_lock(p[i]);
+		put_user_page(p[i]);
+	}
+}
+#endif
+
+#ifndef HAVE_UMEM_PTR_VALIDITY_CHECK
+static inline void compat_ib_umem_release(struct ib_umem *umem)
+{
+	if (umem)
+		ib_umem_release(umem);
+}
+
+#define ib_umem_release compat_ib_umem_release
+#endif
+
+#ifndef DESTROY_CQ_HAS_UDATA
+#define rvt_destroy_cq(a,b) rvt_destroy_cq(a)
+#define compat_rvt_destroy_cq(a,b) compat_rvt_destroy_cq(a)
+#endif
+#ifndef DEREG_MR_HAS_UDATA
+#define rvt_dereg_mr(a,b) rvt_dereg_mr(a)
+#endif
+#ifndef DESTROY_QP_HAS_UDATA
+#define rvt_destroy_qp(a,b) rvt_destroy_qp(a)
+#endif
+#ifndef HAVE_CORE_ALLOC_SRQ
+#define compat_rvt_destroy_srq(a,b) compat_rvt_destroy_srq(a)
+#define rvt_destroy_srq(a,b) rvt_destroy_srq(a)
+#endif
+#ifndef ALLOC_MR_HAS_UDATA
+#define rvt_alloc_mr(a,b,c,d) rvt_alloc_mr(a,b,c)
+#endif
+#ifndef DEALLOC_PD_HAS_UDATA
+#define rvt_dealloc_pd(a,b) rvt_dealloc_pd(a)
+#endif
+
+#ifndef IB_DEVICE_OPS_DRIVER_ID
+#ifdef QIB_DRIVER
+#define rvt_register_device(a) compat_rvt_register_device(a, RDMA_DRIVER_QIB)
+#else
+#define rvt_register_device(a) compat_rvt_register_device(a, RDMA_DRIVER_HFI1)
+#endif
+#endif
+
+#ifndef HAVE_NETDEV_XMIT_MORE
+#define netdev_xmit_more() (skb->xmit_more)
+#endif
+
+#ifndef HAVE_NEW_PUT_USER_PAGES_DIRTY_LOCK
+#define put_user_pages_dirty_lock(p, npages, dirty) \
+	if (dirty) \
+		put_user_pages_dirty_lock(p, npages); \
+	else \
+		put_user_pages(p, npages)
+#endif
+
+#ifndef HAVE_SKB_FRAG_OFF
+static inline unsigned int skb_frag_off(const skb_frag_t *frag)
+{
+	return frag->page_offset;
+}
 #endif
 
 #endif

@@ -54,6 +54,7 @@
 #include <linux/printk.h>
 #include <linux/hrtimer.h>
 #include <linux/bitmap.h>
+#include <linux/numa.h>
 #include <rdma/rdma_vt.h>
 
 #include "hfi.h"
@@ -499,7 +500,7 @@ int hfi1_create_ctxtdata(struct hfi1_pportdata *ppd, int numa,
 		if (rcd->egrbufs.size < hfi1_max_mtu) {
 			rcd->egrbufs.size = __roundup_pow_of_two(hfi1_max_mtu);
 			hfi1_cdbg(PROC,
-				  "ctxt%u: eager bufs size too small. Adjusting to %zu\n",
+				  "ctxt%u: eager bufs size too small. Adjusting to %u\n",
 				    rcd->ctxt, rcd->egrbufs.size);
 		}
 		rcd->egrbufs.rcvtid_size = HFI1_MAX_EAGER_BUFFER_SIZE;
@@ -860,6 +861,29 @@ wq_error:
 }
 
 /**
+ * destroy_workqueues - destroy per port workqueues
+ * @dd: the hfi1_ib device
+ */
+static void destroy_workqueues(struct hfi1_devdata *dd)
+{
+	int pidx;
+	struct hfi1_pportdata *ppd;
+
+	for (pidx = 0; pidx < dd->num_pports; ++pidx) {
+		ppd = dd->pport + pidx;
+
+		if (ppd->hfi1_wq) {
+			destroy_workqueue(ppd->hfi1_wq);
+			ppd->hfi1_wq = NULL;
+		}
+		if (ppd->link_wq) {
+			destroy_workqueue(ppd->link_wq);
+			ppd->link_wq = NULL;
+		}
+	}
+}
+
+/**
  * enable_general_intr() - Enable the IRQs that will be handled by the
  * general interrupt handler.
  * @dd: valid devdata
@@ -927,10 +951,10 @@ int hfi1_init(struct hfi1_devdata *dd, int reinit)
 		goto done;
 
 	/* allocate dummy tail memory for all receive contexts */
-	dd->rcvhdrtail_dummy_kvaddr = dma_zalloc_coherent(
-		&dd->pcidev->dev, sizeof(u64),
-		&dd->rcvhdrtail_dummy_dma,
-		GFP_KERNEL);
+	dd->rcvhdrtail_dummy_kvaddr = dma_alloc_coherent(&dd->pcidev->dev,
+							 sizeof(u64),
+							 &dd->rcvhdrtail_dummy_dma,
+							 GFP_KERNEL);
 
 	if (!dd->rcvhdrtail_dummy_kvaddr) {
 		dd_dev_err(dd, "cannot allocate dummy tail memory\n");
@@ -1144,15 +1168,10 @@ static void shutdown_device(struct hfi1_devdata *dd)
 		 * We can't count on interrupts since we are stopping.
 		 */
 		hfi1_quiet_serdes(ppd);
-
-		if (ppd->hfi1_wq) {
-			destroy_workqueue(ppd->hfi1_wq);
-			ppd->hfi1_wq = NULL;
-		}
-		if (ppd->link_wq) {
-			destroy_workqueue(ppd->link_wq);
-			ppd->link_wq = NULL;
-		}
+		if (ppd->hfi1_wq)
+			flush_workqueue(ppd->hfi1_wq);
+		if (ppd->link_wq)
+			flush_workqueue(ppd->link_wq);
 	}
 	sdma_exit(dd);
 }
@@ -1334,7 +1353,7 @@ static struct hfi1_devdata *hfi1_alloc_devdata(struct pci_dev *pdev,
 		dd->unit = ret;
 		list_add(&dd->list, &hfi1_dev_list);
 	}
-	dd->node = -1;
+	dd->node = NUMA_NO_NODE;
 
 	spin_unlock_irqrestore(&hfi1_devs_lock, flags);
 	idr_preload_end();
@@ -2007,6 +2026,7 @@ static void remove_one(struct pci_dev *pdev)
 	 * clear dma engines, etc.
 	 */
 	shutdown_device(dd);
+	destroy_workqueues(dd);
 
 	stop_timers(dd);
 
@@ -2045,9 +2065,9 @@ int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 			gfp_flags = GFP_KERNEL;
 		else
 			gfp_flags = GFP_USER;
-		rcd->rcvhdrq = dma_zalloc_coherent(
-			&dd->pcidev->dev, amt, &rcd->rcvhdrq_dma,
-			gfp_flags | __GFP_COMP);
+		rcd->rcvhdrq = dma_alloc_coherent(&dd->pcidev->dev, amt,
+						  &rcd->rcvhdrq_dma,
+						  gfp_flags | __GFP_COMP);
 
 		if (!rcd->rcvhdrq) {
 			dd_dev_err(dd,
@@ -2058,9 +2078,10 @@ int hfi1_create_rcvhdrq(struct hfi1_devdata *dd, struct hfi1_ctxtdata *rcd)
 
 		if (HFI1_CAP_KGET_MASK(rcd->flags, DMA_RTAIL) ||
 		    HFI1_CAP_UGET_MASK(rcd->flags, DMA_RTAIL)) {
-			rcd->rcvhdrtail_kvaddr = dma_zalloc_coherent(
-				&dd->pcidev->dev, PAGE_SIZE,
-				&rcd->rcvhdrqtailaddr_dma, gfp_flags);
+			rcd->rcvhdrtail_kvaddr = dma_alloc_coherent(&dd->pcidev->dev,
+								    PAGE_SIZE,
+								    &rcd->rcvhdrqtailaddr_dma,
+								    gfp_flags);
 			if (!rcd->rcvhdrtail_kvaddr)
 				goto bail_free;
 		}
@@ -2136,10 +2157,10 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 	while (alloced_bytes < rcd->egrbufs.size &&
 	       rcd->egrbufs.alloced < rcd->egrbufs.count) {
 		rcd->egrbufs.buffers[idx].addr =
-			dma_zalloc_coherent(&dd->pcidev->dev,
-					    rcd->egrbufs.rcvtid_size,
-					    &rcd->egrbufs.buffers[idx].dma,
-					    gfp_flags);
+			dma_alloc_coherent(&dd->pcidev->dev,
+					   rcd->egrbufs.rcvtid_size,
+					   &rcd->egrbufs.buffers[idx].dma,
+					   gfp_flags);
 		if (rcd->egrbufs.buffers[idx].addr) {
 			rcd->egrbufs.buffers[idx].len =
 				rcd->egrbufs.rcvtid_size;
@@ -2210,7 +2231,7 @@ int hfi1_setup_eagerbufs(struct hfi1_ctxtdata *rcd)
 	rcd->egrbufs.size = alloced_bytes;
 
 	hfi1_cdbg(PROC,
-		  "ctxt%u: Alloced %u rcv tid entries @ %uKB, total %zuKB\n",
+		  "ctxt%u: Alloced %u rcv tid entries @ %uKB, total %uKB\n",
 		  rcd->ctxt, rcd->egrbufs.alloced,
 		  rcd->egrbufs.rcvtid_size / 1024, rcd->egrbufs.size / 1024);
 

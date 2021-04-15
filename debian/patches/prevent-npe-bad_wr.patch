@@ -1,0 +1,58 @@
+Description: Prevent null pointer exceptions accessing bad_wr
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2020-06-24>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
+--- a/rdmavt/qp.c
++++ b/rdmavt/qp.c
+@@ -1920,7 +1920,8 @@
+ 
+ 	/* Check that state is OK to post receive. */
+ 	if (!(ib_rvt_state_ops[qp->state] & RVT_POST_RECV_OK) || !wq) {
+-		*bad_wr = wr;
++		if (bad_wr != NULL)
++			*bad_wr = wr;
+ 		return -EINVAL;
+ 	}
+ 
+@@ -1930,7 +1931,8 @@
+ 		int i;
+ 
+ 		if ((unsigned)wr->num_sge > qp->r_rq.max_sge) {
+-			*bad_wr = wr;
++			if (bad_wr != NULL)
++				*bad_wr = wr;
+ 			return -EINVAL;
+ 		}
+ 
+@@ -1940,7 +1942,8 @@
+ 			next = 0;
+ 		if (next == READ_ONCE(wq->tail)) {
+ 			spin_unlock_irqrestore(&qp->r_rq.kwq->p_lock, flags);
+-			*bad_wr = wr;
++			if (bad_wr != NULL)
++				*bad_wr = wr;
+ 			return -ENOMEM;
+ 		}
+ 		if (unlikely(qp_err_flush)) {
+@@ -2368,7 +2371,8 @@
+ 		int i;
+ 
+ 		if ((unsigned)wr->num_sge > srq->rq.max_sge) {
+-			*bad_wr = wr;
++			if (bad_wr != NULL)
++				*bad_wr = wr;
+ 			return -EINVAL;
+ 		}
+ 
+@@ -2379,7 +2383,8 @@
+ 			next = 0;
+ 		if (next == READ_ONCE(wq->tail)) {
+ 			spin_unlock_irqrestore(&srq->rq.kwq->p_lock, flags);
+-			*bad_wr = wr;
++			if (bad_wr != NULL)
++				*bad_wr = wr;
+ 			return -ENOMEM;
+ 		}
+ 

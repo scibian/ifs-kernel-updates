@@ -1,6 +1,14 @@
+Description: Export rdma netdev functions from hfi1.
+ Kernel 4.9.0 lacks rdma netdev support in ib_device. This patch exports
+ the necessary functions from hfi1 so that ib_ipoib can invoke them explicitly.
+Author: Brian T. Smith <bsmith@systemfabricworks.com>
+Forwarded: not-needed
+Last-Update: <2020-05-21>
+---
+This patch header follows DEP-3: http://dep.debian.net/deps/dep3/
 --- /dev/null
 +++ b/hfi1/hfi1_netdev.h
-@@ -0,0 +1,64 @@
+@@ -0,0 +1,69 @@
 +/* SPDX-License-Identifier: (GPL-2.0 OR BSD-3-Clause) */
 +/*
 + * Copyright(c) 2018 Intel Corporation.
@@ -64,6 +72,11 @@
 +				 unsigned char name_assign_type,
 +				 void (*setup)(struct net_device *));
 +
++int hfi1_ipoib_rn_get_params(struct ib_device *device,
++			     u8 port_num,
++			     enum rdma_netdev_t type,
++			     struct rdma_netdev_alloc_params *params);
++
 +#endif /* HFI1_HFI1_NETDEV_H */
 --- a/hfi1/verbs.c
 +++ b/hfi1/verbs.c
@@ -78,29 +91,32 @@
  extern unsigned int selinux_mode;
  
  unsigned int hfi1_lkey_table_size = 16;
-@@ -1864,7 +1866,7 @@
- #endif
+@@ -1851,7 +1853,7 @@
+ }
  
- #ifdef HAVE_ALLOC_RDMA_NETDEV
+ #if defined(HAVE_ALLOC_RDMA_NETDEV) || defined(EXPORT_HFI1_RDMA_NETDEV)
 -static struct net_device *hfi1_alloc_rn(struct ib_device *device,
 +struct net_device *hfi1_alloc_rn(struct ib_device *device,
  					u8 port_num,
  					enum rdma_netdev_t type,
  					const char *name,
-@@ -1902,11 +1904,15 @@
+@@ -1889,6 +1891,9 @@
  
  	return dev;
  }
-+#if defined(IFS_DEB9)
++#if defined(EXPORT_HFI1_RDMA_NETDEV)
 +EXPORT_SYMBOL(hfi1_alloc_rn);
 +#endif
  #endif
  
  static const struct ib_device_ops hfi1_dev_ops = {
- 	.alloc_hw_stats = alloc_hw_stats,
--#ifdef HAVE_ALLOC_RDMA_NETDEV
-+#if defined(HAVE_ALLOC_RDMA_NETDEV) && !defined(IFS_DEB9)
-+	/* Debian 9 kernel 4.9.0 lacks alloc_rdma_netdev, so hfi1 exports hfi_alloc_rn. */
- 	.alloc_rdma_netdev = hfi1_alloc_rn,
+--- a/hfi1/ipoib_main.c
++++ b/hfi1/ipoib_main.c
+@@ -450,4 +450,7 @@
+ 
+ 	return 0;
+ }
++#ifdef EXPORT_HFI1_RDMA_NETDEV
++EXPORT_SYMBOL(hfi1_ipoib_rn_get_params);
++#endif
  #endif
- 	.get_dev_fw_str = hfi1_get_dev_fw_str,

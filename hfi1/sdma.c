@@ -66,6 +66,7 @@
 #define SDMA_DESCQ_CNT 2048
 #define SDMA_DESC_INTR 64
 #define INVALID_TAIL 0xffff
+#define SDMA_PAD max_t(size_t, MAX_16B_PADDING, sizeof(u32))
 
 static uint sdma_descq_cnt = SDMA_DESCQ_CNT;
 module_param(sdma_descq_cnt, uint, S_IRUGO);
@@ -568,7 +569,6 @@ static void sdma_hw_clean_up_task(unsigned long opaque)
 
 static inline struct sdma_txreq *get_txhead(struct sdma_engine *sde)
 {
-	smp_read_barrier_depends(); /* see sdma_update_tail() */
 	return sde->tx_ring[sde->tx_head & sde->sdma_mask];
 }
 
@@ -871,14 +871,13 @@ struct sdma_engine *sdma_select_user_engine(struct hfi1_devdata *dd,
 {
 	struct sdma_rht_node *rht_node;
 	struct sdma_engine *sde = NULL;
-	const struct cpumask *current_mask = &current->cpus_allowed;
 	unsigned long cpu_id;
 
 	/*
 	 * To ensure that always the same sdma engine(s) will be
 	 * selected make sure the process is pinned to this CPU only.
 	 */
-	if (cpumask_weight(current_mask) != 1)
+	if (current->nr_cpus_allowed != 1)
 		goto out;
 
 	cpu_id = smp_processor_id();
@@ -1304,7 +1303,7 @@ void sdma_clean(struct hfi1_devdata *dd, size_t num_engines)
 	struct sdma_engine *sde;
 
 	if (dd->sdma_pad_dma) {
-		dma_free_coherent(&dd->pcidev->dev, 4,
+		dma_free_coherent(&dd->pcidev->dev, SDMA_PAD,
 				  (void *)dd->sdma_pad_dma,
 				  dd->sdma_pad_phys);
 		dd->sdma_pad_dma = NULL;
@@ -1474,16 +1473,14 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 		timer_setup(&sde->err_progress_check_timer,
 			    sdma_err_progress_check, 0);
 
-		sde->descq = dma_zalloc_coherent(
-			&dd->pcidev->dev,
-			descq_cnt * sizeof(u64[2]),
-			&sde->descq_phys,
-			GFP_KERNEL
-		);
+		sde->descq = dma_alloc_coherent(&dd->pcidev->dev,
+						descq_cnt * sizeof(u64[2]),
+						&sde->descq_phys, GFP_KERNEL);
 		if (!sde->descq)
 			goto bail;
 		sde->tx_ring =
-			kvzalloc_node(sizeof(struct sdma_txreq *) * descq_cnt,
+			kvzalloc_node(array_size(descq_cnt,
+						 sizeof(struct sdma_txreq *)),
 				      GFP_KERNEL, dd->node);
 		if (!sde->tx_ring)
 			goto bail;
@@ -1491,24 +1488,18 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 
 	dd->sdma_heads_size = L1_CACHE_BYTES * num_engines;
 	/* Allocate memory for DMA of head registers to memory */
-	dd->sdma_heads_dma = dma_zalloc_coherent(
-		&dd->pcidev->dev,
-		dd->sdma_heads_size,
-		&dd->sdma_heads_phys,
-		GFP_KERNEL
-	);
+	dd->sdma_heads_dma = dma_alloc_coherent(&dd->pcidev->dev,
+						dd->sdma_heads_size,
+						&dd->sdma_heads_phys,
+						GFP_KERNEL);
 	if (!dd->sdma_heads_dma) {
 		dd_dev_err(dd, "failed to allocate SendDMA head memory\n");
 		goto bail;
 	}
 
 	/* Allocate memory for pad */
-	dd->sdma_pad_dma = dma_zalloc_coherent(
-		&dd->pcidev->dev,
-		sizeof(u32),
-		&dd->sdma_pad_phys,
-		GFP_KERNEL
-	);
+	dd->sdma_pad_dma = dma_alloc_coherent(&dd->pcidev->dev, SDMA_PAD,
+					      &dd->sdma_pad_phys, GFP_KERNEL);
 	if (!dd->sdma_pad_dma) {
 		dd_dev_err(dd, "failed to allocate SendDMA pad memory\n");
 		goto bail;
@@ -1542,8 +1533,11 @@ int sdma_init(struct hfi1_devdata *dd, u8 port)
 	}
 
 	ret = rhashtable_init(tmp_sdma_rht, &sdma_rht_params);
-	if (ret < 0)
+	if (ret < 0) {
+		kfree(tmp_sdma_rht);
 		goto bail;
+	}
+
 	dd->sdma_rht = tmp_sdma_rht;
 
 	dd_dev_info(dd, "SDMA num_sdma: %u\n", dd->num_sdma);
@@ -2154,7 +2148,6 @@ void sdma_dumpstate(struct sdma_engine *sde)
 
 static void dump_sdma_state(struct sdma_engine *sde)
 {
-	struct hw_sdma_desc *descq;
 	struct hw_sdma_desc *descqp;
 	u64 desc[2];
 	u64 addr;
@@ -2165,7 +2158,6 @@ static void dump_sdma_state(struct sdma_engine *sde)
 	head = sde->descq_head & sde->sdma_mask;
 	tail = sde->descq_tail & sde->sdma_mask;
 	cnt = sdma_descq_freecnt(sde);
-	descq = sde->descq;
 
 	dd_dev_err(sde->dd,
 		   "SDMA (%u) descq_head: %u descq_tail: %u freecnt: %u FLE %d\n",
@@ -2598,7 +2590,7 @@ static void __sdma_process_event(struct sdma_engine *sde,
 			 * 7220, e.g.
 			 */
 			ss->go_s99_running = 1;
-			/* fall through and start dma engine */
+			/* fall through -- and start dma engine */
 		case sdma_event_e10_go_hw_start:
 			/* This reference means the state machine is started */
 			sdma_get(&sde->state);
@@ -3021,6 +3013,7 @@ static void __sdma_process_event(struct sdma_engine *sde,
 		case sdma_event_e60_hw_halted:
 			need_progress = 1;
 			sdma_err_progress_check_schedule(sde);
+			/* fall through */
 		case sdma_event_e90_sw_halted:
 			/*
 			* SW initiated halt does not perform engines

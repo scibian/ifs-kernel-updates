@@ -48,18 +48,20 @@
 #include <linux/cdev.h>
 #include <linux/vmalloc.h>
 #include <linux/io.h>
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-#include <linux/sched/mm.h>
-#else
+#include "compat.h"
+
+#ifdef NEED_AIO
 #include <linux/aio.h>
-#include <rdma/ib_user_mad.h>
 #endif
+
+#ifdef NEED_SCHED_H
+#include <rdma/ib_user_mad.h>
+#else
+#include <linux/sched/mm.h>
+#endif
+
 #include <linux/bitmap.h>
 #include <rdma/ib.h>
-
-#ifdef IFS_RH75
-#include <linux/module.h>
-#endif
 
 #include "hfi.h"
 #include "pio.h"
@@ -73,6 +75,7 @@
 #endif
 #include "user_exp_rcv.h"
 #include "aspm.h"
+#include "compat_common.h"
 
 #undef pr_fmt
 #define pr_fmt(fmt) DRIVER_NAME ": " fmt
@@ -83,27 +86,26 @@ unsigned int selinux_mode = 0;
 unsigned int print_se_banner = 1;
 
 /*
- * We only intend to allow this to be enabled on RHEL 7.5 for right now. SELinux code
- * should be a no-o for any distro other than RHEL 7.5 that sets this mod parm
- */
-#ifdef IFS_RH75
-module_param_named(ifs_sel_mode, selinux_mode, uint, S_IRUGO);
-MODULE_PARM_DESC(ifs_sel_mode, "Use SELinux for PSM");
-#endif
-
-/*
  * File operation functions
  */
 static int hfi1_file_open(struct inode *inode, struct file *fp);
 static int hfi1_file_close(struct inode *inode, struct file *fp);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77)
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from);
-#else
-static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
-			      unsigned long dim, loff_t offset);
-#endif
+#ifdef HAVE_AIO_WRITE
+#define iter_is_iovec(from) true
 
-static unsigned int hfi1_poll(struct file *fp, struct poll_table_struct *pt);
+static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
+			      unsigned long dim, loff_t offset)
+{
+	struct iov_iter from = {
+		.nr_segs = dim,
+		.iov = iovec
+	};
+
+	return hfi1_write_iter(kiocb, &from);
+}
+#endif
+static __poll_t hfi1_poll(struct file *fp, struct poll_table_struct *pt);
 static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma);
 
 static u64 kvirt_to_phys(void *addr);
@@ -134,25 +136,25 @@ static int allocate_ctxt(struct hfi1_filedata *fd, struct hfi1_devdata *dd,
 			 struct hfi1_user_info *uinfo,
 			 struct hfi1_ctxtdata **cd);
 static void deallocate_ctxt(struct hfi1_ctxtdata *uctxt);
-static unsigned int poll_urgent(struct file *fp, struct poll_table_struct *pt);
-static unsigned int poll_next(struct file *fp, struct poll_table_struct *pt);
+static __poll_t poll_urgent(struct file *fp, struct poll_table_struct *pt);
+static __poll_t poll_next(struct file *fp, struct poll_table_struct *pt);
 static int user_event_ack(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 			  unsigned long arg);
 static int set_ctxt_pkey(struct hfi1_ctxtdata *uctxt, unsigned long arg);
 static int ctxt_reset(struct hfi1_ctxtdata *uctxt);
 static int manage_rcvq(struct hfi1_ctxtdata *uctxt, u16 subctxt,
 		       unsigned long arg);
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-static int vma_fault(struct vm_fault *vmf);
+#ifndef VM_OPS_FAULT_HAVE_VMA
+static vm_fault_t vma_fault(struct vm_fault *vmf);
 #else
-static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
+static vm_fault_t vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf);
 #endif
 static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 			    unsigned long arg);
 
 static const struct file_operations hfi1_file_ops = {
 	.owner = THIS_MODULE,
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77)
+#ifndef HAVE_AIO_WRITE
 	.write_iter = hfi1_write_iter,
 #else
 	.aio_write = hfi1_aio_write,
@@ -348,7 +350,6 @@ static long hfi1_file_ioctl(struct file *fp, unsigned int cmd,
 	return ret;
 }
 
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77)
 static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 {
 	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
@@ -396,47 +397,6 @@ static ssize_t hfi1_write_iter(struct kiocb *kiocb, struct iov_iter *from)
 	srcu_read_unlock(&fd->pq_srcu, idx);
 	return reqs;
 }
-#else
-static ssize_t hfi1_aio_write(struct kiocb *kiocb, const struct iovec *iovec,
-			      unsigned long dim, loff_t offset)
-{
-	struct hfi1_filedata *fd = kiocb->ki_filp->private_data;
-	struct hfi1_user_sdma_pkt_q *pq = fd->pq;
-	struct hfi1_user_sdma_comp_q *cq = fd->cq;
-	int done = 0, reqs = 0;
-
-	if (!cq || !pq)
-		return -EIO;
-
-	if (!dim)
-		return -EINVAL;
-
-	hfi1_cdbg(SDMA, "SDMA request from %u:%u (%lu)",
-		fd->uctxt->ctxt, fd->subctxt, dim);
-
-	if (atomic_read(&pq->n_reqs) == pq->n_max_reqs)
-	return -ENOSPC;
-
-	while (dim) {
-		int ret;
-		unsigned long count = 0;
-
-		ret = hfi1_user_sdma_process_request(
-			fd, (struct iovec *)(iovec + done),
-			dim, &count);
-		if (ret) {
-			reqs = ret;
-			break;
-		}
-		dim -= count;
-		done += count;
-		reqs++;
-	}
-
-	return reqs;
-}
-#endif
-
 
 static int hfi1_file_mmap(struct file *fp, struct vm_area_struct *vma)
 {
@@ -693,10 +653,10 @@ done:
  * Local (non-chip) user memory is not mapped right away but as it is
  * accessed by the user-level code.
  */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-static int vma_fault(struct vm_fault *vmf)
+#ifndef VM_OPS_FAULT_HAVE_VMA
+static vm_fault_t vma_fault(struct vm_fault *vmf)
 #else
-static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
+static vm_fault_t vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 #endif
 {
 	struct page *page;
@@ -711,20 +671,20 @@ static int vma_fault(struct vm_area_struct *vma, struct vm_fault *vmf)
 	return 0;
 }
 
-static unsigned int hfi1_poll(struct file *fp, struct poll_table_struct *pt)
+static __poll_t hfi1_poll(struct file *fp, struct poll_table_struct *pt)
 {
 	struct hfi1_ctxtdata *uctxt;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	uctxt = ((struct hfi1_filedata *)fp->private_data)->uctxt;
 	if (!uctxt)
-		pollflag = POLLERR;
+		pollflag = EPOLLERR;
 	else if (uctxt->poll_type == HFI1_POLL_TYPE_URGENT)
 		pollflag = poll_urgent(fp, pt);
 	else  if (uctxt->poll_type == HFI1_POLL_TYPE_ANYRCV)
 		pollflag = poll_next(fp, pt);
 	else /* invalid */
-		pollflag = POLLERR;
+		pollflag = EPOLLERR;
 
 	return pollflag;
 }
@@ -884,7 +844,7 @@ static int complete_subctxt(struct hfi1_filedata *fd)
 static int assign_ctxt(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 {
 	int ret;
-	unsigned int swmajor, swminor;
+	unsigned int swmajor;
 	struct hfi1_ctxtdata *uctxt = NULL;
 	struct hfi1_user_info uinfo;
 
@@ -903,8 +863,6 @@ static int assign_ctxt(struct hfi1_filedata *fd, unsigned long arg, u32 len)
 
 	if (uinfo.subctxt_cnt > HFI1_MAX_SHARED_CTXTS)
 		return -EINVAL;
-
-	swminor = uinfo.userversion & 0xffff;
 
 	/*
 	 * Acquire the mutex to protect against multiple creations of what
@@ -1592,19 +1550,19 @@ static int user_exp_rcv_invalid(struct hfi1_filedata *fd, unsigned long arg,
 	return ret;
 }
 
-static unsigned int poll_urgent(struct file *fp,
+static __poll_t poll_urgent(struct file *fp,
 				struct poll_table_struct *pt)
 {
 	struct hfi1_filedata *fd = fp->private_data;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	poll_wait(fp, &uctxt->wait, pt);
 
 	spin_lock_irq(&dd->uctxt_lock);
 	if (uctxt->urgent != uctxt->urgent_poll) {
-		pollflag = POLLIN | POLLRDNORM;
+		pollflag = EPOLLIN | EPOLLRDNORM;
 		uctxt->urgent_poll = uctxt->urgent;
 	} else {
 		pollflag = 0;
@@ -1615,13 +1573,13 @@ static unsigned int poll_urgent(struct file *fp,
 	return pollflag;
 }
 
-static unsigned int poll_next(struct file *fp,
+static __poll_t poll_next(struct file *fp,
 			      struct poll_table_struct *pt)
 {
 	struct hfi1_filedata *fd = fp->private_data;
 	struct hfi1_ctxtdata *uctxt = fd->uctxt;
 	struct hfi1_devdata *dd = uctxt->dd;
-	unsigned pollflag;
+	__poll_t pollflag;
 
 	poll_wait(fp, &uctxt->wait, pt);
 
@@ -1631,7 +1589,7 @@ static unsigned int poll_next(struct file *fp,
 		hfi1_rcvctrl(dd, HFI1_RCVCTRL_INTRAVAIL_ENB, uctxt);
 		pollflag = 0;
 	} else {
-		pollflag = POLLIN | POLLRDNORM;
+		pollflag = EPOLLIN | EPOLLRDNORM;
 	}
 	spin_unlock_irq(&dd->uctxt_lock);
 

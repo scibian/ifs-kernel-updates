@@ -44,13 +44,16 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-
+#include "compat.h"
 #include <linux/mm.h>
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-#include <linux/sched/signal.h>
-#else
+
+#ifdef NEED_SCHED_H
 #include <linux/sched.h>
+#else
+#include <linux/sched/signal.h>
 #endif
+
+
 #include <linux/device.h>
 #include <linux/module.h>
 
@@ -95,9 +98,13 @@ bool hfi1_can_pin_pages(struct hfi1_devdata *dd, struct mm_struct *mm,
 	/* Convert to number of pages */
 	size = DIV_ROUND_UP(size, PAGE_SIZE);
 
+#ifndef HAVE_ATOMIC64_PINNED_VM
 	down_read(&mm->mmap_sem);
 	pinned = mm->pinned_vm;
 	up_read(&mm->mmap_sem);
+#else
+	pinned = atomic64_read(&mm->pinned_vm);
+#endif
 
 	/* First, check the absolute limit against all pinned pages. */
 	if (pinned + npages >= ulimit && !can_lock)
@@ -115,9 +122,13 @@ int hfi1_acquire_user_pages(struct mm_struct *mm, unsigned long vaddr, size_t np
 	if (ret < 0)
 		return ret;
 
+#ifndef HAVE_ATOMIC64_PINNED_VM
 	down_write(&mm->mmap_sem);
 	mm->pinned_vm += ret;
 	up_write(&mm->mmap_sem);
+#else
+	atomic64_add(ret, &mm->pinned_vm);
+#endif
 
 	return ret;
 }
@@ -125,17 +136,15 @@ int hfi1_acquire_user_pages(struct mm_struct *mm, unsigned long vaddr, size_t np
 void hfi1_release_user_pages(struct mm_struct *mm, struct page **p,
 			     size_t npages, bool dirty)
 {
-	size_t i;
-
-	for (i = 0; i < npages; i++) {
-		if (dirty)
-			set_page_dirty_lock(p[i]);
-		put_page(p[i]);
-	}
+	put_user_pages_dirty_lock(p, npages, dirty);
 
 	if (mm) { /* during close after signal, mm can be NULL */
+#ifndef HAVE_ATOMIC64_PINNED_VM
 		down_write(&mm->mmap_sem);
 		mm->pinned_vm -= npages;
 		up_write(&mm->mmap_sem);
+#else
+		atomic64_sub(npages, &mm->pinned_vm);
+#endif
 	}
 }

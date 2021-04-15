@@ -69,6 +69,11 @@
 #define ALT_FW_SBUS_NAME "hfi1_sbus_d.fw"
 #define ALT_FW_PCIE_NAME "hfi1_pcie_d.fw"
 
+MODULE_FIRMWARE(DEFAULT_FW_8051_NAME_ASIC);
+MODULE_FIRMWARE(DEFAULT_FW_FABRIC_NAME);
+MODULE_FIRMWARE(DEFAULT_FW_SBUS_NAME);
+MODULE_FIRMWARE(DEFAULT_FW_PCIE_NAME);
+
 static uint fw_8051_load = 1;
 static uint fw_fabric_serdes_load = 1;
 static uint fw_pcie_serdes_load = 1;

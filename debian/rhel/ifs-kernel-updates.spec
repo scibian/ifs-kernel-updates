@@ -6,9 +6,9 @@ Name:           ifs-kernel-updates
 Group:		System Environment/Kernel
 Summary:        Extra kernel modules for IFS
 Version:        %(echo %{kver}|sed -e 's/-/_/g')
-Release:        1919
+Release:        1939
 License:        GPLv2
-Source0:        %{name}-3.10.0_957.el7.x86_64.tgz
+Source0:        %{name}-3.10.0_1062.el7.x86_64.tgz
 Source1:        %{name}.files
 Source2:        %{name}.conf
 BuildRoot:      %{_tmppath}/%{name}-%{version}-%{release}-root
@@ -50,7 +50,7 @@ Group: System Environment/Development
 Development header files for Intel HFI1 driver interface
 
 %prep
-%setup -qn %{name}-3.10.0_957.el7.x86_64
+%setup -qn %{name}-3.10.0_1062.el7.x86_64
 for flavor in %flavors_to_build; do
 	for mod in %modlist; do
 		rm -rf "$mod"_$flavor
@@ -77,7 +77,11 @@ for flavor in %flavors_to_build; do
 		cp -r "$mod"_$flavor $mod
 		done
 	echo rpm kernel_source %{kernel_source $flavor}
-	make -j 8 CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} M=$PWD
+	if [ -z "%mversion" ]; then
+		make -j 8 CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} M=$PWD
+	else
+		make -j 8 MVERSION=\"%mversion\" CONFIG_INFINIBAND_RDMAVT=m KDIR=%{kernel_source $flavor} M=$PWD
+	fi
 	for mod in %modlist; do
 		rm -rf "$mod"_$flavor
 		mv -f $mod "$mod"_$flavor

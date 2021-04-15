@@ -99,15 +99,10 @@ static int ipoib_set_coalesce(struct net_device *dev,
 	    coal->rx_max_coalesced_frames > 0xffff)
 		return -EINVAL;
 
-#ifdef IFS_RH75
-        ret = ib_modify_cq(priv->recv_cq, coal->rx_max_coalesced_frames,
-                           coal->rx_coalesce_usecs);
-#else
 	ret = rdma_set_cq_moderation(priv->recv_cq,
 				     coal->rx_max_coalesced_frames,
 				     coal->rx_coalesce_usecs);
-#endif
-	if (ret && ret != -ENOSYS) {
+	if (ret && ret != -EOPNOTSUPP) {
 		ipoib_warn(priv, "failed modifying CQ (%d)\n", ret);
 		return ret;
 	}

@@ -433,9 +433,7 @@ static struct hfi1_ctxtdata *qp_to_rcd(struct rvt_dev_info *rdi,
 	if (qp->ibqp.qp_num == 0)
 		ctxt = 0;
 	else
-		ctxt = ((qp->ibqp.qp_num >> dd->qos_shift) %
-			(dd->n_krcv_queues - 1)) + 1;
-
+		ctxt = hfi1_get_qp_map(dd, qp->ibqp.qp_num >> dd->qos_shift);
 	return dd->rcd[ctxt];
 }
 
@@ -598,7 +596,7 @@ static struct rvt_qp *first_qp(struct hfi1_ctxtdata *rcd,
  * Must hold the qp s_lock and the exp_lock.
  *
  * Return:
- * false if either of the conditions below are statisfied:
+ * false if either of the conditions below are satisfied:
  * 1. The list is empty or
  * 2. The indicated qp is at the head of the list and the
  *    HFI1_S_WAIT_TID_SPACE bit is set in qp->s_flags.
@@ -2120,7 +2118,6 @@ static int tid_rdma_rcv_error(struct hfi1_packet *packet,
 	trace_hfi1_tid_req_rcv_err(qp, 0, e->opcode, e->psn, e->lpsn, req);
 	if (e->opcode == TID_OP(READ_REQ)) {
 		struct ib_reth *reth;
-		u32 offset;
 		u32 len;
 		u32 rkey;
 		u64 vaddr;
@@ -2132,7 +2129,6 @@ static int tid_rdma_rcv_error(struct hfi1_packet *packet,
 		 * The requester always restarts from the start of the original
 		 * request.
 		 */
-		offset = delta_psn(psn, e->psn) * qp->pmtu;
 		len = be32_to_cpu(reth->length);
 		if (psn != e->psn || len != req->total_len)
 			goto unlock;
@@ -5513,7 +5509,10 @@ static bool _hfi1_schedule_tid_send(struct rvt_qp *qp)
 	struct hfi1_ibport *ibp =
 		to_iport(qp->ibqp.device, qp->port_num);
 	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
-	struct hfi1_devdata *dd = dd_from_ibdev(qp->ibqp.device);
+	struct hfi1_devdata *dd = ppd->dd;
+
+	if ((dd->flags & HFI1_SHUTDOWN))
+		return true;
 
 	return iowait_tid_schedule(&priv->s_iowait, ppd->hfi1_wq,
 				   priv->s_sde ?

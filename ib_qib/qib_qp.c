@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2012 - 2017 Intel Corporation.  All rights reserved.
+ * Copyright (c) 2012 - 2019 Intel Corporation.  All rights reserved.
  * Copyright (c) 2006 - 2012 QLogic Corporation.  * All rights reserved.
  * Copyright (c) 2005, 2006 PathScale, Inc. All rights reserved.
  *
@@ -126,7 +126,7 @@ static void get_map_page(struct rvt_qpn_table *qpt, struct rvt_qpn_map *map,
  * zero/one for QP type IB_QPT_SMI/IB_QPT_GSI.
  */
 int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
-#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifdef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 		  enum ib_qp_type type, u8 port, gfp_t gfp)
 #else
 		  enum ib_qp_type type, u8 port)
@@ -139,7 +139,7 @@ int qib_alloc_qpn(struct rvt_dev_info *rdi, struct rvt_qpn_table *qpt,
 	struct qib_devdata *dd = container_of(verbs_dev, struct qib_devdata,
 					      verbs_dev);
 	u16 qpt_mask = dd->qpn_mask;
-#if !HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifndef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 	gfp_t gfp = GFP_KERNEL;
 #endif
 
@@ -324,14 +324,14 @@ u32 qib_mtu_from_qp(struct rvt_dev_info *rdi, struct rvt_qp *qp, u32 pmtu)
 	return ib_mtu_enum_to_int(pmtu);
 }
 
-#if HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifdef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp, gfp_t gfp)
 #else
 void *qib_qp_priv_alloc(struct rvt_dev_info *rdi, struct rvt_qp *qp)
 #endif
 {
 	struct qib_qp_priv *priv;
-#if !HAVE_IB_QP_CREATE_USE_GFP_NOIO
+#ifndef HAVE_IB_QP_CREATE_USE_GFP_NOIO
 	gfp_t gfp = GFP_KERNEL;
 #endif
 
@@ -413,7 +413,7 @@ int qib_check_send_wqe(struct rvt_qp *qp,
 	case IB_QPT_SMI:
 	case IB_QPT_GSI:
 	case IB_QPT_UD:
-		ah = ibah_to_rvtah(wqe->ud_wr.ah);
+		ah = rvt_get_swqe_ah(wqe);
 		if (wqe->length > (1 << ah->log_pmtu))
 			return -EINVAL;
 		/* progress hint */

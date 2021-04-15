@@ -150,7 +150,11 @@ static struct kparam_string kp_txselect = {
 	.string = txselect_list,
 	.maxlen = MAX_ATTEN_LEN
 };
+#ifdef KERNEL_PARAM_NEED_CONST
+static int  setup_txselect(const char *, const struct kernel_param *);
+#else
 static int  setup_txselect(const char *, struct kernel_param *);
+#endif
 module_param_call(txselect, setup_txselect, param_get_string,
 		  &kp_txselect, S_IWUSR | S_IRUGO);
 MODULE_PARM_DESC(txselect,
@@ -3788,7 +3792,6 @@ static void qib_7322_put_tid(struct qib_devdata *dd, u64 __iomem *tidptr,
 		pa = chippa;
 	}
 	writeq(pa, tidptr);
-	mmiowb();
 }
 
 /**
@@ -4435,10 +4438,8 @@ static void qib_update_7322_usrhead(struct qib_ctxtdata *rcd, u64 hd,
 		adjust_rcv_timeout(rcd, npkts);
 	if (updegr)
 		qib_write_ureg(rcd->dd, ur_rcvegrindexhead, egrhd, rcd->ctxt);
-	mmiowb();
 	qib_write_ureg(rcd->dd, ur_rcvhdrhead, hd, rcd->ctxt);
 	qib_write_ureg(rcd->dd, ur_rcvhdrhead, hd, rcd->ctxt);
-	mmiowb();
 }
 
 static u32 qib_7322_hdrqempty(struct qib_ctxtdata *rcd)
@@ -6136,7 +6137,11 @@ static void set_no_qsfp_atten(struct qib_devdata *dd, int change)
 }
 
 /* handle the txselect parameter changing */
-static int setup_txselect(const char *str, struct kernel_param *kp)
+#ifdef KERNEL_PARAM_NEED_CONST
+static int  setup_txselect(const char *str, const struct kernel_param *kp)
+#else
+static int  setup_txselect(const char *str, struct kernel_param *kp)
+#endif
 {
 	struct qib_devdata *dd;
 	unsigned long val;

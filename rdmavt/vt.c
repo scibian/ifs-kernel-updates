@@ -89,7 +89,7 @@ module_exit(rvt_cleanup);
  */
 struct rvt_dev_info *rvt_alloc_device(size_t size, int nports)
 {
-	struct rvt_dev_info *rdi = ERR_PTR(-ENOMEM);
+	struct rvt_dev_info *rdi;
 
 	rdi = container_of(_ib_alloc_device(size), struct rvt_dev_info, ibdev);
 	if (!rdi)
@@ -222,7 +222,8 @@ static int rvt_modify_port(struct ib_device *ibdev, u8 port_num,
  * rvt_query_pkey - Return a pkey from the table at a given index
  * @ibdev: Verbs IB dev
  * @port_num: Port number, 1 based from ib core
- * @intex: Index into pkey table
+ * @index: Index into pkey table
+ * @pkey: returned pkey from the port pkey table
  *
  * Return: 0 on failure pkey otherwise
  */
@@ -253,7 +254,7 @@ static int rvt_query_pkey(struct ib_device *ibdev, u8 port_num, u16 index,
  * rvt_query_gid - Return a gid from the table
  * @ibdev: Verbs IB dev
  * @port_num: Port number, 1 based from ib core
- * @index: = Index in table
+ * @guid_index: Index in table
  * @gid: Gid to return
  *
  * Return: 0 on success
@@ -283,41 +284,36 @@ static int rvt_query_gid(struct ib_device *ibdev, u8 port_num,
 					 &gid->global.interface_id);
 }
 
-struct rvt_ucontext {
-	struct ib_ucontext ibucontext;
-};
-
 static inline struct rvt_ucontext *to_iucontext(struct ib_ucontext
 						*ibucontext)
 {
 	return container_of(ibucontext, struct rvt_ucontext, ibucontext);
 }
 
+#ifdef HAVE_CORE_ALLOC_UCONTEXT
 /**
  * rvt_alloc_ucontext - Allocate a user context
- * @ibdev: Vers IB dev
- * @data: User data allocated
+ * @uctx: Verbs context
+ * @udata: User data allocated
  */
-static struct ib_ucontext *rvt_alloc_ucontext(struct ib_device *ibdev,
-					      struct ib_udata *udata)
+static int rvt_alloc_ucontext(struct ib_ucontext *uctx, struct ib_udata *udata)
 {
-	struct rvt_ucontext *context;
-
-	context = kmalloc(sizeof(*context), GFP_KERNEL);
-	if (!context)
-		return ERR_PTR(-ENOMEM);
-	return &context->ibucontext;
+	return 0;
 }
 
 /**
- *rvt_dealloc_ucontext - Free a user context
- *@context - Free this
+ * rvt_dealloc_ucontext - Free a user context
+ * @context - Free this
  */
-static int rvt_dealloc_ucontext(struct ib_ucontext *context)
+static void rvt_dealloc_ucontext(struct ib_ucontext *context)
 {
-	kfree(to_iucontext(context));
-	return 0;
+	return;
 }
+#else
+struct ib_ucontext *compat_rvt_alloc_ucontext(struct ib_device *ibdev,
+					      struct ib_udata *udata);
+int compat_rvt_dealloc_ucontext(struct ib_ucontext *context);
+#endif
 
 static int rvt_get_port_immutable(struct ib_device *ibdev, u8 port_num,
 				  struct ib_port_immutable *immutable)
@@ -392,23 +388,67 @@ enum {
 };
 
 static const struct ib_device_ops rvt_dev_ops = {
+#ifdef DEVICE_OPS_HAVE_ABI_VER
+	.uverbs_abi_ver = RVT_UVERBS_ABI_VERSION,
+#endif
+
 	.alloc_fmr = rvt_alloc_fmr,
 	.alloc_mr = rvt_alloc_mr,
+#ifndef HAVE_CORE_ALLOC_PD
+	.alloc_pd = compat_rvt_alloc_pd,
+#else
 	.alloc_pd = rvt_alloc_pd,
+#endif
+#ifndef HAVE_CORE_ALLOC_UCONTEXT
+	.alloc_ucontext = compat_rvt_alloc_ucontext,
+#else
 	.alloc_ucontext = rvt_alloc_ucontext,
+#endif
 	.attach_mcast = rvt_attach_mcast,
+#ifndef HAVE_CORE_ALLOC_PD
+	.create_ah = compat_rvt_create_ah,
+#else
 	.create_ah = rvt_create_ah,
+#endif
+#ifndef HAVE_CORE_ALLOC_CQ
+	.create_cq = compat_rvt_create_cq,
+#else
 	.create_cq = rvt_create_cq,
+#endif
 	.create_qp = rvt_create_qp,
+#ifndef HAVE_CORE_ALLOC_SRQ
+	.create_srq = compat_rvt_create_srq,
+#else
 	.create_srq = rvt_create_srq,
+#endif
 	.dealloc_fmr = rvt_dealloc_fmr,
+#ifndef HAVE_CORE_ALLOC_PD
+	.dealloc_pd = compat_rvt_dealloc_pd,
+#else
 	.dealloc_pd = rvt_dealloc_pd,
+#endif
+#ifndef HAVE_CORE_ALLOC_UCONTEXT
+	.dealloc_ucontext = compat_rvt_dealloc_ucontext,
+#else
 	.dealloc_ucontext = rvt_dealloc_ucontext,
+#endif
 	.dereg_mr = rvt_dereg_mr,
+#ifndef HAVE_CORE_ALLOC_PD
+	.destroy_ah = compat_rvt_destroy_ah,
+#else
 	.destroy_ah = rvt_destroy_ah,
+#endif
+#ifndef HAVE_CORE_ALLOC_CQ
+	.destroy_cq = compat_rvt_destroy_cq,
+#else
 	.destroy_cq = rvt_destroy_cq,
+#endif
 	.destroy_qp = rvt_destroy_qp,
+#ifndef HAVE_CORE_ALLOC_SRQ
+	.destroy_srq = compat_rvt_destroy_srq,
+#else
 	.destroy_srq = rvt_destroy_srq,
+#endif
 	.detach_mcast = rvt_detach_mcast,
 	.get_dma_mr = rvt_get_dma_mr,
 	.get_port_immutable = rvt_get_port_immutable,
@@ -435,6 +475,21 @@ static const struct ib_device_ops rvt_dev_ops = {
 	.req_notify_cq = rvt_req_notify_cq,
 	.resize_cq = rvt_resize_cq,
 	.unmap_fmr = rvt_unmap_fmr,
+#ifdef HAVE_CORE_ALLOC_AH
+	INIT_RDMA_OBJ_SIZE(ib_ah, rvt_ah, ibah),
+#endif
+#ifdef HAVE_CORE_ALLOC_CQ
+	INIT_RDMA_OBJ_SIZE(ib_cq, rvt_cq, ibcq),
+#endif
+#ifdef HAVE_CORE_ALLOC_PD
+	INIT_RDMA_OBJ_SIZE(ib_pd, rvt_pd, ibpd),
+#endif
+#ifdef HAVE_CORE_ALLOC_SRQ
+	INIT_RDMA_OBJ_SIZE(ib_srq, rvt_srq, ibsrq),
+#endif
+#ifdef HAVE_CORE_ALLOC_UCONTEXT
+	INIT_RDMA_OBJ_SIZE(ib_ucontext, rvt_ucontext, ibucontext),
+#endif
 };
 
 static noinline int check_support(struct rvt_dev_info *rdi, int verb)
@@ -445,7 +500,11 @@ static noinline int check_support(struct rvt_dev_info *rdi, int verb)
 		 * These functions are not part of verbs specifically but are
 		 * required for rdmavt to function.
 		 */
+#ifndef HAVE_IBDEV_INIT_PORT
 		if ((!rdi->driver_f.port_callback) ||
+#else
+		if ((!rdi->ibdev.ops.init_port) ||
+#endif
 		    (!rdi->driver_f.get_pci_dev))
 			return -EINVAL;
 		break;
@@ -567,7 +626,12 @@ static noinline int check_support(struct rvt_dev_info *rdi, int verb)
  *
  * Return: 0 on success otherwise an errno.
  */
+#ifndef IB_DEVICE_OPS_DRIVER_ID
+#undef rvt_register_device
 int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id)
+#else
+int rvt_register_device(struct rvt_dev_info *rdi)
+#endif
 {
 	int ret = 0, i;
 
@@ -625,14 +689,14 @@ int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id)
 	spin_lock_init(&rdi->n_cqs_lock);
 
 	/* DMA Operations */
-#if !defined(IFS_RH73) && !defined(IFS_RH74) && !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_SLES12SP2) && !defined(IFS_SLES12SP3)
-	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
-#elif defined(IFS_RH75) || defined(IFS_RH76) || defined(IFS_RH77)
+#ifdef NEED_RVT_DMA_MAPPINGS
+        rdi->ibdev.dma_ops =
+		rdi->ibdev.dma_ops ? : &rvt_default_dma_mapping_ops;
+#elif defined(HAVE_DEVICE_RH)
 	rdi->ibdev.dev.device_rh->dma_ops =
 		rdi->ibdev.dev.device_rh->dma_ops ? : &dma_virt_ops;
 #else
-	rdi->ibdev.dma_ops =
-		rdi->ibdev.dma_ops ? : &rvt_default_dma_mapping_ops;
+	rdi->ibdev.dev.dma_ops = rdi->ibdev.dev.dma_ops ? : &dma_virt_ops;
 #endif
 	/* Protection Domain */
 	spin_lock_init(&rdi->n_pds_lock);
@@ -644,7 +708,9 @@ int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id)
 	 * exactly which functions rdmavt supports, nor do they know the ABI
 	 * version, so we do all of this sort of stuff here.
 	 */
+#ifndef DEVICE_OPS_HAVE_ABI_VER
 	rdi->ibdev.uverbs_abi_ver = RVT_UVERBS_ABI_VERSION;
+#endif
 	rdi->ibdev.uverbs_cmd_mask =
 		(1ull << IB_USER_VERBS_CMD_GET_CONTEXT)         |
 		(1ull << IB_USER_VERBS_CMD_QUERY_DEVICE)        |
@@ -681,11 +747,12 @@ int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id)
 		rdi->ibdev.num_comp_vectors = 1;
 
 	/* We are now good to announce we exist */
-#if defined(IFS_SLES12SP5) || defined(IFS_SLES15SP1) || defined(IFS_RH80) || defined(IFS_RH81) || defined(IFS_RH77)
+#ifdef HAVE_IBDEV_DRIVER_ID
+#ifndef IB_DEVICE_OPS_DRIVER_ID
 	rdi->ibdev.driver_id = driver_id;
 #endif
-	ret = ib_register_device(&rdi->ibdev, dev_name(&rdi->ibdev.dev),
-				 rdi->driver_f.port_callback);
+#endif
+	ret = ib_register_device(&rdi->ibdev, dev_name(&rdi->ibdev.dev));
 	if (ret) {
 		rvt_pr_err(rdi, "Failed to register driver with ib core.\n");
 		goto bail_wss;

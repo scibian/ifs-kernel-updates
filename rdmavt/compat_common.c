@@ -93,7 +93,235 @@ void hfi1_vnic_cleanup(struct hfi1_devdata *dd)
 {
 }
 EXPORT_SYMBOL(hfi1_vnic_cleanup);
-#if !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_RH80) && !defined(IFS_RH81)
+
+#ifndef HAVE_CORE_ALLOC_AH
+#undef rvt_create_ah
+int rvt_create_ah(struct ib_ah *ibah, struct rdma_ah_attr *ah_attr,
+                  u32 create_flags, struct ib_udata *udata);
+#ifdef CREATE_AH_HAS_FLAGS
+struct ib_ah *compat_rvt_create_ah(struct ib_pd *pd,
+				   struct rdma_ah_attr *ah_attr,
+				   u32 create_flags, struct ib_udata *udata)
+#elif defined(CREATE_AH_HAS_UDATA)
+struct ib_ah *compat_rvt_create_ah(struct ib_pd *pd,
+				   struct rdma_ah_attr *ah_attr,
+				   struct ib_udata *udata)
+#else
+struct ib_ah *compat_rvt_create_ah(struct ib_pd *pd,
+				   struct rdma_ah_attr *ah_attr)
+#endif
+{
+	struct rvt_ah *ah;
+	int ret;
+
+	ah = kzalloc(sizeof(*ah), GFP_ATOMIC);
+	if (!ah)
+		return ERR_PTR(-ENOMEM);
+
+	ah->ibah.device = pd->device;
+	ah->ibah.pd = pd;
+
+	ret = rvt_create_ah((struct ib_ah *)ah, ah_attr
+#ifdef CREATE_AH_HAS_FLAGS
+			    , create_flags, udata);
+#elif defined(CREATE_AH_HAS_UDATA)
+			    ,0 , udata);
+#else
+			    ,0, NULL);
+#endif
+	if (ret) {
+		kfree(ah);
+		return ERR_PTR(ret);
+	}
+	return (struct ib_ah *)ah;
+}
+
+#define rvt_create_ah compat_rvt_create_ah
+
+#undef rvt_destroy_ah
+void rvt_destroy_ah(struct ib_ah *ibah, u32 destroy_flags);
+#ifdef DESTROY_AH_HAS_UDATA
+int compat_rvt_destroy_ah(struct ib_ah *ibah, u32 destroy_flags,
+			  struct ib_udata *udata)
+#elif defined(DESTROY_AH_HAS_FLAGS)
+int compat_rvt_destroy_ah(struct ib_ah *ibah, u32 destroy_flags)
+#else
+int compat_rvt_destroy_ah(struct ib_ah *ibah)
+#endif
+{
+	struct rvt_ah *ah = ibah_to_rvtah(ibah);;
+
+	rvt_destroy_ah(ibah, 0);
+
+	kfree(ah);
+	return 0;
+}
+
+#endif
+
+#ifndef HAVE_CORE_ALLOC_PD
+int rvt_alloc_pd(struct ib_pd *pd, struct ib_ucontext *context,
+		 struct ib_udata *udata);
+
+struct ib_pd *
+compat_rvt_alloc_pd(struct ib_device *ibdev,
+		    struct ib_ucontext *context,
+		    struct ib_udata *udata)
+{
+	struct rvt_pd *pd;
+	struct ib_pd *ibpd;
+	int ret;
+
+	pd = kzalloc(sizeof(*pd), GFP_KERNEL);
+	if (!pd)
+		return ERR_PTR(-ENOMEM);
+	pd->ibpd.device = ibdev;
+	ret = rvt_alloc_pd(&pd->ibpd, context, udata);
+	if (ret)
+		goto bail;
+	return &pd->ibpd;
+bail:
+	ibpd = ERR_PTR(ret);
+ 	kfree(pd);
+	return ibpd;
+}
+
+#undef rvt_dealloc_pd
+#ifdef DEALLOC_PD_HAS_UDATA
+void rvt_dealloc_pd(struct ib_pd *ibpd, struct ib_udata *udata);
+#else
+void rvt_dealloc_pd(struct ib_pd *ibpd);
+#endif
+int
+compat_rvt_dealloc_pd(struct ib_pd *ibpd)
+{
+#ifdef DEALLOC_PD_HAS_UDATA
+	rvt_dealloc_pd(ibpd, NULL);
+#else
+	rvt_dealloc_pd(ibpd);
+#endif
+	kfree(ibpd);
+	return 0;
+}
+#endif
+
+#ifndef HAVE_CORE_ALLOC_UCONTEXT
+struct ib_ucontext *compat_rvt_alloc_ucontext(struct ib_device *ibdev,
+					      struct ib_udata *udata)
+{
+	struct rvt_ucontext *context;
+
+	context = kzalloc(sizeof(*context), GFP_KERNEL);
+	if (!context)
+		return ERR_PTR(-ENOMEM);
+	return &context->ibucontext;
+}
+
+int compat_rvt_dealloc_ucontext(struct ib_ucontext *context)
+{
+	kfree(container_of(context, struct rvt_ucontext, ibucontext));
+	return 0;
+}
+#endif
+
+#ifndef HAVE_CORE_ALLOC_SRQ
+int rvt_create_srq(struct ib_srq *ibsrq, struct ib_srq_init_attr *srq_init_attr,
+		   struct ib_udata *udata);
+
+struct ib_srq *compat_rvt_create_srq(struct ib_pd *ibpd,
+				     struct ib_srq_init_attr *srq_init_attr,
+				     struct ib_udata *udata)
+{
+	struct rvt_dev_info *dev = ib_to_rvt(ibpd->device);
+	struct rvt_srq *srq;
+	int ret;
+
+	srq = kzalloc_node(sizeof(*srq), GFP_KERNEL, dev->dparms.node);
+	if (!srq)
+		return ERR_PTR(-ENOMEM);
+
+	srq->ibsrq.device = ibpd->device;
+	srq->ibsrq.pd = ibpd;
+	ret = rvt_create_srq(&srq->ibsrq, srq_init_attr, udata);
+	if (ret) {
+		kfree(srq);
+		return ERR_PTR(ret);
+	}
+	return &srq->ibsrq;
+}
+
+void rvt_destroy_srq(struct ib_srq *ibsrq, struct ib_udata *udata);
+
+int compat_rvt_destroy_srq(struct ib_srq *ibsrq, struct ib_udata *udata)
+{
+	struct rvt_srq *srq = ibsrq_to_rvtsrq(ibsrq);
+
+	rvt_destroy_srq(ibsrq, udata);
+	kfree(srq);
+	return 0;
+}
+#endif
+
+#ifndef IB_DEVICE_OPS_DRIVER_ID
+#undef rvt_register_device
+int rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id);
+int compat_rvt_register_device(struct rvt_dev_info *rdi, u32 driver_id)
+{
+	return rvt_register_device(rdi, driver_id);
+}
+EXPORT_SYMBOL(compat_rvt_register_device);
+#endif
+
+#ifndef HAVE_CORE_ALLOC_CQ
+int rvt_create_cq(struct ib_cq *ibcq, const struct ib_cq_init_attr *attr,
+#ifndef NO_IB_UCONTEXT
+		  struct ib_ucontext *context,
+#endif
+		  struct ib_udata *udata);
+
+struct ib_cq *compat_rvt_create_cq(struct ib_device *ibdev,
+				   const struct ib_cq_init_attr *attr,
+#ifndef NO_IB_UCONTEXT
+				   struct ib_ucontext *context,
+#endif
+				   struct ib_udata *udata)
+{
+	struct rvt_dev_info *rdi = ib_to_rvt(ibdev);
+	struct rvt_cq *cq;
+	int ret;
+
+	/* Allocate the completion queue structure. */
+	cq = kzalloc_node(sizeof(*cq), GFP_KERNEL, rdi->dparms.node);
+	if (!cq)
+		return ERR_PTR(-ENOMEM);
+
+	cq->ibcq.device = ibdev;
+	ret = rvt_create_cq(&cq->ibcq, attr,
+#ifndef NO_IB_UCONTEXT
+			    context,
+#endif
+			    udata);
+	if (ret) {
+		kfree(cq);
+		return ERR_PTR(ret);
+	}
+	return &cq->ibcq;
+}
+
+void rvt_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata);
+
+int compat_rvt_destroy_cq(struct ib_cq *ibcq, struct ib_udata *udata)
+{
+	struct rvt_cq *cq = ibcq_to_rvtcq(ibcq);
+
+	rvt_destroy_cq(ibcq, udata);
+	kfree(cq);
+
+	return 0;
+}
+#endif
+
+#ifdef NEED_PCI_REQUEST_IRQ
 /*
  * pci_request_irq - allocate an interrupt line for a PCI device
  * @dev:       PCI device to operate on
@@ -152,7 +380,7 @@ void pci_free_irq(struct pci_dev *dev, unsigned int nr, void *dev_id)
 }
 EXPORT_SYMBOL(pci_free_irq);
 #endif
-#if !defined(IFS_RH75) && !defined(IFS_RH76) && !defined(IFS_RH77) && !defined(IFS_RH80) && !defined(IFS_RH81) && !defined(IFS_SLES15) && !defined(IFS_SLES15SP1) && !defined(IFS_SLES12SP4) && !defined(IFS_SLES12SP5)
+#ifdef NEED_CDEV_SET_PARENT
 /**
  * cdev_set_parent() - set the parent kobject for a char device
  * @p: the cdev structure

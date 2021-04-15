@@ -365,10 +365,8 @@ static inline void hfi1_make_ruc_header_9B(struct rvt_qp *qp,
 {
 	struct hfi1_qp_priv *priv = qp->priv;
 	struct hfi1_ibport *ibp = ps->ibp;
-	struct hfi1_pportdata *ppd = ppd_from_ibp(ibp);
 	u16 pkey = hfi1_get_pkey(ibp, qp->s_pkey_index);
 	u16 lrh0 = HFI1_LRH_BTH;
-	u16 slid;
 	u8 extra_bytes = -ps->s_txreq->s_cur_size & 3;
 	u32 nwords = SIZE_OF_CRC + ((ps->s_txreq->s_cur_size +
 					 extra_bytes) >> 2);
@@ -406,13 +404,6 @@ static inline void hfi1_make_ruc_header_9B(struct rvt_qp *qp,
 	bth0 |= pkey;
 	bth0 |= extra_bytes << 20;
 	hfi1_make_ruc_bth(qp, ohdr, bth0, bth1, bth2);
-
-	if (!ppd->lid)
-		slid = be16_to_cpu(IB_LID_PERMISSIVE);
-	else
-		slid = ppd->lid |
-			(rdma_ah_get_path_bits(&qp->remote_ah_attr) &
-			((1 << ppd->lmc) - 1));
 	hfi1_make_ib_hdr(&ps->s_txreq->phdr.hdr.ibh,
 			 lrh0,
 			 ps->s_txreq->hdr_dwords + nwords,
@@ -531,7 +522,7 @@ void _hfi1_do_send(struct work_struct *work)
 
 /**
  * hfi1_do_send - perform a send on a QP
- * @work: contains a pointer to the QP
+ * @qp: a pointer to the QP
  * @in_thread: true if in a workqueue thread
  *
  * Process entries in the send work queue until credit or queue is

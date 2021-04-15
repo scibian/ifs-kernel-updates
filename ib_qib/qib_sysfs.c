@@ -301,6 +301,9 @@ static ssize_t qib_portattr_show(struct kobject *kobj,
 	struct qib_pportdata *ppd =
 		container_of(kobj, struct qib_pportdata, pport_kobj);
 
+	if (!pattr->show)
+		return -EIO;
+
 	return pattr->show(ppd, buf);
 }
 
@@ -311,6 +314,9 @@ static ssize_t qib_portattr_store(struct kobject *kobj,
 		container_of(attr, struct qib_port_attr, attr);
 	struct qib_pportdata *ppd =
 		container_of(kobj, struct qib_pportdata, pport_kobj);
+
+	if (!pattr->store)
+		return -EIO;
 
 	return pattr->store(ppd, buf, len);
 }
@@ -551,30 +557,21 @@ static struct kobj_type qib_diagc_ktype = {
  * Start of per-unit (or driver, in some cases, but replicated
  * per unit) functions (these get a device *)
  */
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_rev(struct device *device, struct device_attribute *attr,
-			char *buf)
-#else
 static ssize_t hw_rev_show(struct device *device, struct device_attribute *attr,
 			   char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 
 	return sprintf(buf, "%x\n", dd_from_dev(dev)->minrev);
 }
+static DEVICE_ATTR_RO(hw_rev);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_hca(struct device *device, struct device_attribute *attr,
-			char *buf)
-#else
 static ssize_t hca_type_show(struct device *device,
 			     struct device_attribute *attr, char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 	int ret;
 
@@ -584,61 +581,46 @@ static ssize_t hca_type_show(struct device *device,
 		ret = scnprintf(buf, PAGE_SIZE, "%s\n", dd->boardname);
 	return ret;
 }
+static DEVICE_ATTR_RO(hca_type);
+static DEVICE_ATTR(board_id, 0444, hca_type_show, NULL);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_version(struct device *device,
-			    struct device_attribute *attr, char *buf)
-#else
 static ssize_t version_show(struct device *device,
 			    struct device_attribute *attr, char *buf)
-#endif
 {
 	/* The string printed here is already newline-terminated. */
 	return scnprintf(buf, PAGE_SIZE, "%s", (char *)ib_qib_version);
 }
+static DEVICE_ATTR_RO(version);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_boardversion(struct device *device,
-				 struct device_attribute *attr, char *buf)
-#else
 static ssize_t boardversion_show(struct device *device,
 				 struct device_attribute *attr, char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 
 	/* The string printed here is already newline-terminated. */
 	return scnprintf(buf, PAGE_SIZE, "%s", dd->boardversion);
 }
+static DEVICE_ATTR_RO(boardversion);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_localbus_info(struct device *device,
-				  struct device_attribute *attr, char *buf)
-#else
 static ssize_t localbus_info_show(struct device *device,
 				  struct device_attribute *attr, char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 
 	/* The string printed here is already newline-terminated. */
 	return scnprintf(buf, PAGE_SIZE, "%s", dd->lbus_info);
 }
+static DEVICE_ATTR_RO(localbus_info);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_nctxts(struct device *device,
-			   struct device_attribute *attr, char *buf)
-#else
 static ssize_t nctxts_show(struct device *device,
 			   struct device_attribute *attr, char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 
 	/* Return the number of user ports (contexts) available. */
@@ -648,33 +630,25 @@ static ssize_t nctxts_show(struct device *device,
 			(dd->first_user_ctxt > dd->cfgctxts) ? 0 :
 			(dd->cfgctxts - dd->first_user_ctxt));
 }
+static DEVICE_ATTR_RO(nctxts);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_nfreectxts(struct device *device,
-			   struct device_attribute *attr, char *buf)
-#else
 static ssize_t nfreectxts_show(struct device *device,
 			       struct device_attribute *attr, char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 
 	/* Return the number of free user ports (contexts) available. */
 	return scnprintf(buf, PAGE_SIZE, "%u\n", dd->freectxts);
 }
+static DEVICE_ATTR_RO(nfreectxts);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_serial(struct device *device,
-			   struct device_attribute *attr, char *buf)
-#else
 static ssize_t serial_show(struct device *device,
 			   struct device_attribute *attr, char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 
 	buf[sizeof(dd->serial)] = '\0';
@@ -682,19 +656,14 @@ static ssize_t serial_show(struct device *device,
 	strcat(buf, "\n");
 	return strlen(buf);
 }
+static DEVICE_ATTR_RO(serial);
 
-#if !defined (IFS_SLES15SP1)
-static ssize_t store_chip_reset(struct device *device,
-				struct device_attribute *attr, const char *buf,
-				size_t count)
-#else
 static ssize_t chip_reset_store(struct device *device,
 				struct device_attribute *attr, const char *buf,
 				size_t count)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 	int ret;
 
@@ -707,20 +676,16 @@ static ssize_t chip_reset_store(struct device *device,
 bail:
 	return ret < 0 ? ret : count;
 }
+static DEVICE_ATTR_WO(chip_reset);
 
 /*
  * Dump tempsense regs. in decimal, to ease shell-scripts.
  */
-#if !defined (IFS_SLES15SP1)
-static ssize_t show_tempsense(struct device *device,
-			      struct device_attribute *attr, char *buf)
-#else
 static ssize_t tempsense_show(struct device *device,
 			      struct device_attribute *attr, char *buf)
-#endif
 {
 	struct qib_ibdev *dev =
-		container_of(device, struct qib_ibdev, rdi.ibdev.dev);
+		rdma_device_to_drv_device(device, struct qib_ibdev, rdi.ibdev);
 	struct qib_devdata *dd = dd_from_dev(dev);
 	int ret;
 	int idx;
@@ -744,52 +709,14 @@ static ssize_t tempsense_show(struct device *device,
 				*(signed char *)(regvals + 7));
 	return ret;
 }
+static DEVICE_ATTR_RO(tempsense);
 
 /*
  * end of per-unit (or driver, in some cases, but replicated
  * per unit) functions
  */
-#if !defined (IFS_SLES15SP1)
+
 /* start of per-unit file structures and support code */
-static DEVICE_ATTR(hw_rev, S_IRUGO, show_rev, NULL);
-static DEVICE_ATTR(hca_type, S_IRUGO, show_hca, NULL);
-static DEVICE_ATTR(board_id, S_IRUGO, show_hca, NULL);
-static DEVICE_ATTR(version, S_IRUGO, show_version, NULL);
-static DEVICE_ATTR(nctxts, S_IRUGO, show_nctxts, NULL);
-static DEVICE_ATTR(nfreectxts, S_IRUGO, show_nfreectxts, NULL);
-static DEVICE_ATTR(serial, S_IRUGO, show_serial, NULL);
-static DEVICE_ATTR(boardversion, S_IRUGO, show_boardversion, NULL);
-static DEVICE_ATTR(tempsense, S_IRUGO, show_tempsense, NULL);
-static DEVICE_ATTR(localbus_info, S_IRUGO, show_localbus_info, NULL);
-static DEVICE_ATTR(chip_reset, S_IWUSR, NULL, store_chip_reset);
-
-static struct device_attribute *qib_attributes[] = {
-	&dev_attr_hw_rev,
-	&dev_attr_hca_type,
-	&dev_attr_board_id,
-	&dev_attr_version,
-	&dev_attr_nctxts,
-	&dev_attr_nfreectxts,
-	&dev_attr_serial,
-	&dev_attr_boardversion,
-	&dev_attr_tempsense,
-	&dev_attr_localbus_info,
-	&dev_attr_chip_reset,
-};
-#else
-
-static DEVICE_ATTR_RO(hw_rev);
-static DEVICE_ATTR_RO(hca_type);
-static DEVICE_ATTR(board_id, 0444, hca_type_show, NULL);
-static DEVICE_ATTR_RO(version);
-static DEVICE_ATTR_RO(boardversion);
-static DEVICE_ATTR_RO(localbus_info);
-static DEVICE_ATTR_RO(nctxts);
-static DEVICE_ATTR_RO(nfreectxts);
-static DEVICE_ATTR_RO(serial);
-static DEVICE_ATTR_WO(chip_reset);
-static DEVICE_ATTR_RO(tempsense);
-
 static struct attribute *qib_attributes[] = {
 	&dev_attr_hw_rev.attr,
 	&dev_attr_hca_type.attr,
@@ -808,7 +735,7 @@ static struct attribute *qib_attributes[] = {
 const struct attribute_group qib_attr_group = {
 	.attrs = qib_attributes,
 };
-#endif
+
 int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 			  struct kobject *kobj)
 {
@@ -907,7 +834,7 @@ bail:
 	return ret;
 }
 
-#if !defined (IFS_SLES15SP1)
+#ifndef HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
 /*
  * Register and create our files in /sys/class/infiniband.
  */
@@ -916,16 +843,25 @@ int qib_verbs_register_sysfs(struct qib_devdata *dd)
 	struct ib_device *dev = &dd->verbs_dev.rdi.ibdev;
 	int i, ret;
 
-	for (i = 0; i < ARRAY_SIZE(qib_attributes); ++i) {
-		ret = device_create_file(&dev->dev, qib_attributes[i]);
+	for (i = 0; qib_attributes[i]; ++i) {
+		struct device_attribute *d =
+			container_of(qib_attributes[i],
+				     struct device_attribute, attr);
+
+		ret = device_create_file(&dev->dev, d);
 		if (ret)
 			goto bail;
 	}
 
 	return 0;
 bail:
-	for (i = 0; i < ARRAY_SIZE(qib_attributes); ++i)
-		device_remove_file(&dev->dev, qib_attributes[i]);
+	for (i = 0; qib_attributes[i]; ++i) {
+		struct device_attribute *d =
+			container_of(qib_attributes[i],
+				     struct device_attribute, attr);
+
+		device_remove_file(&dev->dev, d);
+	}
 	return ret;
 }
 #endif

@@ -44,33 +44,51 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  */
-#if !defined(RH76_COMPAT_H)
-#define RH76_COMPAT_H
+#if !defined(RH77_COMPAT_H)
+#define RH77_COMPAT_H
 
+#define HAVE_IB_GID_ATTR
+#define POST_HAS_CONST
+#define CREATE_FLOW_HAS_UDATA
 #define CREATE_AH_HAS_UDATA
 #define HAVE_ALLOC_RDMA_NETDEV
-#define NEED_MM_HELPER_FUNCTIONS
+#define HAVE_RDMA_NETDEV_GET_PARAMS
+#define HAVE_NET_DEVICE_EXTENDED
+#define HAVE_ARRAY_SIZE
 #define HAVE_NOSPEC_H
+#define VM_OPS_FAULT_HAVE_VMA
+#define HAVE_MAX_SEND_SGE
+#define HAVE_KMALLOC_ARRAY_NODE
+#define HAVE_IBDEV_DRIVER_ID
+#define HAVE_IB_GET_CACHED_SUBNET_PREFIX
+#define HAVE_SECURITY_H
+#define HAVE_AIO_WRITE
+#define HAVE_DEVICE_RH
+#define NEED_KTHREAD_HELPER_FUNCTIONS
+#define NEED_CURRENT_TIME
+#define HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
+#define NEED_POLL_T
+#define HAVE_RDMA_COPY_AH_ATTR
+#define NEED_FILE_FINISH
+#define NEED_PCI_BRIDGE_SECONDARY_BUS_RESET
+#define HAS_PORT_IMMUTABLE
 
 #include "compat_common.h"
 
 #define __GFP_RECLAIM	(__GFP_WAIT)
-
-#define IB_QP_CREATE_USE_GFP_NOIO (1 << 7)
-
 
 #define IB_FW_VERSION_NAME_MAX			  ETHTOOL_FWVERS_LEN
 #define OPA_CLASS_PORT_INFO_PR_SUPPORT BIT(26)
 
 #define NET_NAME_UNKNOWN 0
 
-#define rdma_create_ah(a, b, c) rdma_create_ah(a, b)
-#define rdma_destroy_ah(a, b) rdma_destroy_ah(a)
-
-#define ib_register_device(a, b, c)  ib_register_device((a), (c))
-#define rdma_set_device_sysfs_group(a, b)
+#define ib_register_device(a, b)  \
+	ib_register_device((a), (b), (rdi->driver_f.port_callback))
 #define alloc_netdev_mqs(size, name, name_assign_type, setup, sdma, ctxts) \
 	alloc_netdev_mqs((size), (name), (setup), (sdma), (ctxts))
+
+#define rdma_create_ah(a, b, c) rdma_create_ah(a, b)
+#define rdma_destroy_ah(a, b) rdma_destroy_ah(a)
 #undef access_ok
 #define access_ok(addr, size) \
 	(likely(__range_not_ok(addr, size, user_addr_max()) == 0))
@@ -124,4 +142,4 @@ static inline void hfi1_enable_intx(struct pci_dev *pdev)
 #define for_each_msi_entry(desc, dev)   \
 	list_for_each_entry((desc), dev_to_msi_list((dev)), list)
 
-#endif //RH76_COMPAT
+#endif //RH77_COMPAT

@@ -1412,16 +1412,14 @@ static inline u32 qib_get_hdrqtail(const struct qib_ctxtdata *rcd)
  */
 
 extern const char ib_qib_version[];
-#if defined (IFS_SLES15SP1)
 extern const struct attribute_group qib_attr_group;
-#endif
 
 int qib_device_create(struct qib_devdata *);
 void qib_device_remove(struct qib_devdata *);
 
 int qib_create_port_files(struct ib_device *ibdev, u8 port_num,
 			  struct kobject *kobj);
-#if !defined (IFS_SLES15SP1)
+#ifndef HAVE_RDMA_SET_DEVICE_SYSFS_GROUP
 int qib_verbs_register_sysfs(struct qib_devdata *);
 #endif
 void qib_verbs_unregister_sysfs(struct qib_devdata *);

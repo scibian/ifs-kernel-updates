@@ -270,7 +270,7 @@ static void rcv_hdrerr(struct hfi1_ctxtdata *rcd, struct hfi1_pportdata *ppd,
 	    hfi1_dbg_fault_suppress_err(verbs_dev))
 		return;
 
-	if (packet->rhf & (RHF_VCRC_ERR | RHF_ICRC_ERR))
+	if (packet->rhf & RHF_ICRC_ERR)
 		return;
 
 	if (packet->etype == RHF_RCV_TYPE_BYPASS) {
@@ -397,6 +397,7 @@ static void rcv_hdrerr(struct hfi1_ctxtdata *rcd, struct hfi1_pportdata *ppd,
 				svc_type = IB_CC_SVCTYPE_UC;
 				break;
 			default:
+				rcu_read_unlock();
 				goto drop;
 			}
 
@@ -1512,7 +1513,7 @@ static int hfi1_bypass_ingress_pkt_check(struct hfi1_packet *packet)
 	if ((!(hfi1_is_16B_mcast(packet->dlid))) &&
 	    (packet->dlid !=
 		opa_get_lid(be32_to_cpu(OPA_LID_PERMISSIVE), 16B))) {
-		if (packet->dlid != ppd->lid)
+		if ((packet->dlid & ~((1 << ppd->lmc) - 1)) != ppd->lid)
 			return -EINVAL;
 	}
 
@@ -1667,7 +1668,7 @@ static inline void show_eflags_errs(struct hfi1_packet *packet)
 	u32 rte = rhf_rcv_type_err(packet->rhf);
 
 	dd_dev_err(rcd->dd,
-		   "receive context %d: rhf 0x%016llx, errs [ %s%s%s%s%s%s%s%s] rte 0x%x\n",
+		   "receive context %d: rhf 0x%016llx, errs [ %s%s%s%s%s%s%s] rte 0x%x\n",
 		   rcd->ctxt, packet->rhf,
 		   packet->rhf & RHF_K_HDR_LEN_ERR ? "k_hdr_len " : "",
 		   packet->rhf & RHF_DC_UNC_ERR ? "dc_unc " : "",
@@ -1675,7 +1676,6 @@ static inline void show_eflags_errs(struct hfi1_packet *packet)
 		   packet->rhf & RHF_TID_ERR ? "tid " : "",
 		   packet->rhf & RHF_LEN_ERR ? "len " : "",
 		   packet->rhf & RHF_ECC_ERR ? "ecc " : "",
-		   packet->rhf & RHF_VCRC_ERR ? "vcrc " : "",
 		   packet->rhf & RHF_ICRC_ERR ? "icrc " : "",
 		   rte);
 }

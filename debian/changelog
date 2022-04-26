@@ -1,3 +1,11 @@
+ifs-kernel-updates (1:3.10.0-1062-2123-1ifs+deb9sci9+opa10.10u3) scibian9+opa10.10; urgency=medium
+
+  * Bump kernel ABI to 18
+  * Disable RB_ROOT_CACHE for ABI 18
+  * Remove gbp prebuild rules
+
+ -- Rémi Palancher <remi-externe.palancher@edf.fr>  Tue, 26 Apr 2022 15:59:26 +0200
+
 ifs-kernel-updates (1:3.10.0-1062-2123-1ifs+deb9sci9+opa10.10u2) scibian9+opa10.10; urgency=medium
 
   * Bump kernel ABI to 16

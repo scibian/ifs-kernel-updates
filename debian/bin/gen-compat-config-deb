@@ -46,4 +46,7 @@ for CONF in $CONFIG_OPTS ; do
 	fi
 done
 
-
+# Debian kernel 4.9.0-18 does not support fast overlap detection in generic
+# interval tree with cached roots. Enable NO_RB_ROOT_CACHE to avoid using
+# this feature.
+set_config NO_RB_ROOT_CACHE 1

@@ -8,3 +8,4 @@ remove-ipoib.patch
 add-ipoib.patch
 port-ipoib.patch
 prevent-npe-bad_wr.patch
+check-kdir-make-clean.patch
